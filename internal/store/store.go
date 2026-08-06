@@ -45,6 +45,15 @@ func (s *Store) HasFrontend(repo, hash string) bool { return dirExists(s.Fronten
 // HasBackend reports whether the backend artifact is published.
 func (s *Store) HasBackend(repo, hash string) bool { return dirExists(s.BackendDir(repo, hash)) }
 
+// RemoveRepo deletes every published artifact and state directory for a
+// repo (repo deletion).
+func (s *Store) RemoveRepo(repo string) error {
+	if err := os.RemoveAll(filepath.Join(s.artifactsDir, repo)); err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Join(s.stateDir, repo))
+}
+
 // PublishFrontend moves srcDir into place as the frontend artifact.
 // Idempotent: if the artifact already exists it is kept as-is unless
 // overwrite is set (the --rebuild path).

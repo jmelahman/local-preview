@@ -42,6 +42,7 @@ export default defineConfig({
             { text: 'Quickstart', link: '/guide/quickstart' },
             { text: 'Concepts', link: '/guide/concepts' },
             { text: 'Configuration', link: '/guide/configuration' },
+            { text: 'External dependencies', link: '/guide/external-dependencies' },
             { text: 'Embedding', link: '/guide/embedding' },
           ],
         },

@@ -22,6 +22,7 @@ Start the orchestrator.
 | --- | --- |
 | `preview repo create <name> --source <path-or-url>` | Register a repository (mirror clone) |
 | `preview repo list` | List registered repositories |
+| `preview repo delete <name>` | Unregister a repository and delete its previews (deploys, artifacts, state, logs, mirror clone) |
 
 ## `preview deploy`
 

@@ -35,6 +35,7 @@ type Deploy struct {
 	AttemptCount int64  `json:"attempt_count"`
 	PreviewURL   string `json:"preview_url"`
 	Process      string `json:"process"`
+	FeProcess    string `json:"fe_process"`
 	CreatedAt    string `json:"created_at"`
 	UpdatedAt    string `json:"updated_at"`
 }
@@ -82,6 +83,13 @@ func (c *Client) ListRepos(ctx context.Context) ([]Repo, error) {
 		return nil, fmt.Errorf("decode repos: %w", err)
 	}
 	return repos, nil
+}
+
+// DeleteRepo unregisters a repo and deletes its deploys, artifacts, state,
+// and mirror clone.
+func (c *Client) DeleteRepo(ctx context.Context, name string) error {
+	_, err := c.do(ctx, http.MethodDelete, "/api/repos/"+url.PathEscape(name), nil)
+	return err
 }
 
 // CreateDeploy requests a deploy of ref in repo.

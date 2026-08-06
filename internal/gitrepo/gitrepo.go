@@ -102,6 +102,15 @@ func (m *Manager) Add(ctx context.Context, name, source string) (Repo, error) {
 	return Repo{Name: name, Path: dest}, nil
 }
 
+// Remove deletes the mirror clone for name. A missing clone is not an
+// error.
+func (m *Manager) Remove(name string) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	return os.RemoveAll(m.repoPath(name))
+}
+
 // Fetch updates all refs from origin, pruning deleted ones.
 func (r Repo) Fetch(ctx context.Context) error {
 	_, err := runGit(ctx, r.Path, "fetch", "--quiet", "--prune", "origin")

@@ -295,14 +295,33 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 	}
 
 	// Provision state before ready: "ready" must imply the state dir exists
-	// so the proxy's hot path never provisions anything.
-	runCfg, err := json.Marshal(m.Backend)
+	// so the proxy's hot path never provisions anything. Run configs carry
+	// the top-level networks list alongside the section — it's run-time
+	// context the supervisor needs but not part of the artifact hash.
+	runCfg, err := json.Marshal(struct {
+		manifest.Backend
+		Networks []string `json:"networks,omitempty"`
+	}{m.Backend, m.Networks})
 	if err != nil {
 		return err
 	}
 	repo, err := q.db.GetRepoByName(row.RepoName)
 	if err != nil {
 		return err
+	}
+	if len(m.Frontend.Run) > 0 {
+		feCfg, err := json.Marshal(struct {
+			manifest.Frontend
+			Networks []string `json:"networks,omitempty"`
+		}{m.Frontend, m.Networks})
+		if err != nil {
+			return err
+		}
+		if err := q.db.CreateFrontendArtifact(db.FrontendArtifact{
+			RepoID: repo.ID, FeHash: feHash, RunConfig: string(feCfg),
+		}); err != nil {
+			return err
+		}
 	}
 	return q.super.ForkOrInitStateDir(ctx, gr, repo.ID, row.RepoName, beHash, row.SHA, string(runCfg))
 }
@@ -355,6 +374,11 @@ func (q *Queue) buildFrontend(ctx context.Context, row db.DeployRow, fe manifest
 		if err := q.runStep(ctx, row, scratch, fe.Path, fe.Image, step, logF); err != nil {
 			return err
 		}
+	}
+	if len(fe.Run) > 0 {
+		// Process-mode frontend: the whole built tree is the artifact — the
+		// server runs from it the way backends do; there is no static dist.
+		return q.files.PublishFrontend(row.RepoName, hash, filepath.Join(scratch, fe.Path), overwrite)
 	}
 	dist := filepath.Join(scratch, fe.Path, fe.Dist)
 	if st, err := os.Stat(dist); err != nil || !st.IsDir() {

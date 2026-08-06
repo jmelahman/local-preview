@@ -385,7 +385,9 @@ export default function App() {
             <ul className="divide-y divide-border">
               {deploys.data?.map((d) => {
                 const artifacts = [
-                  d.fe_hash ? `fe:${d.fe_hash.slice(0, 8)}` : null,
+                  d.fe_hash
+                    ? `fe:${d.fe_hash.slice(0, 8)}${d.fe_process ? ` (${d.fe_process})` : ""}`
+                    : null,
                   d.be_hash ? `be:${d.be_hash.slice(0, 8)}` : null,
                   d.process ? `(${d.process})` : null,
                 ]

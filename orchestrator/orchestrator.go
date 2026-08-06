@@ -83,6 +83,10 @@ type Options struct {
 	BuildConcurrency int
 	// Runner executes build steps. Defaults to host execution.
 	Runner Runner
+	// MaxWarm caps concurrently running preview processes; beyond it the
+	// least-recently-used are stopped. 0 defaults to 8; negative disables
+	// the cap.
+	MaxWarm int
 	// ManifestSources are the locations tried, in order, for the preview
 	// manifest at each deployed commit. Defaults to preview.toml at the
 	// repo root. Embedders can add their own config file with a table —
@@ -128,8 +132,10 @@ type Deploy struct {
 	// PreviewURL is set once the deploy is ready.
 	PreviewURL string `json:"preview_url,omitempty"`
 	// Process is the live backend state when ready: running, starting, or
-	// stopped (backends start on demand).
+	// stopped (backends start on demand). FeProcess is the same for a
+	// process-mode frontend, absent for static frontends.
 	Process   string `json:"process,omitempty"`
+	FeProcess string `json:"fe_process,omitempty"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
@@ -197,8 +203,13 @@ func New(opts Options) (*Orchestrator, error) {
 	files := store.New(opts.DataDir+"/artifacts", opts.DataDir+"/state", opts.DataDir+"/tmp")
 	files.SweepTmp(24 * time.Hour)
 	gitMgr := gitrepo.NewManager(opts.DataDir + "/repos")
+	if opts.MaxWarm == 0 {
+		opts.MaxWarm = 8
+	}
 	super := supervise.New(database, files, opts.DataDir+"/logs")
 	super.ReclaimOrphans()
+	super.SetMaxWarm(opts.MaxWarm)
+	super.StartReaper(ctx)
 
 	var runner build.Runner
 	if opts.Runner != nil {
@@ -269,6 +280,30 @@ func (o *Orchestrator) RegisterRepo(ctx context.Context, name, source string) (R
 		return Repo{}, err
 	}
 	return toRepo(created), nil
+}
+
+// DeleteRepo unregisters a repository: it stops the repo's supervised
+// backends, removes its database rows, then deletes its mirror clone,
+// artifacts, state directories, and build logs. On-disk cleanup failures
+// after the rows are gone are ignored — leftovers are unreachable and only
+// cost disk. Returns ErrNotFound if the name isn't registered.
+func (o *Orchestrator) DeleteRepo(name string) error {
+	repo, err := o.database.GetRepoByName(name)
+	if errors.Is(err, db.ErrNotFound) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	o.super.StopRepo(repo.ID, "repo deleted")
+	o.super.PurgeRepoContainers(repo.Name)
+	if err := o.database.DeleteRepo(repo.ID); err != nil {
+		return err
+	}
+	o.git.Remove(repo.Name)
+	o.files.RemoveRepo(repo.Name)
+	os.RemoveAll(o.opts.DataDir + "/logs/" + repo.Name)
+	return nil
 }
 
 // Repos lists registered repositories.
@@ -375,7 +410,12 @@ func (o *Orchestrator) toDeploy(row db.DeployRow) Deploy {
 	if row.Status == db.DeployReady {
 		d.PreviewURL = o.previewURL(row)
 		if row.BeHash != "" {
-			d.Process = o.super.Status(row.RepoID, row.BeHash)
+			d.Process = o.super.Status(supervise.BackendKey(row.RepoID, row.BeHash))
+		}
+		if row.FeHash != "" {
+			if _, err := o.database.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
+				d.FeProcess = o.super.Status(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
+			}
 		}
 	}
 	return d

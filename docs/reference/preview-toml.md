@@ -34,12 +34,26 @@ start_timeout = "20s"            # optional
 | --- | --- | --- |
 | `path` | yes | Subtree that defines the frontend hash; build commands run with this as their working directory |
 | `build` | yes | Build steps as argv arrays (no shell; use `["sh", "-c", "..."]` explicitly if you need one) |
-| `dist` | yes | Directory the build produces, relative to `path`; published as the static bundle |
+| `dist` | static mode | Directory the build produces, relative to `path`; published as the static bundle |
 | `image` | no | Container image the build steps run in (see [Build images](#build-images)) |
+| `run` | process mode | Server command; the frontend becomes a supervised process receiving all non-API traffic (see [Process-mode frontends](#process-mode-frontends)) |
+| `health_path` | with `run` | Path polled until it returns 200 after start |
+| `start_timeout` | no | How long the process gets to become healthy (default `20s`) |
+| `idle_timeout` | no | Idle period without proxied requests before the process is stopped (default `30m`) |
+| `run_image` | no | Container image the server process runs in (see [Runtime images](#runtime-images)) |
+| `env` | no | Environment variables for the process (see [Env placeholders](#env-placeholders)) |
 
-The bundle must be deploy-agnostic: base path `/`, relative `/api` calls, no
-per-deploy values baked in at build time. One bundle is served under every
-subdomain that references it.
+A static bundle must be deploy-agnostic: base path `/`, relative `/api`
+calls, no per-deploy values baked in at build time. One bundle is served
+under every subdomain that references it.
+
+### Process-mode frontends
+
+With `run` set the frontend is a server (SSR apps like Next.js standalone),
+not a static bundle: the whole built `path` tree is published as the
+artifact, the command runs from it on demand exactly like a backend, and
+the proxy forwards every non-API path to it. `dist` is unused. The process
+must bind `{port}` — on all interfaces (`0.0.0.0`) when `run_image` is set.
 
 ## `[backend]`
 
@@ -51,8 +65,12 @@ subdomain that references it.
 | `run` | yes | Command that starts the server, executed with the artifact directory as cwd |
 | `health_path` | yes | Path polled until it returns 200 after start |
 | `start_timeout` | no | How long the process gets to become healthy (default `20s`) |
-| `idle_timeout` | no | Idle period before the process is stopped (default `30m`; enforcement lands in a future release) |
+| `idle_timeout` | no | Idle period without proxied requests before the process is stopped (default `30m`) |
 | `image` | no | Container image the build steps (not the server) run in (see [Build images](#build-images)) |
+| `run_image` | no | Container image the server process runs in (see [Runtime images](#runtime-images)) |
+| `env` | no | Environment variables for the process (see [Env placeholders](#env-placeholders)) |
+| `strip_api_prefix` | no | Remove the leading `/api` before proxying, for backends whose routes aren't mounted under `/api` |
+| `extra_routes` | no | Additional path prefixes proxied to the backend unstripped (e.g. `["/openapi.json", "/auth/saml"]`) |
 
 ### Run templating
 
@@ -60,8 +78,52 @@ Two placeholders are substituted into every `run` argv element:
 
 | Placeholder | Value |
 | --- | --- |
-| `{port}` | The loopback port assigned to this process — bind `127.0.0.1:{port}` |
+| `{port}` | The port assigned to this process — bind `127.0.0.1:{port}` on the host, `0.0.0.0:{port}` under `run_image` |
 | `{state_dir}` | The artifact's mutable state directory (see [state lineage](/guide/concepts#state-follows-git-lineage)) |
+
+### Env placeholders
+
+`env` values are expanded at process start (never at hash time — the
+literal string is what's hashed):
+
+| Placeholder | Value | Sides |
+| --- | --- | --- |
+| `{port}` | The side's assigned port | both |
+| `{state_dir}` | The backend's state directory | backend |
+| `{repo}` | The registered repo name | both |
+| `{hash}` | The side's own 12-char artifact hash | both |
+| `{backend_url}` | Base URL the frontend uses to reach this deploy's backend | frontend |
+
+`{hash}` is per-artifact, not per-commit: processes are shared across
+deploys with the same hash (the same reason state dirs fork per artifact),
+so `POSTGRES_DB = "preview_{hash}"` gives isolation that follows artifact
+identity. `{backend_url}` requires `frontend.run` and both sides on the
+same runtime (both `run_image` or neither).
+
+## Runtime images
+
+With `run_image` set on a side, its server process runs inside that stock
+container image — the artifact (and the backend's state dir) bind-mounted
+at their host paths, the port published to the host loopback — instead of
+directly on the server's host. This is how apps whose runtime the server
+doesn't have (Node, Python, …) run under the toolchain-less composed
+server. Unlike build `image` steps there is no host fallback: `run_image`
+with no reachable daemon fails the start with a clear error.
+
+A process-mode frontend and its backend share a per-deploy bridge network:
+the backend is reachable from the frontend container by the DNS alias
+`backend`, which is what `{backend_url}` resolves to. Both containers also
+join every network listed in the top-level `networks` key:
+
+```toml
+# Existing external docker networks every containered process joins — how
+# previews reach shared dependencies you run yourself (e.g. a target
+# repo's own deps compose). Not part of any artifact hash.
+networks = ["onyx_default"]
+```
+
+See [external dependencies](/guide/external-dependencies) for the full
+workflow.
 
 ## Alternate locations
 
@@ -134,6 +196,8 @@ an explicit image beats environment discovery.
 ## Hashing caveats
 
 Each side's hash covers its declared partition **plus its own manifest
-section** — editing a build command rebuilds that side. Files outside the
-declared partition don't bust the cache; if your backend depends on files
-across the whole tree, use `path = "."`.
+section** — editing a build command, `env` value, or `run_image` rebuilds
+that side. Files outside the declared partition don't bust the cache; if
+your backend depends on files across the whole tree, use `path = "."`. The
+top-level `networks` list is the one run-time-only exception: it feeds no
+hash, and changes apply to the next process start after a redeploy.

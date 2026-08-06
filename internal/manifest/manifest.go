@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -58,24 +59,44 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 type Manifest struct {
 	Frontend Frontend `toml:"frontend" json:"frontend"`
 	Backend  Backend  `toml:"backend" json:"backend"`
+	// Networks names existing external docker networks every containered
+	// process joins — how previews reach shared dependencies the user runs
+	// themselves (e.g. a target repo's own deps compose network).
+	Networks []string `toml:"networks" json:"networks,omitempty"`
 }
 
-// Frontend describes how to hash, build, and locate the static bundle.
-// Build commands run with cwd <extracted-tree>/<Path>; Dist is relative to
-// Path. Path doubles as the hash-partition root. Image, when set, runs the
-// build steps inside that container image instead of on the host — being
-// part of the manifest section, it feeds the artifact hash, so changing the
-// image rebuilds.
+// Frontend describes how to hash, build, and serve the frontend. Build
+// commands run with cwd <extracted-tree>/<Path>; Dist is relative to Path.
+// Path doubles as the hash-partition root. Image, when set, runs the build
+// steps inside that container image instead of on the host — being part of
+// the manifest section, it feeds the artifact hash, so changing the image
+// rebuilds.
+//
+// With Run set the frontend is a supervised server process instead of a
+// static bundle: the whole built Path tree is published and all non-API
+// traffic is proxied to the process. Dist is then unused; HealthPath is
+// required. Run is templated with {port}; Env values support {port},
+// {repo}, {hash}, and {backend_url}.
 type Frontend struct {
 	Path  string     `toml:"path" json:"path"`
 	Build [][]string `toml:"build" json:"build"`
-	Dist  string     `toml:"dist" json:"dist"`
+	Dist  string     `toml:"dist" json:"dist,omitempty"`
 	Image string     `toml:"image" json:"image,omitempty"`
+
+	Run          []string          `toml:"run" json:"run,omitempty"`
+	HealthPath   string            `toml:"health_path" json:"health_path,omitempty"`
+	StartTimeout Duration          `toml:"start_timeout" json:"start_timeout,omitempty"`
+	IdleTimeout  Duration          `toml:"idle_timeout" json:"idle_timeout,omitempty"`
+	// RunImage, when set, runs the server process inside that container
+	// image (artifact bind-mounted) instead of on the host.
+	RunImage string            `toml:"run_image" json:"run_image,omitempty"`
+	Env      map[string]string `toml:"env" json:"env,omitempty"`
 }
 
 // Backend describes how to hash, build, and run the backend. The hash covers
 // entries under Path, minus the frontend's Path, minus Exclude patterns.
-// Run is templated with {port} and {state_dir} at process start.
+// Run is templated with {port} and {state_dir} at process start; Env values
+// support {port}, {state_dir}, {repo}, and {hash}.
 type Backend struct {
 	Path         string     `toml:"path" json:"path"`
 	Exclude      []string   `toml:"exclude" json:"exclude,omitempty"`
@@ -87,6 +108,16 @@ type Backend struct {
 	// Image, when set, runs the build steps (not the server) inside that
 	// container image instead of on the host.
 	Image string `toml:"image" json:"image,omitempty"`
+	// RunImage, when set, runs the server process inside that container
+	// image (artifact and state dir bind-mounted) instead of on the host.
+	RunImage string            `toml:"run_image" json:"run_image,omitempty"`
+	Env      map[string]string `toml:"env" json:"env,omitempty"`
+	// StripAPIPrefix removes the leading /api before proxying, for backends
+	// whose routes aren't mounted under /api (onyx's nginx does the same).
+	StripAPIPrefix bool `toml:"strip_api_prefix" json:"strip_api_prefix,omitempty"`
+	// ExtraRoutes are additional path prefixes proxied to the backend
+	// unstripped (e.g. /openapi.json, /auth/saml) alongside /api.
+	ExtraRoutes []string `toml:"extra_routes" json:"extra_routes,omitempty"`
 }
 
 // ErrNoManifest marks a manifest source that isn't present: the file lacks
@@ -160,8 +191,24 @@ func (m *Manifest) normalize() error {
 	if err := validateSteps("frontend.build", m.Frontend.Build); err != nil {
 		return err
 	}
-	if m.Frontend.Dist, err = cleanRel("frontend.dist", m.Frontend.Dist); err != nil {
-		return err
+	if len(m.Frontend.Run) > 0 {
+		// Process-mode frontend: a server, not a static bundle.
+		if m.Frontend.Run[0] == "" {
+			return fmt.Errorf("frontend.run must be a non-empty argv array")
+		}
+		if !strings.HasPrefix(m.Frontend.HealthPath, "/") {
+			return fmt.Errorf("frontend.health_path is required with frontend.run and must start with %q", "/")
+		}
+		if m.Frontend.StartTimeout <= 0 {
+			m.Frontend.StartTimeout = Duration(DefaultStartTimeout)
+		}
+		if m.Frontend.IdleTimeout <= 0 {
+			m.Frontend.IdleTimeout = Duration(DefaultIdleTimeout)
+		}
+	} else {
+		if m.Frontend.Dist, err = cleanRel("frontend.dist", m.Frontend.Dist); err != nil {
+			return err
+		}
 	}
 	if m.Backend.Path, err = cleanRel("backend.path", m.Backend.Path); err != nil {
 		return err
@@ -181,7 +228,60 @@ func (m *Manifest) normalize() error {
 	if m.Backend.IdleTimeout <= 0 {
 		m.Backend.IdleTimeout = Duration(DefaultIdleTimeout)
 	}
+	for _, r := range m.Backend.ExtraRoutes {
+		if !strings.HasPrefix(r, "/") {
+			return fmt.Errorf("backend.extra_routes: %q must start with %q", r, "/")
+		}
+	}
+	if err := validateEnv("frontend.env", m.Frontend.Env, frontendPlaceholders); err != nil {
+		return err
+	}
+	if err := validateEnv("backend.env", m.Backend.Env, backendPlaceholders); err != nil {
+		return err
+	}
+	if envReferences(m.Frontend.Env, "{backend_url}") {
+		if len(m.Frontend.Run) == 0 {
+			return fmt.Errorf("frontend.env: {backend_url} requires frontend.run")
+		}
+		if (m.Frontend.RunImage == "") != (m.Backend.RunImage == "") {
+			return fmt.Errorf("frontend.env: {backend_url} requires both sides on the same runtime (both run_image or neither)")
+		}
+	}
 	return nil
+}
+
+// Env value placeholders, expanded at process start (never at hash time —
+// the literal string is what's hashed). {hash} is the side's own artifact
+// hash: processes are shared per artifact across deploys, so isolation
+// keyed on {hash} follows artifact identity the way state dirs do.
+var (
+	frontendPlaceholders = map[string]bool{"{port}": true, "{repo}": true, "{hash}": true, "{backend_url}": true}
+	backendPlaceholders  = map[string]bool{"{port}": true, "{repo}": true, "{hash}": true, "{state_dir}": true}
+)
+
+var placeholderRE = regexp.MustCompile(`\{[a-z_]+\}`)
+
+func validateEnv(field string, env map[string]string, allowed map[string]bool) error {
+	for k, v := range env {
+		if k == "" {
+			return fmt.Errorf("%s: empty variable name", field)
+		}
+		for _, tok := range placeholderRE.FindAllString(v, -1) {
+			if !allowed[tok] {
+				return fmt.Errorf("%s.%s: unknown placeholder %s", field, k, tok)
+			}
+		}
+	}
+	return nil
+}
+
+func envReferences(env map[string]string, placeholder string) bool {
+	for _, v := range env {
+		if strings.Contains(v, placeholder) {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanRel normalizes a repo-relative slash path and rejects anything that

@@ -37,6 +37,14 @@ failed clone, `409` if the name is taken.
 
 Returns all repos. `GET /api/repos/{name}` returns one (`404` if missing).
 
+### `DELETE /api/repos/{name}`
+
+Unregisters a repository: stops its preview backends, then deletes its
+deploys, artifacts, state directories, build logs, and mirror clone. The
+name is immediately reusable.
+
+Response: `204 No Content`. `404` if the name isn't registered.
+
 ## Deploys
 
 ### `POST /api/deploys`
@@ -73,7 +81,10 @@ for an unresolvable ref.
 
 `status` is one of `queued`, `building`, `ready`, `failed`, `evicted`. Ready
 deploys additionally carry `preview_url` and `process` (the live backend
-state: `running`, `starting`, or `stopped` — backends start on demand).
+state: `running`, `starting`, or `stopped` — backends start on demand), and
+`fe_process` (same states) when the frontend is a
+[process](/reference/preview-toml#process-mode-frontends) rather than a
+static bundle.
 
 ### `GET /api/deploys`
 

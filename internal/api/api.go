@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -46,6 +47,7 @@ func NewMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("POST /api/repos", d.handleCreateRepo)
 	mux.HandleFunc("GET /api/repos", d.handleListRepos)
 	mux.HandleFunc("GET /api/repos/{name}", d.handleGetRepo)
+	mux.HandleFunc("DELETE /api/repos/{name}", d.handleDeleteRepo)
 	mux.HandleFunc("POST /api/deploys", d.handleCreateDeploy)
 	mux.HandleFunc("GET /api/deploys", d.handleListDeploys)
 	mux.HandleFunc("GET /api/deploys/{id}", d.handleGetDeploy)
@@ -123,12 +125,49 @@ func (d Deps) handleGetRepo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, repo)
 }
 
+// handleDeleteRepo unregisters a repo: stops its backends, removes its DB
+// rows, then deletes its mirror clone, artifacts, state, and logs. On-disk
+// cleanup is best-effort once the rows are gone — leftovers are unreachable
+// and only cost disk, so failures are logged rather than surfaced.
+func (d Deps) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
+	repo, err := d.Store.GetRepoByName(r.PathValue("name"))
+	if errors.Is(err, db.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "repo not found")
+		return
+	}
+	if err != nil {
+		internalError(w, "get repo", err)
+		return
+	}
+	d.Super.StopRepo(repo.ID, "repo deleted")
+	d.Super.PurgeRepoContainers(repo.Name)
+	if err := d.Store.DeleteRepo(repo.ID); err != nil {
+		internalError(w, "delete repo", err)
+		return
+	}
+	if err := d.Git.Remove(repo.Name); err != nil {
+		log.Printf("delete repo %s: remove mirror: %v", repo.Name, err)
+	}
+	for _, dir := range []string{
+		filepath.Join(d.Config.ArtifactsDir(), repo.Name),
+		filepath.Join(d.Config.StateDir(), repo.Name),
+		filepath.Join(d.Config.LogsDir(), repo.Name),
+	} {
+		if err := os.RemoveAll(dir); err != nil {
+			log.Printf("delete repo %s: %v", repo.Name, err)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // deployJSON augments a deploy row with its preview URL and the
-// supervisor's live process status.
+// supervisor's live process statuses. FeProcess is present only for
+// process-mode frontends.
 type deployJSON struct {
 	db.DeployRow
 	PreviewURL string `json:"preview_url,omitempty"`
 	Process    string `json:"process,omitempty"`
+	FeProcess  string `json:"fe_process,omitempty"`
 }
 
 func (d Deps) deployJSON(row db.DeployRow) deployJSON {
@@ -136,7 +175,12 @@ func (d Deps) deployJSON(row db.DeployRow) deployJSON {
 	if row.Status == db.DeployReady {
 		out.PreviewURL = d.previewURL(row)
 		if row.BeHash != "" {
-			out.Process = d.Super.Status(row.RepoID, row.BeHash)
+			out.Process = d.Super.Status(supervise.BackendKey(row.RepoID, row.BeHash))
+		}
+		if row.FeHash != "" {
+			if _, err := d.Store.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
+				out.FeProcess = d.Super.Status(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
+			}
 		}
 	}
 	return out

@@ -46,6 +46,7 @@ for lookup order and caching semantics.
 | `--in-memory` | `false` | Ephemeral in-memory SQLite; deploy history is discarded on shutdown (artifacts still use the data directory) |
 | `--preview-domain` | `preview.localhost` | Base domain previews are served under |
 | `--build-concurrency` | `2` | Number of deploys built in parallel |
+| `--max-warm` | `8` | Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (`0` = unlimited) |
 
 ## Environment variables
 
@@ -56,6 +57,37 @@ for lookup order and caching semantics.
 | `PREVIEW_DOMAIN` | `preview serve` | Preview base domain (an explicit `--preview-domain` flag wins) |
 | `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins) |
 | `PREVIEW_BACKEND` | `web/` dev server | Backend `host:port` the Vite proxy targets |
+
+## Docker requirements
+
+Two manifest features need a reachable docker daemon (`$DOCKER_HOST`,
+`/var/run/docker.sock`, or the rootless per-user socket):
+
+- Build `image` steps fall back to host execution with a warning when no
+  daemon is reachable.
+- `run_image` processes have **no fallback** — the runtime isn't on the
+  host by construction, so the start fails with a clear error instead.
+
+Published container ports bind to the docker host's loopback. A composed
+server (docker compose deployment) must therefore run with
+`network_mode: host` to reach `run_image` processes — see the note in
+`compose.yaml`. A `preview serve` running directly on the docker host
+needs nothing extra.
+
+## Warm previews
+
+Processes start on demand and then stay warm. Two mechanisms bound the
+footprint:
+
+- **Idle timeout** — each side's `idle_timeout` (default `30m`) stops its
+  process after that long without a request through the proxy.
+- **LRU cap** — `--max-warm` bounds how many processes run at once; beyond
+  it the least-recently-used are stopped. The hottest previews stay warm,
+  cold ones restart on their next request (a cold start, not a rebuild).
+
+A process-mode frontend holds its backend's address for its lifetime, so a
+paired backend inherits the frontend's recency and is never stopped while
+that frontend runs — the frontend goes first, the backend on a later sweep.
 
 ## The preview domain
 

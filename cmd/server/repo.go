@@ -41,8 +41,27 @@ func repoCmd() *cobra.Command {
 		},
 	}
 
-	parent.AddCommand(create, list)
+	del := &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Unregister a repository and delete its previews",
+		Long: "Unregister a repository: stops its preview backends and deletes its\n" +
+			"deploys, artifacts, state directories, build logs, and mirror clone.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRepoDelete(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(), args[0])
+		},
+	}
+
+	parent.AddCommand(create, list, del)
 	return parent
+}
+
+func runRepoDelete(ctx context.Context, url string, out io.Writer, name string) error {
+	if err := client.New(url, nil).DeleteRepo(ctx, name); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "deleted %s\n", name)
+	return nil
 }
 
 func runRepoCreate(ctx context.Context, url string, out io.Writer, name, source string) error {

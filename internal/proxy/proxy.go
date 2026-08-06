@@ -9,6 +9,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"net"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/store"
+	"github.com/jmelahman/local-preview/internal/supervise"
 )
 
 // coldStartWait is how long a request waits for a backend before returning
@@ -34,7 +36,7 @@ const cacheTTL = 2 * time.Second
 
 // Backends is the slice of the supervisor the proxy needs.
 type Backends interface {
-	EnsureRunning(ctx context.Context, repoID int64, repoName, beHash string) (int, error)
+	EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (int, error)
 }
 
 // Router routes by Host header. It wraps the dashboard handler and serves
@@ -56,6 +58,11 @@ type cacheEntry struct {
 	err       string // non-empty: resolution failed with this message
 	ambiguous []string
 	expires   time.Time
+
+	// Routing shape of a ready deploy, resolved once per cache fill.
+	feProcess   bool     // frontend is a supervised process, not a static dist
+	stripAPI    bool     // remove the /api prefix before proxying
+	extraRoutes []string // additional unstripped prefixes routed to the backend
 }
 
 // New returns a Router serving previews under domain and everything else
@@ -148,7 +155,25 @@ func (rt *Router) lookup(label, repoName string) cacheEntry {
 		}
 		return cacheEntry{ambiguous: shorts}
 	}
-	return cacheEntry{repoID: repo.ID, deploy: matches[0]}
+	e := cacheEntry{repoID: repo.ID, deploy: matches[0]}
+	if e.deploy.Status == db.DeployReady {
+		if e.deploy.FeHash != "" {
+			if _, err := rt.db.GetFrontendArtifact(repo.ID, e.deploy.FeHash); err == nil {
+				e.feProcess = true
+			}
+		}
+		if art, err := rt.db.GetBackendArtifact(repo.ID, e.deploy.BeHash); err == nil {
+			var cfg struct {
+				StripAPIPrefix bool     `json:"strip_api_prefix"`
+				ExtraRoutes    []string `json:"extra_routes"`
+			}
+			if json.Unmarshal([]byte(art.RunConfig), &cfg) == nil {
+				e.stripAPI = cfg.StripAPIPrefix
+				e.extraRoutes = cfg.ExtraRoutes
+			}
+		}
+	}
+	return e
 }
 
 func (rt *Router) servePreview(w http.ResponseWriter, r *http.Request, e cacheEntry) {
@@ -165,8 +190,12 @@ func (rt *Router) servePreview(w http.ResponseWriter, r *http.Request, e cacheEn
 		rt.errorPage(w, r, http.StatusGone, "Preview cleaned up",
 			fmt.Sprintf("Deploy %s was garbage-collected. Redeploy it with: preview deploy %s", d.ShortSHA, d.SHA))
 	case db.DeployReady:
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if strings.HasPrefix(r.URL.Path, "/api/") || matchesRoute(e.extraRoutes, r.URL.Path) {
 			rt.proxyAPI(w, r, e, repoName)
+			return
+		}
+		if e.feProcess {
+			rt.proxyFrontend(w, r, e, repoName)
 			return
 		}
 		rt.serveStatic(w, r, repoName, d.FeHash)
@@ -180,22 +209,38 @@ func (rt *Router) repoNameFromHost(host string) string {
 	return repo
 }
 
-// proxyAPI cold-starts the backend if needed (bounded wait; the start
-// continues in the background) and reverse-proxies to it.
+// proxyAPI routes backend traffic, stripping the /api prefix when the
+// manifest asks for it (extra routes are never stripped).
 func (rt *Router) proxyAPI(w http.ResponseWriter, r *http.Request, e cacheEntry, repoName string) {
+	if e.stripAPI && strings.HasPrefix(r.URL.Path, "/api/") {
+		r = r.Clone(r.Context())
+		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
+	}
+	rt.ensureAndProxy(w, r, e, repoName, supervise.BackendKey(e.repoID, e.deploy.BeHash), "backend")
+}
+
+// proxyFrontend routes page traffic to a process-mode frontend.
+func (rt *Router) proxyFrontend(w http.ResponseWriter, r *http.Request, e cacheEntry, repoName string) {
+	rt.ensureAndProxy(w, r, e, repoName,
+		supervise.FrontendKey(e.repoID, e.deploy.FeHash, e.deploy.BeHash), "frontend")
+}
+
+// ensureAndProxy cold-starts the keyed process if needed (bounded wait; the
+// start continues in the background) and reverse-proxies to it.
+func (rt *Router) ensureAndProxy(w http.ResponseWriter, r *http.Request, e cacheEntry, repoName string, k supervise.Key, what string) {
 	ctx, cancel := context.WithTimeout(r.Context(), coldStartWait)
 	defer cancel()
-	port, err := rt.backends.EnsureRunning(ctx, e.repoID, repoName, e.deploy.BeHash)
+	port, err := rt.backends.EnsureRunning(ctx, k, repoName)
 	if err != nil {
 		if ctx.Err() != nil && r.Context().Err() == nil {
 			// Still starting — tell the client to come back shortly.
 			w.Header().Set("Retry-After", "2")
-			rt.refreshPage(w, r, http.StatusServiceUnavailable, "Starting backend…",
-				"The preview backend is starting. This page refreshes automatically.")
+			rt.refreshPage(w, r, http.StatusServiceUnavailable, "Starting "+what+"…",
+				"The preview "+what+" is starting. This page refreshes automatically.")
 			return
 		}
-		rt.errorPage(w, r, http.StatusBadGateway, "Backend unavailable",
-			fmt.Sprintf("The preview backend failed to start: %s (run logs: preview deploy logs %d)", err, e.deploy.ID))
+		rt.errorPage(w, r, http.StatusBadGateway, "Preview unavailable",
+			fmt.Sprintf("The preview %s failed to start: %s (run logs: preview deploy logs %d)", what, err, e.deploy.ID))
 		return
 	}
 	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", port)}
@@ -209,10 +254,20 @@ func (rt *Router) proxyAPI(w http.ResponseWriter, r *http.Request, e cacheEntry,
 			pr.SetXForwarded()
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			rt.errorPage(w, r, http.StatusBadGateway, "Backend error", err.Error())
+			rt.errorPage(w, r, http.StatusBadGateway, "Preview error", err.Error())
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// matchesRoute reports whether path falls under any of the prefixes.
+func matchesRoute(routes []string, path string) bool {
+	for _, route := range routes {
+		if path == route || strings.HasPrefix(path, route+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // serveStatic serves the frontend artifact with SPA fallback, mirroring the

@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -81,6 +82,121 @@ func TestParseAt(t *testing.T) {
 	bad := hosted + "\n[previews.typo]\nx = 1\n"
 	if _, err := ParseAt([]byte(bad), "previews"); err == nil || !strings.Contains(err.Error(), "unknown keys") {
 		t.Fatalf("err = %v, want unknown-keys error", err)
+	}
+}
+
+const processMode = `
+networks = ["deps_default"]
+
+[frontend]
+path        = "web"
+build       = [["bun", "run", "build"]]
+run         = ["node", "server.js"]
+run_image   = "node:24-slim"
+health_path = "/"
+
+[frontend.env]
+PORT         = "{port}"
+INTERNAL_URL = "{backend_url}"
+
+[backend]
+path             = "backend"
+build            = [["uv", "sync"]]
+run              = ["uvicorn", "app:app", "--port", "{port}"]
+run_image        = "python:3.13-slim"
+health_path      = "/health"
+strip_api_prefix = true
+extra_routes     = ["/openapi.json", "/auth/saml"]
+
+[backend.env]
+POSTGRES_DB = "preview_{hash}"
+`
+
+func TestParseProcessMode(t *testing.T) {
+	m, err := Parse([]byte(processMode))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Frontend.Run) == 0 || m.Frontend.Dist != "" {
+		t.Fatalf("frontend: %+v", m.Frontend)
+	}
+	if time.Duration(m.Frontend.StartTimeout) != DefaultStartTimeout {
+		t.Fatalf("frontend start_timeout default = %v", m.Frontend.StartTimeout)
+	}
+	if !m.Backend.StripAPIPrefix || len(m.Backend.ExtraRoutes) != 2 {
+		t.Fatalf("backend: %+v", m.Backend)
+	}
+	if m.Networks[0] != "deps_default" {
+		t.Fatalf("networks: %v", m.Networks)
+	}
+}
+
+func TestParseProcessModeErrors(t *testing.T) {
+	cases := map[string]struct {
+		mutate func(string) string
+		want   string
+	}{
+		"run without health_path": {
+			func(s string) string { return strings.Replace(s, `health_path = "/"`, "", 1) },
+			"frontend.health_path is required",
+		},
+		"static frontend still needs dist": {
+			func(s string) string {
+				s = strings.Replace(s, `run         = ["node", "server.js"]`, "", 1)
+				return strings.Replace(s, `INTERNAL_URL = "{backend_url}"`, "", 1)
+			},
+			"frontend.dist is required",
+		},
+		"unknown env placeholder": {
+			func(s string) string { return strings.Replace(s, `"preview_{hash}"`, `"preview_{short_sha}"`, 1) },
+			"unknown placeholder {short_sha}",
+		},
+		"state_dir not a frontend placeholder": {
+			func(s string) string { return strings.Replace(s, `PORT         = "{port}"`, `PORT = "{state_dir}"`, 1) },
+			"unknown placeholder {state_dir}",
+		},
+		"backend_url needs run": {
+			func(s string) string {
+				return strings.Replace(s, `run         = ["node", "server.js"]`, `dist = "out"`, 1)
+			},
+			"{backend_url} requires frontend.run",
+		},
+		"backend_url needs matching runtimes": {
+			func(s string) string { return strings.Replace(s, `run_image        = "python:3.13-slim"`, "", 1) },
+			"same runtime",
+		},
+		"relative extra route": {
+			func(s string) string { return strings.Replace(s, `"/openapi.json"`, `"openapi.json"`, 1) },
+			"extra_routes",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.mutate(processMode)))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestLegacySectionJSONUnchanged pins the omitempty contract: a manifest
+// using no new fields must marshal to the same section JSON as before, or
+// every existing artifact hash would bust on upgrade (hashkey digests the
+// section JSON).
+func TestLegacySectionJSONUnchanged(t *testing.T) {
+	m, err := Parse([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fe, _ := json.Marshal(m.Frontend)
+	if want := `{"path":"web","build":[["npm","ci"],["npm","run","build"]],"dist":"dist"}`; string(fe) != want {
+		t.Fatalf("frontend JSON changed:\n got %s\nwant %s", fe, want)
+	}
+	be, _ := json.Marshal(m.Backend)
+	if strings.Contains(string(be), "run_image") || strings.Contains(string(be), "env") ||
+		strings.Contains(string(be), "strip_api_prefix") || strings.Contains(string(be), "extra_routes") {
+		t.Fatalf("backend JSON leaks new zero-value fields: %s", be)
 	}
 }
 

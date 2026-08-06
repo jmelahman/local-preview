@@ -62,6 +62,19 @@ CREATE TABLE IF NOT EXISTS backend_artifacts (
     PRIMARY KEY (repo_id, be_hash)
 );
 
+-- Process-mode frontends (frontend.run set): run_config is the frontend
+-- section of preview.toml as JSON, mirroring backend_artifacts. Row
+-- existence means "this frontend artifact is a server process, not a
+-- static bundle" — the proxy branches on it. No state dir: frontends
+-- carry no forked state.
+CREATE TABLE IF NOT EXISTS frontend_artifacts (
+    repo_id INTEGER NOT NULL REFERENCES repos(id),
+    fe_hash TEXT NOT NULL,
+    run_config TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (repo_id, fe_hash)
+);
+
 -- Crash-recovery bookkeeping only: upserted on process start, deleted on
 -- clean stop. Leftover rows at startup mean an unclean exit.
 CREATE TABLE IF NOT EXISTS process_records (

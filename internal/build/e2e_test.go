@@ -186,7 +186,7 @@ func TestVerticalSlice(t *testing.T) {
 		t.Fatalf("frontend artifact content: %v %q", err, b)
 	}
 
-	portA, err := e.super.EnsureRunning(ctx, e.repoID, "demo", a.BeHash)
+	portA, err := e.super.EnsureRunning(ctx, supervise.BackendKey(e.repoID, a.BeHash), "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestVerticalSlice(t *testing.T) {
 	if b.FeHash == a.FeHash {
 		t.Fatal("frontend change did not change fe_hash")
 	}
-	portB, err := e.super.EnsureRunning(ctx, e.repoID, "demo", b.BeHash)
+	portB, err := e.super.EnsureRunning(ctx, supervise.BackendKey(e.repoID, b.BeHash), "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestVerticalSlice(t *testing.T) {
 		t.Fatalf("lineage: artifact = %+v, %v (want forked_from %s)", art, err, a.BeHash)
 	}
 
-	portC, err := e.super.EnsureRunning(ctx, e.repoID, "demo", c.BeHash)
+	portC, err := e.super.EnsureRunning(ctx, supervise.BackendKey(e.repoID, c.BeHash), "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,6 +311,39 @@ func TestFailedBuildSurfacesInLog(t *testing.T) {
 	}
 	if again.AttemptCount != 1 {
 		t.Fatalf("attempt_count = %d, want 1", again.AttemptCount)
+	}
+}
+
+// TestProcessModeFrontendBuild covers the build half of frontend.run: the
+// artifact is the whole built tree (not a dist), and a frontend_artifacts
+// row records the run contract. Nothing is started — processes cold-start
+// at request time, after "ready".
+func TestProcessModeFrontendBuild(t *testing.T) {
+	src := newFixtureRepo(t)
+	toml, err := os.ReadFile(filepath.Join(src, "preview.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc := strings.Replace(string(toml), `dist  = "dist"`,
+		"run         = [\"./never-started\"]\nhealth_path = \"/\"", 1)
+	if err := os.WriteFile(filepath.Join(src, "preview.toml"), []byte(proc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "commit", "-qam", "frontend as process")
+
+	e := newEnv(t, src)
+	d := e.deployAndWait(t, "main")
+
+	// Whole tree published: sources present, not just a dist.
+	if _, err := os.Stat(filepath.Join(e.files.FrontendDir("demo", d.FeHash), "src", "index.html")); err != nil {
+		t.Fatalf("whole-tree artifact missing source file: %v", err)
+	}
+	art, err := e.db.GetFrontendArtifact(e.repoID, d.FeHash)
+	if err != nil {
+		t.Fatalf("frontend_artifacts row: %v", err)
+	}
+	if !strings.Contains(art.RunConfig, "never-started") {
+		t.Fatalf("run_config = %s", art.RunConfig)
 	}
 }
 

@@ -71,7 +71,7 @@ func newSourceRepo(t *testing.T) string {
 	return dir
 }
 
-func newTestMux(t *testing.T) *http.ServeMux {
+func newTestMux(t *testing.T) (*http.ServeMux, string) {
 	t.Helper()
 	database, err := db.Open(":memory:")
 	if err != nil {
@@ -101,7 +101,7 @@ func newTestMux(t *testing.T) *http.ServeMux {
 		Queue:  queue,
 		Super:  super,
 		Addr:   ":8080",
-	})
+	}), root
 }
 
 func doJSON(t *testing.T, mux *http.ServeMux, method, path, body string) *httptest.ResponseRecorder {
@@ -119,7 +119,7 @@ func doJSON(t *testing.T, mux *http.ServeMux, method, path, body string) *httpte
 }
 
 func TestHealth(t *testing.T) {
-	mux := newTestMux(t)
+	mux, _ := newTestMux(t)
 	rec := doJSON(t, mux, "GET", "/api/health", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -134,7 +134,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestRepoEndpoints(t *testing.T) {
-	mux := newTestMux(t)
+	mux, _ := newTestMux(t)
 	src := newSourceRepo(t)
 
 	rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`)
@@ -167,7 +167,7 @@ func TestRepoEndpoints(t *testing.T) {
 }
 
 func TestDeployEndpoints(t *testing.T) {
-	mux := newTestMux(t)
+	mux, _ := newTestMux(t)
 	src := newSourceRepo(t)
 	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != 201 {
 		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
@@ -226,8 +226,67 @@ func TestDeployEndpoints(t *testing.T) {
 	}
 }
 
+func TestDeleteRepo(t *testing.T) {
+	mux, root := newTestMux(t)
+	src := newSourceRepo(t)
+	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
+	}
+	// Build one deploy to ready so there are artifacts, state, and logs to
+	// remove.
+	if rec := doJSON(t, mux, "POST", "/api/deploys", `{"repo":"demo","ref":"main"}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("create deploy: %d %s", rec.Code, rec.Body)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		rec := doJSON(t, mux, "GET", "/api/deploys/1", "")
+		var d struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+			t.Fatal(err)
+		}
+		if d.Status == "ready" {
+			break
+		}
+		if d.Status == "failed" || time.Now().After(deadline) {
+			t.Fatalf("deploy status = %s", d.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if rec := doJSON(t, mux, "DELETE", "/api/repos/demo", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete repo: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doJSON(t, mux, "GET", "/api/repos/demo", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("get deleted repo: %d", rec.Code)
+	}
+	rec := doJSON(t, mux, "GET", "/api/deploys", "")
+	var list []json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list) != 0 {
+		t.Fatalf("deploys after delete: %s (%v)", rec.Body, err)
+	}
+	for _, dir := range []string{
+		filepath.Join(root, "artifacts", "demo"),
+		filepath.Join(root, "state", "demo"),
+		filepath.Join(root, "logs", "demo"),
+		filepath.Join(root, "repos", "demo.git"),
+	} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("%s still exists after delete (err=%v)", dir, err)
+		}
+	}
+	if rec := doJSON(t, mux, "DELETE", "/api/repos/demo", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("delete missing repo: %d", rec.Code)
+	}
+	// The name is immediately reusable.
+	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != http.StatusCreated {
+		t.Fatalf("re-create repo: %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestUnknownAPIPathIs404(t *testing.T) {
-	mux := newTestMux(t)
+	mux, _ := newTestMux(t)
 	rec := doJSON(t, mux, "GET", "/api/nope", "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)

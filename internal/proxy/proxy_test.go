@@ -16,16 +16,19 @@ import (
 
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/store"
+	"github.com/jmelahman/local-preview/internal/supervise"
 )
 
 // fakeBackends satisfies Backends without real processes.
 type fakeBackends struct {
-	port int
-	err  error
-	slow bool // simulate a cold start that outlives the request's patience
+	port    int
+	err     error
+	slow    bool // simulate a cold start that outlives the request's patience
+	lastKey supervise.Key
 }
 
-func (f *fakeBackends) EnsureRunning(ctx context.Context, repoID int64, repoName, beHash string) (int, error) {
+func (f *fakeBackends) EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (int, error) {
+	f.lastKey = k
 	if f.slow {
 		<-ctx.Done()
 		return 0, ctx.Err()
@@ -181,6 +184,64 @@ func TestPreviewAPIProxied(t *testing.T) {
 	}
 	if gotForwarded != host {
 		t.Fatalf("X-Forwarded-Host = %q, want %q", gotForwarded, host)
+	}
+}
+
+// TestProcessFrontendRouting covers the container-era routing shape: a
+// process-mode frontend receives page traffic, /api is prefix-stripped when
+// the backend asks, and extra routes reach the backend unstripped.
+func TestProcessFrontendRouting(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+
+	// Mark the frontend as a process and give the backend routing config.
+	if err := e.db.CreateFrontendArtifact(db.FrontendArtifact{
+		RepoID: e.repoID, FeHash: d.FeHash, RunConfig: `{}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.CreateBackendArtifact(db.BackendArtifact{
+		RepoID: e.repoID, BeHash: d.BeHash, StateDir: "/tmp/none",
+		RunConfig: `{"strip_api_prefix":true,"extra_routes":["/openapi.json","/auth/saml"]}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "upstream:%s", r.URL.Path)
+	}))
+	t.Cleanup(upstream.Close)
+	u, _ := url.Parse(upstream.URL)
+	port, _ := strconv.Atoi(u.Port())
+	e.fake.port = port
+
+	host := d.ShortSHA + ".demo.preview.localhost:8080"
+	cases := []struct {
+		path     string
+		wantBody string
+		wantSide supervise.Side
+	}{
+		{"/", "upstream:/", supervise.SideFrontend},
+		{"/chat/session", "upstream:/chat/session", supervise.SideFrontend},
+		{"/api/things", "upstream:/things", supervise.SideBackend}, // stripped
+		{"/openapi.json", "upstream:/openapi.json", supervise.SideBackend},
+		{"/auth/saml/callback", "upstream:/auth/saml/callback", supervise.SideBackend},
+	}
+	for _, tc := range cases {
+		code, body, _ := doReq(t, e.router, host, tc.path, false)
+		if code != 200 || body != tc.wantBody {
+			t.Errorf("%s: %d %q, want %q", tc.path, code, body, tc.wantBody)
+		}
+		if e.fake.lastKey.Side != tc.wantSide {
+			t.Errorf("%s routed to side %q, want %q", tc.path, e.fake.lastKey.Side, tc.wantSide)
+		}
+	}
+	// The frontend key pairs the fe artifact with this deploy's backend.
+	if e.fake.lastKey = (supervise.Key{}); true {
+		doReq(t, e.router, host, "/page", false)
+	}
+	if e.fake.lastKey.Hash != d.FeHash || e.fake.lastKey.Peer != d.BeHash {
+		t.Fatalf("frontend key = %+v", e.fake.lastKey)
 	}
 }
 

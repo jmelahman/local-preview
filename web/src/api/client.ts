@@ -33,6 +33,7 @@ export type Deploy = {
   attempt_count: number;
   preview_url?: string;
   process?: string;
+  fe_process?: string;
   created_at: string;
   updated_at: string;
 };

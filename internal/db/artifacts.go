@@ -23,6 +23,16 @@ func (s *Store) CreateBackendArtifact(a BackendArtifact) error {
 	return err
 }
 
+// UpdateBackendArtifactRunConfig refreshes the stored run contract for an
+// already-provisioned artifact (run-time-only fields like `networks` don't
+// feed the hash, so they land via update rather than a new row).
+func (s *Store) UpdateBackendArtifactRunConfig(repoID int64, beHash, runConfig string) error {
+	_, err := s.db.Exec(
+		`UPDATE backend_artifacts SET run_config = ? WHERE repo_id = ? AND be_hash = ?`,
+		runConfig, repoID, beHash)
+	return err
+}
+
 // GetBackendArtifact returns the artifact row, or ErrNotFound.
 func (s *Store) GetBackendArtifact(repoID int64, beHash string) (BackendArtifact, error) {
 	var a BackendArtifact

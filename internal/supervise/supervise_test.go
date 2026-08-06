@@ -98,6 +98,12 @@ func testExe(t *testing.T) string {
 // and the backend_artifacts row with the given run argv.
 func (f *fixture) provision(t *testing.T, beHash string, argv []string) {
 	t.Helper()
+	f.provisionIdle(t, beHash, argv, 0)
+}
+
+// provisionIdle is provision with an explicit idle_timeout.
+func (f *fixture) provisionIdle(t *testing.T, beHash string, argv []string, idle time.Duration) {
+	t.Helper()
 	scratch, _, err := f.files.NewScratchDir("be")
 	if err != nil {
 		t.Fatal(err)
@@ -112,6 +118,7 @@ func (f *fixture) provision(t *testing.T, beHash string, argv []string) {
 		Run:          argv,
 		HealthPath:   "/api/health",
 		StartTimeout: manifest.Duration(10 * time.Second),
+		IdleTimeout:  manifest.Duration(idle),
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
@@ -149,18 +156,18 @@ func TestEnsureRunningReuseAndStop(t *testing.T) {
 	f.provision(t, "be-run", serverArgv(t))
 	ctx := context.Background()
 
-	port, err := f.m.EnsureRunning(ctx, f.repoID, "demo", "be-run")
+	port, err := f.m.EnsureRunning(ctx, BackendKey(f.repoID, "be-run"), "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if code, _ := get(t, port, "/api/health"); code != 200 {
 		t.Fatalf("health = %d", code)
 	}
-	if got := f.m.Status(f.repoID, "be-run"); got != "running" {
+	if got := f.m.Status(BackendKey(f.repoID, "be-run")); got != "running" {
 		t.Fatalf("Status = %q", got)
 	}
 
-	again, err := f.m.EnsureRunning(ctx, f.repoID, "demo", "be-run")
+	again, err := f.m.EnsureRunning(ctx, BackendKey(f.repoID, "be-run"), "demo")
 	if err != nil || again != port {
 		t.Fatalf("second EnsureRunning = %d, %v; want same port %d", again, err, port)
 	}
@@ -170,8 +177,8 @@ func TestEnsureRunningReuseAndStop(t *testing.T) {
 		t.Fatalf("process records = %+v, %v", recs, err)
 	}
 
-	f.m.Stop(Key{RepoID: f.repoID, BeHash: "be-run"}, "test")
-	if got := f.m.Status(f.repoID, "be-run"); got != "stopped" {
+	f.m.Stop(BackendKey(f.repoID, "be-run"), "test")
+	if got := f.m.Status(BackendKey(f.repoID, "be-run")); got != "stopped" {
 		t.Fatalf("Status after stop = %q", got)
 	}
 	recs, _ = f.db.ListProcessRecords()
@@ -185,7 +192,7 @@ func TestOutOfBandKillRecovers(t *testing.T) {
 	f.provision(t, "be-kill", serverArgv(t))
 	ctx := context.Background()
 
-	port, err := f.m.EnsureRunning(ctx, f.repoID, "demo", "be-kill")
+	port, err := f.m.EnsureRunning(ctx, BackendKey(f.repoID, "be-kill"), "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,13 +204,13 @@ func TestOutOfBandKillRecovers(t *testing.T) {
 
 	// The reaper notices and clears state; a new EnsureRunning restarts.
 	deadline := time.Now().Add(5 * time.Second)
-	for f.m.Status(f.repoID, "be-kill") != "stopped" {
+	for f.m.Status(BackendKey(f.repoID, "be-kill")) != "stopped" {
 		if time.Now().After(deadline) {
 			t.Fatal("kill was not detected")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	newPort, err := f.m.EnsureRunning(ctx, f.repoID, "demo", "be-kill")
+	newPort, err := f.m.EnsureRunning(ctx, BackendKey(f.repoID, "be-kill"), "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,11 +224,11 @@ func TestInstantCrashSurfaces(t *testing.T) {
 	f := newFixture(t)
 	f.provision(t, "be-crash", []string{testExe(t), "--helper-crash"})
 
-	_, err := f.m.EnsureRunning(context.Background(), f.repoID, "demo", "be-crash")
+	_, err := f.m.EnsureRunning(context.Background(), BackendKey(f.repoID, "be-crash"), "demo")
 	if err == nil || !strings.Contains(err.Error(), "exited") {
 		t.Fatalf("err = %v, want exit error", err)
 	}
-	if got := f.m.Status(f.repoID, "be-crash"); got != "stopped" {
+	if got := f.m.Status(BackendKey(f.repoID, "be-crash")); got != "stopped" {
 		t.Fatalf("Status = %q", got)
 	}
 }
@@ -247,6 +254,61 @@ func commit(t *testing.T, dir, msg string) string {
 	runTestGit(t, dir, "add", "-A")
 	runTestGit(t, dir, "commit", "-qm", msg)
 	return runTestGit(t, dir, "rev-parse", "HEAD")
+}
+
+// waitStatus polls Status until want or the deadline.
+func (f *fixture) waitStatus(t *testing.T, k Key, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.m.Status(k) != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("status(%v) = %q, want %q", k, f.m.Status(k), want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestIdleReap(t *testing.T) {
+	f := newFixture(t)
+	f.m.reapInterval = 40 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	f.m.StartReaper(ctx)
+
+	f.provisionIdle(t, "be-idle", serverArgv(t), 150*time.Millisecond)
+	k := BackendKey(f.repoID, "be-idle")
+	if _, err := f.m.EnsureRunning(context.Background(), k, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	// Untouched past its idle_timeout → the reaper stops it.
+	f.waitStatus(t, k, "stopped")
+}
+
+func TestLRUWarmCap(t *testing.T) {
+	f := newFixture(t)
+	f.m.reapInterval = 40 * time.Millisecond
+	f.m.SetMaxWarm(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	f.m.StartReaper(ctx)
+
+	f.provision(t, "be-old", serverArgv(t))
+	f.provision(t, "be-new", serverArgv(t))
+	kOld := BackendKey(f.repoID, "be-old")
+	kNew := BackendKey(f.repoID, "be-new")
+	if _, err := f.m.EnsureRunning(context.Background(), kOld, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond) // distinct touch times
+	if _, err := f.m.EnsureRunning(context.Background(), kNew, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	// Beyond max-warm 1 the least-recently-used backend stops; the newer
+	// one survives.
+	f.waitStatus(t, kOld, "stopped")
+	if got := f.m.Status(kNew); got != "running" {
+		t.Fatalf("newer backend = %q, want running", got)
+	}
 }
 
 func TestForkOrInitStateDir(t *testing.T) {
@@ -288,7 +350,7 @@ func TestForkOrInitStateDir(t *testing.T) {
 	}
 
 	// Start be1 so the fork has to quiesce it.
-	if _, err := f.m.EnsureRunning(ctx, f.repoID, "demo", "be1"); err != nil {
+	if _, err := f.m.EnsureRunning(ctx, BackendKey(f.repoID, "be1"), "demo"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -297,7 +359,7 @@ func TestForkOrInitStateDir(t *testing.T) {
 	if err := f.m.ForkOrInitStateDir(ctx, repo, f.repoID, "demo", "be2", c2, string(cfg)); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.m.Status(f.repoID, "be1"); got != "stopped" {
+	if got := f.m.Status(BackendKey(f.repoID, "be1")); got != "stopped" {
 		t.Fatalf("ancestor status after fork = %q, want stopped (quiesced)", got)
 	}
 	forked, err := os.ReadFile(filepath.Join(f.files.StateDirPath("demo", "be2"), "count"))

@@ -72,6 +72,7 @@ func Root() *cobra.Command {
 	var inMemory bool
 	var previewDomain string
 	var buildConcurrency int
+	var maxWarm int
 
 	cmd := &cobra.Command{
 		Use:     "preview",
@@ -83,7 +84,7 @@ func Root() *cobra.Command {
 		Use:   "serve",
 		Short: "Start the HTTP server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(addr, dataDir, inMemory, previewDomain, buildConcurrency)
+			return run(addr, dataDir, inMemory, previewDomain, buildConcurrency, maxWarm)
 		},
 	}
 	serve.Flags().StringVar(&addr, "addr", ":8080", "HTTP listen address")
@@ -91,6 +92,7 @@ func Root() *cobra.Command {
 	serve.Flags().BoolVar(&inMemory, "in-memory", false, "Use an ephemeral in-memory SQLite database; all data is discarded on shutdown")
 	serve.Flags().StringVar(&previewDomain, "preview-domain", "", "Base domain previews are served under (default: $PREVIEW_DOMAIN or preview.localhost)")
 	serve.Flags().IntVar(&buildConcurrency, "build-concurrency", 2, "Number of deploys built in parallel")
+	serve.Flags().IntVar(&maxWarm, "max-warm", 8, "Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (0 = unlimited)")
 	cmd.AddCommand(serve)
 
 	addClientCommands(cmd)
@@ -98,7 +100,7 @@ func Root() *cobra.Command {
 	return cmd
 }
 
-func run(addr, dataDirOverride string, inMemory bool, previewDomain string, buildConcurrency int) error {
+func run(addr, dataDirOverride string, inMemory bool, previewDomain string, buildConcurrency, maxWarm int) error {
 	cfg, err := config.Load(dataDirOverride, previewDomain)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -127,6 +129,8 @@ func run(addr, dataDirOverride string, inMemory bool, previewDomain string, buil
 	gitMgr := gitrepo.NewManager(cfg.ReposDir())
 	super := supervise.New(database, files, cfg.LogsDir())
 	super.ReclaimOrphans()
+	super.SetMaxWarm(maxWarm)
+	super.StartReaper(workCtx)
 	queue := build.NewQueue(database, gitMgr, files, super, cfg.LogsDir(), nil)
 	queue.SetManifestRefs([]build.ManifestRef{
 		{Path: build.ManifestName},

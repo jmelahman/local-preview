@@ -65,6 +65,30 @@ func (s *Store) ListRepos() ([]Repo, error) {
 	return repos, rows.Err()
 }
 
+// DeleteRepo removes a repo and every row that references it (deploys,
+// branch aliases, artifacts, process bookkeeping) in one transaction.
+func (s *Store) DeleteRepo(id int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM process_events WHERE repo_id = ?`,
+		`DELETE FROM process_records WHERE repo_id = ?`,
+		`DELETE FROM backend_artifacts WHERE repo_id = ?`,
+		`DELETE FROM frontend_artifacts WHERE repo_id = ?`,
+		`DELETE FROM branch_aliases WHERE repo_id = ?`,
+		`DELETE FROM deploys WHERE repo_id = ?`,
+		`DELETE FROM repos WHERE id = ?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // isUniqueErr reports whether err is a SQLite uniqueness violation.
 func isUniqueErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")

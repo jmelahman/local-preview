@@ -31,8 +31,12 @@ services:
     user: "${PREVIEW_UID:-0}:${PREVIEW_GID:-0}"
     group_add:
       - "${DOCKER_SOCK_GID:-0}"
-    ports:
-      - "8080:8080"
+    # Host networking, not a port mapping: manifest `run_image` processes
+    # publish their ports on the DOCKER HOST's loopback, which is only this
+    # server's loopback when it shares the host network namespace. The
+    # server still listens on :8080. Repos using only static frontends and
+    # host-run backends could revert to `ports: ["8080:8080"]`.
+    network_mode: host
     environment:
       # Same absolute path on the host and in the container: build
       # containers are started via the host daemon, which resolves bind
