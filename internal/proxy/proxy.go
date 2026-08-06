@@ -199,9 +199,18 @@ func (rt *Router) proxyAPI(w http.ResponseWriter, r *http.Request, e cacheEntry,
 		return
 	}
 	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", port)}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		rt.errorPage(w, r, http.StatusBadGateway, "Backend error", err.Error())
+	proxy := &httputil.ReverseProxy{
+		// SetURL also rewrites the outbound Host to the target: backends see
+		// themselves, not the preview subdomain (which would confuse any app
+		// that routes on Host — including a nested local-preview). The
+		// original host travels in X-Forwarded-Host.
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			pr.SetXForwarded()
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			rt.errorPage(w, r, http.StatusBadGateway, "Backend error", err.Error())
+		},
 	}
 	proxy.ServeHTTP(w, r)
 }

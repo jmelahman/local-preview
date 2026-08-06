@@ -1,0 +1,27 @@
+# local-preview's own preview contract — the canonical example for a repo
+# with a Go backend at the root and a Vite frontend in web/. Register this
+# repo with itself to preview every commit of the orchestrator.
+
+[frontend]
+path  = "web"
+build = [["npm", "ci"], ["npm", "run", "build"]]
+dist  = "dist"
+
+[backend]
+path    = "."
+exclude = [
+  "docs/",
+  "plans/",
+  "*.md",
+  ".github/",
+  ".devcontainer/",
+  ".vscode/",
+  ".kanban.toml",
+  ".pre-commit-config.yaml",
+  "compose.yaml",
+  "docker-bake.hcl",
+  "Dockerfile",
+]
+build       = [["go", "build", "-o", "bin/server", "."]]
+run         = ["./bin/server", "serve", "--addr", "127.0.0.1:{port}", "--data-dir", "{state_dir}"]
+health_path = "/api/health"

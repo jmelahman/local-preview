@@ -158,7 +158,10 @@ func TestPreviewAPIProxied(t *testing.T) {
 	e := newTestEnv(t)
 	d := e.readyDeploy(t, shaOne)
 
+	var gotHost, gotForwarded string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		gotForwarded = r.Header.Get("X-Forwarded-Host")
 		fmt.Fprintf(w, "upstream:%s", r.URL.Path)
 	}))
 	t.Cleanup(upstream.Close)
@@ -170,6 +173,14 @@ func TestPreviewAPIProxied(t *testing.T) {
 	code, body, _ := doReq(t, e.router, host, "/api/things", false)
 	if code != 200 || body != "upstream:/api/things" {
 		t.Fatalf("api proxy: %d %q", code, body)
+	}
+	// The backend must see itself as the host (Host-routing apps would
+	// misroute otherwise); the preview host travels in X-Forwarded-Host.
+	if gotHost != u.Host {
+		t.Fatalf("upstream Host = %q, want %q", gotHost, u.Host)
+	}
+	if gotForwarded != host {
+		t.Fatalf("X-Forwarded-Host = %q, want %q", gotForwarded, host)
 	}
 }
 
