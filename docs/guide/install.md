@@ -30,9 +30,10 @@ docker run -d --name preview \
 ```
 
 ::: warning
-The published image is minimal and does not bundle `git` or build toolchains,
-so it can serve the dashboard but cannot yet build target repos. Run the
-binary on the host for real use; a batteries-included image is planned.
+The published image bundles `git` but no build toolchains (`go`, `npm`, …),
+so it can register repos and serve the dashboard but can only build targets
+whose build commands need nothing beyond a shell. Run the binary on the host
+for real use; a batteries-included image is planned.
 :::
 
 ## From source
