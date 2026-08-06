@@ -184,6 +184,30 @@ func (r Repo) BranchesPointingAt(ctx context.Context, sha string) ([]string, err
 	return branches, nil
 }
 
+// BranchTip is one branch head in the mirror.
+type BranchTip struct {
+	Branch string
+	SHA    string
+}
+
+// BranchTips returns every branch head in the mirror, in refname order.
+func (r Repo) BranchTips(ctx context.Context) ([]BranchTip, error) {
+	out, err := runGit(ctx, r.Path,
+		"for-each-ref", "--format=%(refname:short)%00%(objectname)", "refs/heads")
+	if err != nil {
+		return nil, err
+	}
+	var tips []BranchTip
+	for line := range strings.Lines(string(out)) {
+		branch, sha, ok := strings.Cut(strings.TrimSpace(line), "\x00")
+		if !ok {
+			continue
+		}
+		tips = append(tips, BranchTip{Branch: branch, SHA: sha})
+	}
+	return tips, nil
+}
+
 // ReadFile returns the content of path at sha.
 func (r Repo) ReadFile(ctx context.Context, sha, path string) ([]byte, error) {
 	return runGit(ctx, r.Path, "show", sha+":"+path)

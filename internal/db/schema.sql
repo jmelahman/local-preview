@@ -13,6 +13,10 @@ CREATE TABLE IF NOT EXISTS repos (
     name TEXT NOT NULL UNIQUE,
     source TEXT NOT NULL,
     bare_path TEXT NOT NULL,
+    -- Watched repos are polled for new commits; watch_branches narrows which
+    -- branch tips deploy (comma-separated globs, empty = all branches).
+    watch INTEGER NOT NULL DEFAULT 0,
+    watch_branches TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 

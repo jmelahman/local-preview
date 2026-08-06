@@ -80,5 +80,7 @@ multi-label base domain.
 ## Trigger adapters
 
 Deploying is one API call (`POST /api/deploys`) wrapped by the CLI. Everything
-else is a thin adapter — the git post-commit hook today; branch pollers and
-webhook receivers later. The core doesn't care what triggered a deploy.
+else is a thin adapter — the git post-commit hook, the branch poller behind
+watched repos, and the GitHub webhook receiver. The core doesn't care what
+triggered a deploy; every trigger produces identical artifacts for the same
+commit. See [deployment triggers](/guide/triggers).

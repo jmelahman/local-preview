@@ -94,13 +94,14 @@ func newTestMux(t *testing.T) (*http.ServeMux, string) {
 	queue.Start(ctx, 1)
 
 	return NewMux(Deps{
-		Store:  database,
-		Build:  BuildInfo{Version: "test"},
-		Config: config.Config{DataDir: root, PreviewDomain: "preview.localhost"},
-		Git:    gitMgr,
-		Queue:  queue,
-		Super:  super,
-		Addr:   ":8080",
+		Store:               database,
+		Build:               BuildInfo{Version: "test"},
+		Config:              config.Config{DataDir: root, PreviewDomain: "preview.localhost"},
+		Git:                 gitMgr,
+		Queue:               queue,
+		Super:               super,
+		GitHubWebhookSecret: testWebhookSecret,
+		Addr:                ":8080",
 	}), root
 }
 
@@ -298,6 +299,62 @@ func TestDeleteRepo(t *testing.T) {
 	// The name is immediately reusable.
 	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != http.StatusCreated {
 		t.Fatalf("re-create repo: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestRepoWatchEndpoints(t *testing.T) {
+	mux, _ := newTestMux(t)
+	src := newSourceRepo(t)
+
+	rec := doJSON(t, mux, "POST", "/api/repos",
+		`{"name":"demo","source":`+jsonQuote(src)+`,"watch":true,"watch_branches":"main"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create watched repo: %d %s", rec.Code, rec.Body)
+	}
+	var repo struct {
+		Watch         bool   `json:"watch"`
+		WatchBranches string `json:"watch_branches"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &repo); err != nil {
+		t.Fatal(err)
+	}
+	if !repo.Watch || repo.WatchBranches != "main" {
+		t.Fatalf("created repo watch fields: %s", rec.Body)
+	}
+
+	// Disable watching without touching the stored branch filter.
+	rec = doJSON(t, mux, "PATCH", "/api/repos/demo", `{"watch":false}`)
+	if err := json.Unmarshal(rec.Body.Bytes(), &repo); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("patch: %d %s (%v)", rec.Code, rec.Body, err)
+	}
+	if repo.Watch || repo.WatchBranches != "main" {
+		t.Fatalf("watch off should keep branches: %s", rec.Body)
+	}
+
+	// Re-enable with a new filter; whitespace canonicalizes.
+	rec = doJSON(t, mux, "PATCH", "/api/repos/demo", `{"watch":true,"watch_branches":" main , release/* "}`)
+	if err := json.Unmarshal(rec.Body.Bytes(), &repo); err != nil {
+		t.Fatal(err)
+	}
+	if !repo.Watch || repo.WatchBranches != "main,release/*" {
+		t.Fatalf("re-enable: %s", rec.Body)
+	}
+
+	for body, want := range map[string]int{
+		`{"watch_branches":"bad["}`: http.StatusBadRequest,
+		`{}`:                        http.StatusBadRequest,
+		`{bad json`:                 http.StatusBadRequest,
+	} {
+		if rec := doJSON(t, mux, "PATCH", "/api/repos/demo", body); rec.Code != want {
+			t.Errorf("PATCH %s: %d, want %d", body, rec.Code, want)
+		}
+	}
+	if rec := doJSON(t, mux, "PATCH", "/api/repos/nope", `{"watch":true}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("patch missing repo: %d", rec.Code)
+	}
+	if rec := doJSON(t, mux, "POST", "/api/repos",
+		`{"name":"bad","source":"/x","watch_branches":"oops["}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("create with bad pattern: %d", rec.Code)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/supervise"
+	"github.com/jmelahman/local-preview/internal/watch"
 	"github.com/jmelahman/local-preview/web"
 )
 
@@ -36,6 +37,12 @@ type Deps struct {
 	Git    *gitrepo.Manager
 	Queue  *build.Queue
 	Super  *supervise.Manager
+	// Watcher, when set, is kicked after watch settings change so a newly
+	// watched repo polls immediately instead of waiting an interval.
+	Watcher *watch.Watcher
+	// GitHubWebhookSecret validates X-Hub-Signature-256 on webhook
+	// deliveries; empty disables POST /api/webhooks/github.
+	GitHubWebhookSecret string
 	// Addr is the server's listen address, used to construct preview URLs.
 	Addr string
 }
@@ -47,7 +54,9 @@ func NewMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("POST /api/repos", d.handleCreateRepo)
 	mux.HandleFunc("GET /api/repos", d.handleListRepos)
 	mux.HandleFunc("GET /api/repos/{name}", d.handleGetRepo)
+	mux.HandleFunc("PATCH /api/repos/{name}", d.handleUpdateRepo)
 	mux.HandleFunc("DELETE /api/repos/{name}", d.handleDeleteRepo)
+	mux.HandleFunc("POST /api/webhooks/github", d.handleGitHubWebhook)
 	mux.HandleFunc("POST /api/deploys", d.handleCreateDeploy)
 	mux.HandleFunc("GET /api/deploys", d.handleListDeploys)
 	mux.HandleFunc("GET /api/deploys/{id}", d.handleGetDeploy)
@@ -65,8 +74,10 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name   string `json:"name"`
-		Source string `json:"source"`
+		Name          string `json:"name"`
+		Source        string `json:"source"`
+		Watch         bool   `json:"watch"`
+		WatchBranches string `json:"watch_branches"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "invalid JSON body")
@@ -80,6 +91,11 @@ func (d Deps) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Source == "" {
 		httpError(w, http.StatusBadRequest, "source is required (a local path or clone URL)")
+		return
+	}
+	branches, err := watch.ValidatePatterns(req.WatchBranches)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if _, err := d.Store.GetRepoByName(req.Name); err == nil {
@@ -100,7 +116,61 @@ func (d Deps) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "create repo", err)
 		return
 	}
+	if req.Watch || branches != "" {
+		if repo, err = d.Store.SetRepoWatch(repo.ID, req.Watch, branches); err != nil {
+			internalError(w, "set repo watch", err)
+			return
+		}
+		if req.Watch {
+			d.Watcher.Kick()
+		}
+	}
 	writeJSON(w, http.StatusCreated, repo)
+}
+
+// handleUpdateRepo changes a repo's watch settings. Fields absent from the
+// PATCH body keep their current value.
+func (d Deps) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
+	repo, err := d.Store.GetRepoByName(r.PathValue("name"))
+	if errors.Is(err, db.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "repo not found")
+		return
+	}
+	if err != nil {
+		internalError(w, "get repo", err)
+		return
+	}
+	var req struct {
+		Watch         *bool   `json:"watch"`
+		WatchBranches *string `json:"watch_branches"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Watch == nil && req.WatchBranches == nil {
+		httpError(w, http.StatusBadRequest, "nothing to update: set watch and/or watch_branches")
+		return
+	}
+	watchOn, branches := repo.Watch, repo.WatchBranches
+	if req.Watch != nil {
+		watchOn = *req.Watch
+	}
+	if req.WatchBranches != nil {
+		if branches, err = watch.ValidatePatterns(*req.WatchBranches); err != nil {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	repo, err = d.Store.SetRepoWatch(repo.ID, watchOn, branches)
+	if err != nil {
+		internalError(w, "set repo watch", err)
+		return
+	}
+	if watchOn {
+		d.Watcher.Kick()
+	}
+	writeJSON(w, http.StatusOK, repo)
 }
 
 func (d Deps) handleListRepos(w http.ResponseWriter, r *http.Request) {

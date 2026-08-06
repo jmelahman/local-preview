@@ -54,11 +54,14 @@ func Open(path string) (*Store, error) {
 // migrate adds columns to tables that predate them — CREATE TABLE IF NOT
 // EXISTS in schema.sql only shapes fresh databases.
 func migrate(sqlDB *sql.DB) error {
-	added := []struct{ table, column string }{
-		{"deploys", "branch"},
-		{"deploys", "author_name"},
-		{"deploys", "author_email"},
-		{"backend_artifacts", "init_done_at"},
+	const text = `TEXT NOT NULL DEFAULT ''`
+	added := []struct{ table, column, ddl string }{
+		{"deploys", "branch", text},
+		{"deploys", "author_name", text},
+		{"deploys", "author_email", text},
+		{"backend_artifacts", "init_done_at", text},
+		{"repos", "watch", `INTEGER NOT NULL DEFAULT 0`},
+		{"repos", "watch_branches", text},
 	}
 	for _, a := range added {
 		var n int
@@ -70,8 +73,8 @@ func migrate(sqlDB *sql.DB) error {
 		}
 		if n == 0 {
 			if _, err := sqlDB.Exec(fmt.Sprintf(
-				`ALTER TABLE %s ADD COLUMN %s TEXT NOT NULL DEFAULT ''`,
-				a.table, a.column)); err != nil {
+				`ALTER TABLE %s ADD COLUMN %s %s`,
+				a.table, a.column, a.ddl)); err != nil {
 				return err
 			}
 		}

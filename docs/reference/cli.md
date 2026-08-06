@@ -15,13 +15,17 @@ Start the orchestrator.
 | `--in-memory` | `false` | Ephemeral in-memory SQLite |
 | `--preview-domain` | `preview.localhost` | Base domain previews are served under |
 | `--build-concurrency` | `2` | Number of deploys built in parallel |
+| `--poll-interval` | `1m` | How often watched repos are fetched for new commits (`0` disables watching) |
+| `--github-webhook-secret` | `$PREVIEW_GITHUB_WEBHOOK_SECRET` | Shared secret validating GitHub webhook deliveries (empty disables the endpoint) |
 
 ## `preview repo`
 
 | Command | Description |
 | --- | --- |
-| `preview repo create <name> --source <path-or-url>` | Register a repository (mirror clone) |
+| `preview repo create <name> --source <path-or-url>` | Register a repository (mirror clone); `--watch` and `--branches` enable [watching](/guide/triggers#watched-repos) from the start |
 | `preview repo list` | List registered repositories |
+| `preview repo watch <name>` | Poll the repo and deploy new branch tips automatically (`--branches` narrows which, as comma-separated globs) |
+| `preview repo unwatch <name>` | Stop watching |
 | `preview repo delete <name>` | Unregister a repository and delete its previews (deploys, artifacts, state, logs, mirror clone) |
 
 ## `preview deploy`

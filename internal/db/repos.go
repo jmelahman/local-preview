@@ -10,11 +10,22 @@ var ErrConflict = errors.New("already exists")
 
 // Repo is a row in the repos table.
 type Repo struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Source    string `json:"source"`
-	BarePath  string `json:"-"`
-	CreatedAt string `json:"created_at"`
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Source   string `json:"source"`
+	BarePath string `json:"-"`
+	// Watch marks the repo for polling: new branch tips deploy
+	// automatically. WatchBranches narrows which branches (comma-separated
+	// globs, empty = all).
+	Watch         bool   `json:"watch"`
+	WatchBranches string `json:"watch_branches"`
+	CreatedAt     string `json:"created_at"`
+}
+
+const repoCols = `id, name, source, bare_path, watch, watch_branches, created_at`
+
+func (r *Repo) scanFields() []any {
+	return []any{&r.ID, &r.Name, &r.Source, &r.BarePath, &r.Watch, &r.WatchBranches, &r.CreatedAt}
 }
 
 // CreateRepo inserts a repo and returns it. Returns ErrConflict if the name
@@ -23,9 +34,9 @@ func (s *Store) CreateRepo(name, source, barePath string) (Repo, error) {
 	var r Repo
 	err := s.db.QueryRow(
 		`INSERT INTO repos (name, source, bare_path) VALUES (?, ?, ?)
-		 RETURNING id, name, source, bare_path, created_at`,
+		 RETURNING `+repoCols,
 		name, source, barePath,
-	).Scan(&r.ID, &r.Name, &r.Source, &r.BarePath, &r.CreatedAt)
+	).Scan(r.scanFields()...)
 	if isUniqueErr(err) {
 		return Repo{}, ErrConflict
 	}
@@ -39,8 +50,8 @@ func (s *Store) CreateRepo(name, source, barePath string) (Repo, error) {
 func (s *Store) GetRepoByName(name string) (Repo, error) {
 	var r Repo
 	err := s.db.QueryRow(
-		`SELECT id, name, source, bare_path, created_at FROM repos WHERE name = ?`, name,
-	).Scan(&r.ID, &r.Name, &r.Source, &r.BarePath, &r.CreatedAt)
+		`SELECT `+repoCols+` FROM repos WHERE name = ?`, name,
+	).Scan(r.scanFields()...)
 	if err != nil {
 		return Repo{}, mapNoRows(err)
 	}
@@ -49,7 +60,7 @@ func (s *Store) GetRepoByName(name string) (Repo, error) {
 
 // ListRepos returns all repos, oldest first.
 func (s *Store) ListRepos() ([]Repo, error) {
-	rows, err := s.db.Query(`SELECT id, name, source, bare_path, created_at FROM repos ORDER BY id`)
+	rows, err := s.db.Query(`SELECT ` + repoCols + ` FROM repos ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -57,12 +68,27 @@ func (s *Store) ListRepos() ([]Repo, error) {
 	repos := []Repo{}
 	for rows.Next() {
 		var r Repo
-		if err := rows.Scan(&r.ID, &r.Name, &r.Source, &r.BarePath, &r.CreatedAt); err != nil {
+		if err := rows.Scan(r.scanFields()...); err != nil {
 			return nil, err
 		}
 		repos = append(repos, r)
 	}
 	return repos, rows.Err()
+}
+
+// SetRepoWatch updates a repo's watch settings and returns the updated row,
+// or ErrNotFound.
+func (s *Store) SetRepoWatch(id int64, watch bool, branches string) (Repo, error) {
+	var r Repo
+	err := s.db.QueryRow(
+		`UPDATE repos SET watch = ?, watch_branches = ? WHERE id = ?
+		 RETURNING `+repoCols,
+		watch, branches, id,
+	).Scan(r.scanFields()...)
+	if err != nil {
+		return Repo{}, mapNoRows(err)
+	}
+	return r, nil
 }
 
 // DeleteRepo removes a repo and every row that references it (deploys,

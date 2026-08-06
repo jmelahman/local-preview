@@ -93,6 +93,23 @@ func TestRepoCRUD(t *testing.T) {
 	if err != nil || len(repos) != 1 {
 		t.Fatalf("ListRepos = %+v, %v", repos, err)
 	}
+
+	if r.Watch || r.WatchBranches != "" {
+		t.Fatalf("new repo should not be watched: %+v", r)
+	}
+	w, err := s.SetRepoWatch(r.ID, true, "main,release/*")
+	if err != nil || !w.Watch || w.WatchBranches != "main,release/*" {
+		t.Fatalf("SetRepoWatch = %+v, %v", w, err)
+	}
+	if got, _ := s.GetRepoByName("demo"); !got.Watch || got.WatchBranches != "main,release/*" {
+		t.Fatalf("watch not persisted: %+v", got)
+	}
+	if w, err = s.SetRepoWatch(r.ID, false, ""); err != nil || w.Watch || w.WatchBranches != "" {
+		t.Fatalf("unwatch = %+v, %v", w, err)
+	}
+	if _, err := s.SetRepoWatch(999, true, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetRepoWatch missing repo err = %v, want ErrNotFound", err)
+	}
 }
 
 const shaA = "aaaaaaa1111111111111111111111111111111111"
@@ -231,6 +248,16 @@ func TestMigrateAddsColumnsToExistingDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A repos table from before the watch columns existed.
+	if _, err := old.Exec(`CREATE TABLE repos (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL UNIQUE,
+		source TEXT NOT NULL,
+		bare_path TEXT NOT NULL,
+		created_at TEXT NOT NULL DEFAULT ''
+	)`); err != nil {
+		t.Fatal(err)
+	}
 	// A deploys table from before the commit-metadata columns existed.
 	if _, err := old.Exec(`CREATE TABLE deploys (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -271,6 +298,9 @@ func TestMigrateAddsColumnsToExistingDB(t *testing.T) {
 	}
 	if d.Branch != "main" || d.AuthorName != "Ada" {
 		t.Fatalf("migrated columns not usable: %+v", d)
+	}
+	if r, err = s.SetRepoWatch(r.ID, true, "main"); err != nil || !r.Watch {
+		t.Fatalf("migrated repos columns not usable: %+v, %v", r, err)
 	}
 }
 

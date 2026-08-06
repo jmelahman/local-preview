@@ -34,6 +34,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/proxy"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
+	"github.com/jmelahman/local-preview/internal/watch"
 )
 
 // ErrNotFound is returned when a repo or deploy does not exist.
@@ -100,6 +101,9 @@ type Options struct {
 	// manifest. The file is read from the server's disk at build time, not
 	// from the deployed commit.
 	LocalManifestDir string
+	// PollInterval is how often watched repos (SetRepoWatch) are fetched
+	// for new commits. 0 defaults to 1 minute; negative disables watching.
+	PollInterval time.Duration
 }
 
 // ManifestSource locates a preview manifest: a TOML file at the target
@@ -111,10 +115,15 @@ type ManifestSource struct {
 
 // Repo is a registered repository.
 type Repo struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Source    string `json:"source"`
-	CreatedAt string `json:"created_at"`
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Source string `json:"source"`
+	// Watch marks the repo for polling: new branch tips deploy
+	// automatically. WatchBranches narrows which branches (comma-separated
+	// globs, empty = all).
+	Watch         bool   `json:"watch"`
+	WatchBranches string `json:"watch_branches"`
+	CreatedAt     string `json:"created_at"`
 }
 
 // Deploy is one commit's preview deployment.
@@ -161,6 +170,7 @@ type Orchestrator struct {
 	git      *gitrepo.Manager
 	super    *supervise.Manager
 	queue    *build.Queue
+	watcher  *watch.Watcher
 	stop     context.CancelFunc
 }
 
@@ -230,6 +240,11 @@ func New(opts Options) (*Orchestrator, error) {
 		queue.SetLocalManifestDir(opts.LocalManifestDir)
 	}
 	queue.Start(ctx, opts.BuildConcurrency)
+	if opts.PollInterval == 0 {
+		opts.PollInterval = watch.DefaultInterval
+	}
+	watcher := watch.New(database, gitMgr, queue, opts.PollInterval)
+	watcher.Start(ctx)
 
 	return &Orchestrator{
 		opts:     opts,
@@ -238,6 +253,7 @@ func New(opts Options) (*Orchestrator, error) {
 		git:      gitMgr,
 		super:    super,
 		queue:    queue,
+		watcher:  watcher,
 		stop:     cancel,
 	}, nil
 }
@@ -307,6 +323,33 @@ func (o *Orchestrator) DeleteRepo(name string) error {
 	o.files.RemoveRepo(repo.Name)
 	os.RemoveAll(o.opts.DataDir + "/logs/" + repo.Name)
 	return nil
+}
+
+// SetRepoWatch enables or disables watching for a registered repo: watched
+// repos are polled every PollInterval and new branch tips deploy
+// automatically. branches narrows which branches with comma-separated globs
+// ("" = all). Enabling deploys the current tip of every matched branch that
+// has no deploy yet.
+func (o *Orchestrator) SetRepoWatch(name string, watchOn bool, branches string) (Repo, error) {
+	canon, err := watch.ValidatePatterns(branches)
+	if err != nil {
+		return Repo{}, err
+	}
+	repo, err := o.database.GetRepoByName(name)
+	if errors.Is(err, db.ErrNotFound) {
+		return Repo{}, fmt.Errorf("repo %q: %w", name, ErrNotFound)
+	}
+	if err != nil {
+		return Repo{}, err
+	}
+	row, err := o.database.SetRepoWatch(repo.ID, watchOn, canon)
+	if err != nil {
+		return Repo{}, err
+	}
+	if watchOn {
+		o.watcher.Kick()
+	}
+	return toRepo(row), nil
 }
 
 // Repos lists registered repositories.
@@ -392,7 +435,11 @@ func (o *Orchestrator) DeployLogs(id int64) (string, error) {
 }
 
 func toRepo(r db.Repo) Repo {
-	return Repo{ID: r.ID, Name: r.Name, Source: r.Source, CreatedAt: r.CreatedAt}
+	return Repo{
+		ID: r.ID, Name: r.Name, Source: r.Source,
+		Watch: r.Watch, WatchBranches: r.WatchBranches,
+		CreatedAt: r.CreatedAt,
+	}
 }
 
 func (o *Orchestrator) toDeploy(row db.DeployRow) Deploy {

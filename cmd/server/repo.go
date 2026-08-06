@@ -20,6 +20,8 @@ func repoCmd() *cobra.Command {
 	addServerFlag(parent, &serverURL)
 
 	var source string
+	var createWatch bool
+	var createBranches string
 	create := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Register a repository for previews",
@@ -27,11 +29,45 @@ func repoCmd() *cobra.Command {
 			"(a local path or clone URL) and serves previews at <sha>.<name>.<domain>.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoCreate(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(), args[0], source)
+			return runRepoCreate(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
+				args[0], source, createWatch, createBranches)
 		},
 	}
 	create.Flags().StringVar(&source, "source", "", "Local path or clone URL of the repository (required)")
+	create.Flags().BoolVar(&createWatch, "watch", false, "Watch the repo: poll for new commits and deploy them")
+	create.Flags().StringVar(&createBranches, "branches", "", "Branches to watch, as comma-separated globs (default: all)")
 	_ = create.MarkFlagRequired("source")
+
+	var watchBranches string
+	watchCmd := &cobra.Command{
+		Use:   "watch <name>",
+		Short: "Poll a repository and deploy new branch tips automatically",
+		Long: "Enable watching: the server periodically fetches the repo and deploys\n" +
+			"the tip of every branch that gains commits. --branches narrows which\n" +
+			"branches with comma-separated globs (e.g. \"main,release/*\"); globs\n" +
+			"don't cross '/'. Enabling deploys the current tip of every matched\n" +
+			"branch that has no deploy yet.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var branches *string
+			if cmd.Flags().Changed("branches") {
+				branches = &watchBranches
+			}
+			return runRepoWatch(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
+				args[0], true, branches)
+		},
+	}
+	watchCmd.Flags().StringVar(&watchBranches, "branches", "", "Branches to watch, as comma-separated globs (default: all)")
+
+	unwatch := &cobra.Command{
+		Use:   "unwatch <name>",
+		Short: "Stop watching a repository",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRepoWatch(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
+				args[0], false, nil)
+		},
+	}
 
 	list := &cobra.Command{
 		Use:   "list",
@@ -52,7 +88,7 @@ func repoCmd() *cobra.Command {
 		},
 	}
 
-	parent.AddCommand(create, list, del)
+	parent.AddCommand(create, list, del, watchCmd, unwatch)
 	return parent
 }
 
@@ -64,13 +100,37 @@ func runRepoDelete(ctx context.Context, url string, out io.Writer, name string) 
 	return nil
 }
 
-func runRepoCreate(ctx context.Context, url string, out io.Writer, name, source string) error {
-	repo, err := client.New(url, nil).CreateRepo(ctx, name, source)
+func runRepoCreate(ctx context.Context, url string, out io.Writer, name, source string, watch bool, branches string) error {
+	repo, err := client.New(url, nil).CreateRepo(ctx, name, source, watch, branches)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "registered %s (source %s)\n", repo.Name, repo.Source)
+	if repo.Watch {
+		fmt.Fprintf(out, "watching %s\n", watchLabel(repo))
+	}
 	return nil
+}
+
+func runRepoWatch(ctx context.Context, url string, out io.Writer, name string, watch bool, branches *string) error {
+	repo, err := client.New(url, nil).SetRepoWatch(ctx, name, watch, branches)
+	if err != nil {
+		return err
+	}
+	if repo.Watch {
+		fmt.Fprintf(out, "watching %s: %s — new commits now deploy automatically\n", repo.Name, watchLabel(repo))
+	} else {
+		fmt.Fprintf(out, "stopped watching %s\n", repo.Name)
+	}
+	return nil
+}
+
+// watchLabel describes which branches a watched repo deploys.
+func watchLabel(r client.Repo) string {
+	if r.WatchBranches == "" {
+		return "all branches"
+	}
+	return "branches " + r.WatchBranches
 }
 
 func runRepoList(ctx context.Context, url string, out io.Writer) error {
@@ -79,9 +139,16 @@ func runRepoList(ctx context.Context, url string, out io.Writer) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSOURCE\tCREATED")
+	fmt.Fprintln(tw, "NAME\tSOURCE\tWATCH\tCREATED")
 	for _, r := range repos {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", r.Name, r.Source, r.CreatedAt)
+		watch := "-"
+		if r.Watch {
+			watch = "all"
+			if r.WatchBranches != "" {
+				watch = r.WatchBranches
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Name, r.Source, watch, r.CreatedAt)
 	}
 	return tw.Flush()
 }

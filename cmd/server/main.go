@@ -22,6 +22,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/proxy"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
+	"github.com/jmelahman/local-preview/internal/watch"
 )
 
 // version is populated at build time via -ldflags -X (see Dockerfile /
@@ -66,13 +67,20 @@ func Build() BuildInfo {
 	return BuildInfo{Version: "dev"}
 }
 
+// serveOptions carries `preview serve`'s flag values into run.
+type serveOptions struct {
+	addr             string
+	dataDir          string
+	inMemory         bool
+	previewDomain    string
+	buildConcurrency int
+	maxWarm          int
+	pollInterval     time.Duration
+	githubSecret     string
+}
+
 func Root() *cobra.Command {
-	var addr string
-	var dataDir string
-	var inMemory bool
-	var previewDomain string
-	var buildConcurrency int
-	var maxWarm int
+	var opts serveOptions
 
 	cmd := &cobra.Command{
 		Use:     "preview",
@@ -84,15 +92,17 @@ func Root() *cobra.Command {
 		Use:   "serve",
 		Short: "Start the HTTP server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(addr, dataDir, inMemory, previewDomain, buildConcurrency, maxWarm)
+			return run(opts)
 		},
 	}
-	serve.Flags().StringVar(&addr, "addr", ":8080", "HTTP listen address")
-	serve.Flags().StringVar(&dataDir, "data-dir", "", "Override data directory (default: $PREVIEW_DATA_DIR or XDG)")
-	serve.Flags().BoolVar(&inMemory, "in-memory", false, "Use an ephemeral in-memory SQLite database; all data is discarded on shutdown")
-	serve.Flags().StringVar(&previewDomain, "preview-domain", "", "Base domain previews are served under (default: $PREVIEW_DOMAIN or preview.localhost)")
-	serve.Flags().IntVar(&buildConcurrency, "build-concurrency", 2, "Number of deploys built in parallel")
-	serve.Flags().IntVar(&maxWarm, "max-warm", 8, "Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (0 = unlimited)")
+	serve.Flags().StringVar(&opts.addr, "addr", ":8080", "HTTP listen address")
+	serve.Flags().StringVar(&opts.dataDir, "data-dir", "", "Override data directory (default: $PREVIEW_DATA_DIR or XDG)")
+	serve.Flags().BoolVar(&opts.inMemory, "in-memory", false, "Use an ephemeral in-memory SQLite database; all data is discarded on shutdown")
+	serve.Flags().StringVar(&opts.previewDomain, "preview-domain", "", "Base domain previews are served under (default: $PREVIEW_DOMAIN or preview.localhost)")
+	serve.Flags().IntVar(&opts.buildConcurrency, "build-concurrency", 2, "Number of deploys built in parallel")
+	serve.Flags().IntVar(&opts.maxWarm, "max-warm", 8, "Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (0 = unlimited)")
+	serve.Flags().DurationVar(&opts.pollInterval, "poll-interval", watch.DefaultInterval, "How often watched repos are fetched for new commits (0 disables watching)")
+	serve.Flags().StringVar(&opts.githubSecret, "github-webhook-secret", "", "Shared secret validating GitHub webhook deliveries (default: $PREVIEW_GITHUB_WEBHOOK_SECRET; empty disables the endpoint)")
 	cmd.AddCommand(serve)
 
 	addClientCommands(cmd)
@@ -100,8 +110,11 @@ func Root() *cobra.Command {
 	return cmd
 }
 
-func run(addr, dataDirOverride string, inMemory bool, previewDomain string, buildConcurrency, maxWarm int) error {
-	cfg, err := config.Load(dataDirOverride, previewDomain)
+func run(opts serveOptions) error {
+	if opts.githubSecret == "" {
+		opts.githubSecret = os.Getenv("PREVIEW_GITHUB_WEBHOOK_SECRET")
+	}
+	cfg, err := config.Load(opts.dataDir, opts.previewDomain)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -112,7 +125,7 @@ func run(addr, dataDirOverride string, inMemory bool, previewDomain string, buil
 	}
 
 	dbPath := cfg.DBPath()
-	if inMemory {
+	if opts.inMemory {
 		log.Printf("WARNING: --in-memory set; using ephemeral SQLite, all data is lost on shutdown")
 		dbPath = ":memory:"
 	}
@@ -129,7 +142,7 @@ func run(addr, dataDirOverride string, inMemory bool, previewDomain string, buil
 	gitMgr := gitrepo.NewManager(cfg.ReposDir())
 	super := supervise.New(database, files, cfg.LogsDir())
 	super.ReclaimOrphans()
-	super.SetMaxWarm(maxWarm)
+	super.SetMaxWarm(opts.maxWarm)
 	super.StartReaper(workCtx)
 	queue := build.NewQueue(database, gitMgr, files, super, cfg.LogsDir(), nil)
 	queue.SetManifestRefs([]build.ManifestRef{
@@ -139,27 +152,31 @@ func run(addr, dataDirOverride string, inMemory bool, previewDomain string, buil
 	if dir := config.ManifestsDir(); dir != "" {
 		queue.SetLocalManifestDir(dir)
 	}
-	queue.Start(workCtx, buildConcurrency)
+	queue.Start(workCtx, opts.buildConcurrency)
+	watcher := watch.New(database, gitMgr, queue, opts.pollInterval)
+	watcher.Start(workCtx)
 
 	apex := api.NewMux(api.Deps{
-		Store:  database,
-		Build:  api.BuildInfo(Build()),
-		Config: cfg,
-		Git:    gitMgr,
-		Queue:  queue,
-		Super:  super,
-		Addr:   addr,
+		Store:               database,
+		Build:               api.BuildInfo(Build()),
+		Config:              cfg,
+		Git:                 gitMgr,
+		Queue:               queue,
+		Super:               super,
+		Watcher:             watcher,
+		GitHubWebhookSecret: opts.githubSecret,
+		Addr:                opts.addr,
 	})
 	router := proxy.New(database, files, super, cfg.PreviewDomain, apex)
 
 	srv := &http.Server{
-		Addr:              addr,
+		Addr:              opts.addr,
 		Handler:           recoverPanics(logRequests(router)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
-		log.Printf("listening on %s (previews at *.%s)", addr, cfg.PreviewDomain)
+		log.Printf("listening on %s (previews at *.%s)", opts.addr, cfg.PreviewDomain)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}

@@ -47,6 +47,8 @@ for lookup order and caching semantics.
 | `--preview-domain` | `preview.localhost` | Base domain previews are served under |
 | `--build-concurrency` | `2` | Number of deploys built in parallel |
 | `--max-warm` | `8` | Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (`0` = unlimited) |
+| `--poll-interval` | `1m` | How often [watched repos](/guide/triggers#watched-repos) are fetched for new commits (`0` disables watching) |
+| `--github-webhook-secret` | (unset) | Shared secret validating [GitHub webhook](/guide/triggers#github-webhooks) deliveries; empty disables the endpoint. Prefer the environment variable — flags are visible in `ps` |
 
 ## Environment variables
 
@@ -55,6 +57,7 @@ for lookup order and caching semantics.
 | `PREVIEW_DATA_DIR` | `preview serve` | Data directory override |
 | `PREVIEW_CONFIG_DIR` | `preview serve` | Config directory override (local manifests live in `manifests/` under it) |
 | `PREVIEW_DOMAIN` | `preview serve` | Preview base domain (an explicit `--preview-domain` flag wins) |
+| `PREVIEW_GITHUB_WEBHOOK_SECRET` | `preview serve` | GitHub webhook shared secret (an explicit `--github-webhook-secret` flag wins) |
 | `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins) |
 | `PREVIEW_BACKEND` | `web/` dev server | Backend `host:port` the Vite proxy targets |
 

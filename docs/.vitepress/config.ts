@@ -41,6 +41,7 @@ export default defineConfig({
             { text: 'Install', link: '/guide/install' },
             { text: 'Quickstart', link: '/guide/quickstart' },
             { text: 'Concepts', link: '/guide/concepts' },
+            { text: 'Deployment triggers', link: '/guide/triggers' },
             { text: 'Configuration', link: '/guide/configuration' },
             { text: 'External dependencies', link: '/guide/external-dependencies' },
             { text: 'Embedding', link: '/guide/embedding' },

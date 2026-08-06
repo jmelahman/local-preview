@@ -15,10 +15,12 @@ import (
 
 // Repo mirrors the API's repo shape.
 type Repo struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Source    string `json:"source"`
-	CreatedAt string `json:"created_at"`
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	Source        string `json:"source"`
+	Watch         bool   `json:"watch"`
+	WatchBranches string `json:"watch_branches"`
+	CreatedAt     string `json:"created_at"`
 }
 
 // Deploy mirrors the API's deploy shape.
@@ -58,13 +60,38 @@ func New(base string, hc *http.Client) *Client {
 	return &Client{base: strings.TrimRight(base, "/"), http: hc}
 }
 
-// CreateRepo registers a repo.
-func (c *Client) CreateRepo(ctx context.Context, name, source string) (Repo, error) {
-	body, err := json.Marshal(map[string]string{"name": name, "source": source})
+// CreateRepo registers a repo, optionally watched from the start.
+func (c *Client) CreateRepo(ctx context.Context, name, source string, watch bool, watchBranches string) (Repo, error) {
+	body, err := json.Marshal(map[string]any{
+		"name": name, "source": source,
+		"watch": watch, "watch_branches": watchBranches,
+	})
 	if err != nil {
 		return Repo{}, err
 	}
 	raw, err := c.do(ctx, http.MethodPost, "/api/repos", body)
+	if err != nil {
+		return Repo{}, err
+	}
+	var r Repo
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return Repo{}, fmt.Errorf("decode repo: %w", err)
+	}
+	return r, nil
+}
+
+// SetRepoWatch enables or disables watching for a repo. branches == nil
+// leaves the stored branch filter unchanged.
+func (c *Client) SetRepoWatch(ctx context.Context, name string, watch bool, branches *string) (Repo, error) {
+	payload := map[string]any{"watch": watch}
+	if branches != nil {
+		payload["watch_branches"] = *branches
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return Repo{}, err
+	}
+	raw, err := c.do(ctx, http.MethodPatch, "/api/repos/"+url.PathEscape(name), body)
 	if err != nil {
 		return Repo{}, err
 	}

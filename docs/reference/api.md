@@ -18,7 +18,8 @@ Host that isn't a preview subdomain). Errors return a JSON body of the form
 
 Registers a repository: the server mirror-clones `source` (a local path or
 clone URL). `name` must be a lowercase DNS label — it becomes the subdomain
-segment.
+segment. `watch` and `watch_branches` are optional and enable
+[watching](/guide/triggers#watched-repos) from the start.
 
 Request:
 
@@ -30,12 +31,35 @@ Response: `201 Created` with the repo. `400` for an invalid name/source or a
 failed clone, `409` if the name is taken.
 
 ```json
-{ "id": 1, "name": "myapp", "source": "/home/me/code/myapp", "created_at": "2026-01-01T00:00:00Z" }
+{
+  "id": 1,
+  "name": "myapp",
+  "source": "/home/me/code/myapp",
+  "watch": false,
+  "watch_branches": "",
+  "created_at": "2026-01-01T00:00:00Z"
+}
 ```
 
 ### `GET /api/repos`
 
 Returns all repos. `GET /api/repos/{name}` returns one (`404` if missing).
+
+### `PATCH /api/repos/{name}`
+
+Updates a repo's watch settings; fields absent from the body keep their
+current value. `watch: true` polls the repo every `--poll-interval` and
+deploys new branch tips; `watch_branches` narrows which branches as
+comma-separated globs (`""` = all; globs don't cross `/`).
+
+Request:
+
+```json
+{ "watch": true, "watch_branches": "main,release/*" }
+```
+
+Response: `200 OK` with the updated repo. `400` for an invalid branch
+pattern or an empty body, `404` if the name isn't registered.
 
 ### `DELETE /api/repos/{name}`
 
@@ -117,3 +141,27 @@ Returns one deploy (`404` if missing).
 
 Returns a plain-text snapshot of the frontend and backend build logs.
 Deploys that share an artifact share that artifact's build log.
+
+## Webhooks
+
+### `POST /api/webhooks/github`
+
+Receives GitHub webhook deliveries and deploys pushed commits. Enabled only
+when the server is started with a webhook secret; see
+[GitHub webhooks](/guide/triggers#github-webhooks) for setup.
+
+Every delivery must carry a valid `X-Hub-Signature-256` (HMAC-SHA256 of the
+raw body with the shared secret); anything else is `403`. The payload's
+repository URLs are matched against registered repo sources — https, ssh,
+and git forms of the same repository compare equal.
+
+Responses:
+
+- `202 Accepted` with the deploy — a branch push that matched a registered
+  repo. The pushed head sha is deployed (exactly what the event named, even
+  if the branch has moved since).
+- `200 OK` `{"status": "ignored", "reason": "…"}` — deliveries that are
+  deliberately skipped: tag pushes, branch deletions, and non-push events.
+  `ping` answers `{"status": "pong"}`.
+- `404` — no registered repo matches the payload's repository.
+- `503` — the server has no webhook secret configured.
