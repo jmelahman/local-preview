@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS deploys (
     author_email TEXT NOT NULL DEFAULT '',
     fe_hash TEXT NOT NULL DEFAULT '',
     be_hash TEXT NOT NULL DEFAULT '',
+    -- Named downloadable artifacts ([artifacts.<name>]) as a JSON object:
+    -- {"<name>": {"hash": "…", "log_path": "…"}}. Empty when the manifest
+    -- declares none.
+    artifacts TEXT NOT NULL DEFAULT '',
     -- Build outcome only. Process runtime status is the supervisor's,
     -- merged into API responses at read time.
     status TEXT NOT NULL DEFAULT 'queued'

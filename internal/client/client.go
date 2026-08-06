@@ -25,24 +25,41 @@ type Repo struct {
 
 // Deploy mirrors the API's deploy shape.
 type Deploy struct {
-	ID           int64  `json:"id"`
-	Repo         string `json:"repo"`
-	SHA          string `json:"sha"`
-	ShortSHA     string `json:"short_sha"`
-	Ref          string `json:"ref"`
-	Branch       string `json:"branch"`
-	AuthorName   string `json:"author_name"`
-	AuthorEmail  string `json:"author_email"`
-	FeHash       string `json:"fe_hash"`
-	BeHash       string `json:"be_hash"`
-	Status       string `json:"status"`
-	Error        string `json:"error"`
-	AttemptCount int64  `json:"attempt_count"`
-	PreviewURL   string `json:"preview_url"`
-	Process      string `json:"process"`
-	FeProcess    string `json:"fe_process"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	ID           int64            `json:"id"`
+	Repo         string           `json:"repo"`
+	SHA          string           `json:"sha"`
+	ShortSHA     string           `json:"short_sha"`
+	Ref          string           `json:"ref"`
+	Branch       string           `json:"branch"`
+	AuthorName   string           `json:"author_name"`
+	AuthorEmail  string           `json:"author_email"`
+	FeHash       string           `json:"fe_hash"`
+	BeHash       string           `json:"be_hash"`
+	Status       string           `json:"status"`
+	Error        string           `json:"error"`
+	AttemptCount int64            `json:"attempt_count"`
+	PreviewURL   string           `json:"preview_url"`
+	Process      string           `json:"process"`
+	FeProcess    string           `json:"fe_process"`
+	Artifacts    []DeployArtifact `json:"artifacts,omitempty"`
+	CreatedAt    string           `json:"created_at"`
+	UpdatedAt    string           `json:"updated_at"`
+}
+
+// DeployArtifact mirrors the API's downloadable-artifact shape on ready
+// deploys.
+type DeployArtifact struct {
+	Name  string         `json:"name"`
+	Hash  string         `json:"hash"`
+	Files []ArtifactFile `json:"files"`
+}
+
+// ArtifactFile is one downloadable file within an artifact. URL is a path
+// on the server (join it with the server's base URL).
+type ArtifactFile struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+	URL  string `json:"url"`
 }
 
 // Client talks to a running `preview serve` over HTTP.

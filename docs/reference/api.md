@@ -114,6 +114,22 @@ on demand), and `fe_process` (same states) when the frontend is a
 [process](/reference/preview-toml#process-mode-frontends) rather than a
 static bundle. Deploys with no backend never carry `process`.
 
+Ready deploys whose manifest declares
+[downloadable artifacts](/reference/preview-toml#artifacts-name) also carry
+`artifacts`, one entry per name with a download URL per file:
+
+```json
+"artifacts": [
+  {
+    "name": "cli",
+    "hash": "…",
+    "files": [
+      { "name": "mycli", "size": 5242880, "url": "/api/deploys/7/artifacts/cli/mycli" }
+    ]
+  }
+]
+```
+
 `ref` is what the deploy request asked for (empty when it was a sha);
 `branch`, `author_name`, and `author_email` are captured from git when the
 deploy is created. `branch` is best-effort: the requested ref when it is a
@@ -139,8 +155,16 @@ Returns one deploy (`404` if missing).
 
 ### `GET /api/deploys/{id}/logs`
 
-Returns a plain-text snapshot of the frontend and backend build logs.
-Deploys that share an artifact share that artifact's build log.
+Returns a plain-text snapshot of the frontend, backend, and artifact build
+logs. Deploys that share an artifact share that artifact's build log.
+
+### `GET /api/deploys/{id}/artifacts/{name}/{file}`
+
+Downloads one file of a ready deploy's named
+[downloadable artifact](/reference/preview-toml#artifacts-name), as
+`application/octet-stream` with an attachment disposition. The URL is what
+the deploy's `artifacts` field lists. `404` for an unknown deploy,
+artifact, or file; `409` while the deploy isn't ready.
 
 ## Webhooks
 
@@ -165,3 +189,15 @@ Responses:
   `ping` answers `{"status": "pong"}`.
 - `404` — no registered repo matches the payload's repository.
 - `503` — the server has no webhook secret configured.
+=======
+Returns a plain-text snapshot of the frontend, backend, and artifact build
+logs. Deploys that share an artifact share that artifact's build log.
+
+### `GET /api/deploys/{id}/artifacts/{name}/{file}`
+
+Downloads one file of a ready deploy's named
+[downloadable artifact](/reference/preview-toml#artifacts-name), as
+`application/octet-stream` with an attachment disposition. The URL is what
+the deploy's `artifacts` field lists. `404` for an unknown deploy,
+artifact, or file; `409` while the deploy isn't ready.
+>>>>>>> 4708d14 (extend to artifacts)

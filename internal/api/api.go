@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
+	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
 	"github.com/jmelahman/local-preview/internal/watch"
 	"github.com/jmelahman/local-preview/web"
@@ -40,6 +44,9 @@ type Deps struct {
 	// Watcher, when set, is kicked after watch settings change so a newly
 	// watched repo polls immediately instead of waiting an interval.
 	Watcher *watch.Watcher
+	// Files locates published artifacts on disk (downloadable-artifact
+	// listings and downloads).
+	Files *store.Store
 	// GitHubWebhookSecret validates X-Hub-Signature-256 on webhook
 	// deliveries; empty disables POST /api/webhooks/github.
 	GitHubWebhookSecret string
@@ -61,6 +68,7 @@ func NewMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("GET /api/deploys", d.handleListDeploys)
 	mux.HandleFunc("GET /api/deploys/{id}", d.handleGetDeploy)
 	mux.HandleFunc("GET /api/deploys/{id}/logs", d.handleDeployLogs)
+	mux.HandleFunc("GET /api/deploys/{id}/artifacts/{name}/{file}", d.handleArtifactDownload)
 	mux.Handle("/", web.Handler())
 	return mux
 }
@@ -232,12 +240,28 @@ func (d Deps) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 
 // deployJSON augments a deploy row with its preview URL and the
 // supervisor's live process statuses. FeProcess is present only for
-// process-mode frontends.
+// process-mode frontends; Artifacts only for manifests that declare
+// downloadable artifacts.
 type deployJSON struct {
 	db.DeployRow
-	PreviewURL string `json:"preview_url,omitempty"`
-	Process    string `json:"process,omitempty"`
-	FeProcess  string `json:"fe_process,omitempty"`
+	PreviewURL string         `json:"preview_url,omitempty"`
+	Process    string         `json:"process,omitempty"`
+	FeProcess  string         `json:"fe_process,omitempty"`
+	Artifacts  []artifactJSON `json:"artifacts,omitempty"`
+}
+
+// artifactJSON is one named downloadable artifact on a ready deploy.
+type artifactJSON struct {
+	Name  string             `json:"name"`
+	Hash  string             `json:"hash"`
+	Files []artifactFileJSON `json:"files"`
+}
+
+type artifactFileJSON struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+	// URL is the download path on the apex host.
+	URL string `json:"url"`
 }
 
 func (d Deps) deployJSON(row db.DeployRow) deployJSON {
@@ -251,6 +275,18 @@ func (d Deps) deployJSON(row db.DeployRow) deployJSON {
 			if _, err := d.Store.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
 				out.FeProcess = d.Super.Status(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
 			}
+		}
+		for _, name := range slices.Sorted(maps.Keys(row.Artifacts)) {
+			ref := row.Artifacts[name]
+			art := artifactJSON{Name: name, Hash: ref.Hash, Files: []artifactFileJSON{}}
+			for _, f := range d.Files.ListArtifactFiles(row.RepoName, ref.Hash) {
+				art.Files = append(art.Files, artifactFileJSON{
+					Name: f.Name,
+					Size: f.Size,
+					URL:  fmt.Sprintf("/api/deploys/%d/artifacts/%s/%s", row.ID, name, url.PathEscape(f.Name)),
+				})
+			}
+			out.Artifacts = append(out.Artifacts, art)
 		}
 	}
 	return out
@@ -336,7 +372,39 @@ func (d Deps) handleGetDeploy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, d.deployJSON(row))
 }
 
-// handleDeployLogs returns a plain-text snapshot of both build logs.
+// handleArtifactDownload serves one file of a named downloadable artifact.
+func (d Deps) handleArtifactDownload(w http.ResponseWriter, r *http.Request) {
+	row, ok := d.deployFromPath(w, r)
+	if !ok {
+		return
+	}
+	if row.Status != db.DeployReady {
+		httpError(w, http.StatusConflict, fmt.Sprintf("deploy is %s, not ready", row.Status))
+		return
+	}
+	ref, ok := row.Artifacts[r.PathValue("name")]
+	if !ok {
+		httpError(w, http.StatusNotFound, "no such artifact")
+		return
+	}
+	// Path values are decoded, so a segment can smuggle separators
+	// (%2F, %5C); published files are flat base names, never nested.
+	file := r.PathValue("file")
+	if file == "" || file == "." || file == ".." || strings.ContainsAny(file, `/\`) {
+		httpError(w, http.StatusNotFound, "no such file")
+		return
+	}
+	path := filepath.Join(d.Files.ArtifactDir(row.RepoName, ref.Hash), file)
+	if st, err := os.Stat(path); err != nil || !st.Mode().IsRegular() {
+		httpError(w, http.StatusNotFound, "no such file")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", file))
+	http.ServeFile(w, r, path)
+}
+
+// handleDeployLogs returns a plain-text snapshot of every build log.
 // (?follow=1 streaming arrives in M2.)
 func (d Deps) handleDeployLogs(w http.ResponseWriter, r *http.Request) {
 	row, ok := d.deployFromPath(w, r)
@@ -344,10 +412,16 @@ func (d Deps) handleDeployLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	for _, part := range []struct{ title, path string }{
+	parts := []struct{ title, path string }{
 		{"frontend build", row.FeBuildLogPath},
 		{"backend build", row.BeBuildLogPath},
-	} {
+	}
+	for _, name := range slices.Sorted(maps.Keys(row.Artifacts)) {
+		parts = append(parts, struct{ title, path string }{
+			"artifacts." + name + " build", row.Artifacts[name].LogPath,
+		})
+	}
+	for _, part := range parts {
 		fmt.Fprintf(w, "--- %s ---\n", part.title)
 		if part.path == "" {
 			fmt.Fprintln(w, "(not started)")

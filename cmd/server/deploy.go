@@ -138,6 +138,11 @@ func runDeploy(ctx context.Context, url string, out io.Writer, repoName, ref str
 	switch d.Status {
 	case "ready":
 		fmt.Fprintf(out, "ready: %s\n", d.PreviewURL)
+		for _, a := range d.Artifacts {
+			for _, f := range a.Files {
+				fmt.Fprintf(out, "%s: %s%s\n", a.Name, strings.TrimRight(url, "/"), f.URL)
+			}
+		}
 		if rebuild {
 			fmt.Fprintf(out, "note: --rebuild replaced the artifacts on disk; a running backend keeps its old binary until restarted\n")
 		}

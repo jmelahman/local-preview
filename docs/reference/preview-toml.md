@@ -26,6 +26,12 @@ build         = [["go", "build", "-o", "bin/server", "."]]
 run           = ["./bin/server", "--addr", ":{port}", "--data-dir", "{state_dir}"]
 health_path   = "/api/health"
 start_timeout = "20s"            # optional
+
+[artifacts.cli]                  # a downloadable binary, never run
+path    = "."
+exclude = ["docs/", "*.md", ".github/"]
+build   = [["go", "build", "-o", "bin/preview", "."]]
+files   = ["bin/preview"]
 ```
 
 ## `[frontend]`
@@ -139,6 +145,38 @@ exits 0. Steps should therefore tolerate a partially-applied predecessor
 (alembic and most migration tools already do). Init output is written to the
 head of the run log, so the first cold start's log begins with migration
 output.
+
+## `[artifacts.<name>]`
+
+Prebuilt downloadable outputs — e.g. a CLI that ships from the same
+monorepo as the backend and frontend, built per commit and downloaded
+instead of run. Declare any number of named artifacts:
+
+```toml
+[artifacts.cli]
+path  = "cli"                    # hash root + build cwd
+build = [["go", "build", "-o", "bin/mycli", "."]]
+files = ["bin/mycli"]            # build outputs published for download
+```
+
+| Key | Required | Description |
+| --- | --- | --- |
+| `path` | yes | Subtree that defines the artifact hash (minus `frontend.path` and `exclude` — the same partition rule as `[backend]`); build commands run with this as their working directory |
+| `exclude` | no | Patterns removed from the hash, same syntax as `backend.exclude` |
+| `build` | yes | Build steps as argv arrays |
+| `files` | yes | Files the build produces, relative to `path`, published for download. Served flat by base name, so base names must be unique within one artifact |
+| `image` | no | Container image the build steps run in (see [Build images](#build-images)) |
+
+The name must be a lowercase label (letters, digits, inner hyphens) — it
+appears in download URLs. Artifacts are content-addressed exactly like the
+two sides: a commit that doesn't touch an artifact's partition (or its
+manifest section) reuses the cached build. Nothing is ever run — there is
+no run command, health check, state dir, or env — and a build that doesn't
+produce every declared file fails the deploy.
+
+Ready deploys carry their artifacts in the [API](/reference/api#deploys)
+with a per-file download URL, the dashboard shows a download button per
+file, and `preview deploy` prints the URLs alongside the preview URL.
 
 ## Runtime images
 

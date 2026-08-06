@@ -353,6 +353,122 @@ func TestProcessModeFrontendBuild(t *testing.T) {
 	}
 }
 
+const fixtureArtifactSection = `
+[artifacts.cli]
+path  = "backend"
+build = [["sh", "-c", "mkdir -p bin && echo fixture-cli-v1 > bin/fixture-cli && chmod +x bin/fixture-cli"]]
+files = ["bin/fixture-cli"]
+`
+
+// TestArtifactBuildAndReuse covers the downloadable-artifact side: the
+// declared files are published flat under dl/<hash>, the deploy row records
+// the name → hash mapping, and — like the other sides — an unrelated commit
+// reuses the artifact while a partition change rebuilds it.
+func TestArtifactBuildAndReuse(t *testing.T) {
+	src := newFixtureRepo(t)
+	f, err := os.OpenFile(filepath.Join(src, "preview.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(fixtureArtifactSection); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	runTestGit(t, src, "commit", "-qam", "declare cli artifact")
+
+	e := newEnv(t, src)
+	a := e.deployAndWait(t, "main")
+	ref, ok := a.Artifacts["cli"]
+	if !ok || ref.Hash == "" || ref.LogPath == "" {
+		t.Fatalf("deploy artifacts = %+v", a.Artifacts)
+	}
+	if !e.files.HasArtifact("demo", ref.Hash) {
+		t.Fatal("artifact not published")
+	}
+	bin := filepath.Join(e.files.ArtifactDir("demo", ref.Hash), "fixture-cli")
+	st, err := os.Stat(bin)
+	if err != nil {
+		t.Fatalf("published file: %v", err)
+	}
+	if st.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("executable bit lost: %v", st.Mode())
+	}
+	if b, _ := os.ReadFile(bin); string(b) != "fixture-cli-v1\n" {
+		t.Fatalf("published content = %q", b)
+	}
+	if got := e.files.ListArtifactFiles("demo", ref.Hash); len(got) != 1 || got[0].Name != "fixture-cli" {
+		t.Fatalf("listed files = %+v", got)
+	}
+
+	// A frontend-only commit reuses the artifact hash.
+	if err := os.WriteFile(filepath.Join(src, "web", "src", "index.html"), []byte("<html>v2</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "commit", "-qam", "fe change")
+	b := e.deployAndWait(t, runTestGit(t, src, "rev-parse", "HEAD"))
+	if b.Artifacts["cli"].Hash != ref.Hash {
+		t.Fatalf("frontend-only commit changed the artifact hash: %s → %s", ref.Hash, b.Artifacts["cli"].Hash)
+	}
+
+	// A commit inside the partition rebuilds under a new hash.
+	if err := os.WriteFile(filepath.Join(src, "backend", "note.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "add", "-A")
+	runTestGit(t, src, "commit", "-qm", "be change")
+	c := e.deployAndWait(t, runTestGit(t, src, "rev-parse", "HEAD"))
+	if c.Artifacts["cli"].Hash == ref.Hash {
+		t.Fatal("partition change did not change the artifact hash")
+	}
+	if !e.files.HasArtifact("demo", c.Artifacts["cli"].Hash) {
+		t.Fatal("rebuilt artifact not published")
+	}
+}
+
+// TestArtifactMissingFileFailsDeploy: declaring a file the build doesn't
+// produce fails the deploy with an error naming the file and the artifact.
+func TestArtifactMissingFileFailsDeploy(t *testing.T) {
+	src := newFixtureRepo(t)
+	section := strings.Replace(fixtureArtifactSection,
+		`files = ["bin/fixture-cli"]`, `files = ["bin/nope"]`, 1)
+	f, err := os.OpenFile(filepath.Join(src, "preview.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(section); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	runTestGit(t, src, "commit", "-qam", "declare bogus artifact file")
+
+	e := newEnv(t, src)
+	row, err := e.q.RequestDeploy(context.Background(), "demo", "main", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	var got db.DeployRow
+	for {
+		got, err = e.db.GetDeployByID(row.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == db.DeployFailed {
+			break
+		}
+		if got.Status == db.DeployReady || time.Now().After(deadline) {
+			t.Fatalf("expected failure, status=%s", got.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(got.Error, "artifacts.cli build") || !strings.Contains(got.Error, "bin/nope") {
+		t.Fatalf("error = %q", got.Error)
+	}
+	if e.files.HasArtifact("demo", got.Artifacts["cli"].Hash) {
+		t.Fatal("failed artifact build must not publish")
+	}
+}
+
 // removeCommittedManifest deletes preview.toml from the fixture repo and
 // returns its content for re-hosting in another source.
 func removeCommittedManifest(t *testing.T, src string) []byte {

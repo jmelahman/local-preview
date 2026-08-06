@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync } from "node:fs";
+import { appendFileSync, cpSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +35,17 @@ let sha: string;
 test.beforeAll(() => {
   repoDir = mkdtempSync(join(tmpdir(), "preview-fixture-"));
   cpSync(FIXTURE_SRC, repoDir, { recursive: true });
+  // A downloadable artifact alongside the two sides, so the dashboard's
+  // download affordance is exercised end-to-end.
+  appendFileSync(
+    join(repoDir, "preview.toml"),
+    `
+[artifacts.cli]
+path  = "backend"
+build = [["sh", "-c", "mkdir -p bin && echo fixture-cli-v1 > bin/fixture-cli"]]
+files = ["bin/fixture-cli"]
+`,
+  );
   git(repoDir, "init", "-q", "-b", "main");
   git(repoDir, "add", "-A");
   git(repoDir, "commit", "-qm", "initial");
@@ -81,6 +92,22 @@ test("register, deploy, and open a preview", async ({ page }) => {
   await expect(page.getByText("main", { exact: true })).toBeVisible();
   await expect(page.getByText("by e2e")).toBeVisible();
   await expect(page.getByRole("link", { name: /open/ })).toBeVisible();
+
+  // The declared artifact is listed on the deploy and downloadable both via
+  // the API and the dashboard's per-file download link.
+  expect(latest.artifacts).toEqual([
+    {
+      name: "cli",
+      hash: expect.any(String),
+      files: [{ name: "fixture-cli", size: 15, url: expect.stringMatching(/fixture-cli$/) }],
+    },
+  ]);
+  const download = page.getByRole("link", { name: /fixture-cli/ });
+  await expect(download).toBeVisible();
+  const dlRes = await page.request.get(latest.artifacts[0].files[0].url);
+  expect(dlRes.status()).toBe(200);
+  expect(dlRes.headers()["content-disposition"]).toContain("attachment");
+  expect(await dlRes.text()).toBe("fixture-cli-v1\n");
 
   // The preview itself, at its real subdomain, served by Host routing.
   await page.goto(latest.preview_url);

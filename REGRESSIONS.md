@@ -37,3 +37,28 @@ daemon — CI job containers, devcontainers with the socket mounted, remote
 `DOCKER_HOST`. Gate such tests on the same marker-file probe. For product
 code, note that `autoRunner` has the same blind spot: builds "succeed" but
 outputs land on the daemon host.
+
+## Side publishes rename their subtree out of the shared scratch dir
+
+**Symptom.** Downloadable-artifact builds failed with `chdir
+<scratch>/backend: no such file or directory` when they ran after the
+backend build of the same deploy — even though the directory was extracted
+and the backend build had just used it successfully.
+
+**Root cause.** All of a deploy's builds share one extracted commit tree,
+and `store.publish` lands artifacts with an atomic `os.Rename` of the built
+subtree — `PublishBackend` moves `<scratch>/<backend.path>` itself into the
+artifact store, and static/process frontends do the same with their dist or
+path tree. Publishing a side therefore *consumes* part of the scratch tree;
+any later step that reads it (a build cwd, declared output files) finds it
+gone.
+
+**Fix.** Downloadable artifacts build first: their publish only *copies*
+the declared files out, leaving the tree intact for the frontend and
+backend publishes that follow.
+
+**What would reintroduce it.** Adding a new output kind, reordering the
+build sequence, or any post-publish step that touches the scratch tree
+(checksums, manifests, uploads) after `PublishFrontend`/`PublishBackend`
+ran. Anything that must read the extracted tree has to run before the
+rename-based publishes — or take its own extraction.

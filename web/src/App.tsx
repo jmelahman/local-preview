@@ -129,6 +129,15 @@ function StatusBadge({ state }: { state: DeployState }) {
   );
 }
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+
 function timeAgo(iso: string): string {
   const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
   if (secs < 45) return "just now";
@@ -495,6 +504,20 @@ export default function App() {
                     >
                       {timeAgo(d.created_at)}
                     </time>
+                    {d.artifacts?.flatMap((a) =>
+                      a.files.map((f) => (
+                        <a
+                          key={`${a.name}/${f.name}`}
+                          href={f.url}
+                          download={f.name}
+                          title={`${a.name}: ${f.name} (${formatSize(f.size)})`}
+                          className={`${neutralButtonClass} gap-1 font-mono`}
+                        >
+                          <IconDownload className="h-3 w-3" />
+                          {f.name}
+                        </a>
+                      )),
+                    )}
                     {d.preview_url ? (
                       <a
                         href={d.preview_url}
@@ -623,6 +646,24 @@ function IconArrowUpRight({ className = "" }: { className?: string }) {
       aria-hidden="true"
     >
       <path d="M7 17 17 7M8 7h9v9" />
+    </svg>
+  );
+}
+
+function IconDownload({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 3v12m0 0 4-4m-4 4-4-4" />
+      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
     </svg>
   );
 }

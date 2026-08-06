@@ -43,6 +43,15 @@ backend (the proxy waits briefly, then shows a self-refreshing "starting"
 page) and later requests hit the warm process. Backends bind loopback-only;
 the only exposed listener is the orchestrator's own address.
 
+## Downloadable artifacts
+
+A manifest can also declare
+[named artifacts](/reference/preview-toml#artifacts-name) — prebuilt
+binaries like a monorepo's CLI — built from the same commit as the two
+sides. They're hashed and cached exactly the same way, but nothing is ever
+run: the declared build outputs are published once per hash and served as
+downloads from the dashboard and API.
+
 ## State follows git lineage
 
 Each backend artifact owns a **state directory**, passed to the process via

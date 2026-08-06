@@ -16,8 +16,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -250,18 +252,36 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 	if err != nil {
 		return err
 	}
+	artNames := slices.Sorted(maps.Keys(m.Artifacts))
+	artRefs := make(map[string]db.ArtifactRef, len(artNames))
+	for _, name := range artNames {
+		h, err := hashkey.Artifact(m.Artifacts[name], m.Frontend.Path, entries)
+		if err != nil {
+			return fmt.Errorf("artifacts.%s: %w", name, err)
+		}
+		artRefs[name] = db.ArtifactRef{Hash: h, LogPath: q.logPath(row.RepoName, "dl", h)}
+	}
 	feLog := q.logPath(row.RepoName, "fe", feHash)
 	beLog := q.logPath(row.RepoName, "be", beHash)
 	if err := q.db.SetDeployHashes(row.ID, feHash, beHash, feLog, beLog); err != nil {
 		return err
 	}
+	if err := q.db.SetDeployArtifacts(row.ID, artRefs); err != nil {
+		return err
+	}
 
 	needFe := rebuild || !q.files.HasFrontend(row.RepoName, feHash)
 	needBe := rebuild || !q.files.HasBackend(row.RepoName, beHash)
+	needArt := false
+	for _, name := range artNames {
+		if rebuild || !q.files.HasArtifact(row.RepoName, artRefs[name].Hash) {
+			needArt = true
+		}
+	}
 
-	// One extraction serves both sides; skipped entirely on full cache hits.
+	// One extraction serves every side; skipped entirely on full cache hits.
 	var scratch string
-	if needFe || needBe {
+	if needFe || needBe || needArt {
 		dir, cleanup, err := q.files.NewScratchDir("build")
 		if err != nil {
 			return err
@@ -273,6 +293,21 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 		scratch = dir
 	}
 
+	// Artifacts build first: publishing a frontend or backend *renames* its
+	// built subtree out of the scratch tree, while artifact publishing only
+	// copies the declared files, leaving the tree intact for the sides.
+	for _, name := range artNames {
+		ref := artRefs[name]
+		if !rebuild && q.files.HasArtifact(row.RepoName, ref.Hash) {
+			continue
+		}
+		key := row.RepoName + ":dl:" + ref.Hash
+		if _, err, _ := q.sf.Do(key, func() (any, error) {
+			return nil, q.buildArtifact(ctx, row, m.Artifacts[name], scratch, ref.Hash, ref.LogPath, rebuild)
+		}); err != nil {
+			return fmt.Errorf("artifacts.%s build: %w (log: %s)", name, err, ref.LogPath)
+		}
+	}
 	if needFe {
 		key := row.RepoName + ":fe:" + feHash
 		if _, err, _ := q.sf.Do(key, func() (any, error) {
@@ -395,6 +430,20 @@ func (q *Queue) buildBackend(ctx context.Context, row db.DeployRow, be manifest.
 		}
 	}
 	return q.files.PublishBackend(row.RepoName, hash, filepath.Join(scratch, be.Path), overwrite)
+}
+
+func (q *Queue) buildArtifact(ctx context.Context, row db.DeployRow, a manifest.Artifact, scratch, hash, logPath string, overwrite bool) error {
+	logF, err := openLog(logPath)
+	if err != nil {
+		return err
+	}
+	defer logF.Close()
+	for _, step := range a.Build {
+		if err := q.runStep(ctx, row, scratch, a.Path, a.Image, step, logF); err != nil {
+			return err
+		}
+	}
+	return q.files.PublishArtifactFiles(row.RepoName, hash, filepath.Join(scratch, a.Path), a.Files, overwrite)
 }
 
 func (q *Queue) runStep(ctx context.Context, row db.DeployRow, scratch, dir, image string, argv []string, logF io.Writer) error {

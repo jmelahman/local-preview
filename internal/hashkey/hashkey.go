@@ -38,6 +38,20 @@ func Backend(be manifest.Backend, frontendPath string, entries []gitrepo.TreeEnt
 	return digest(be, sel)
 }
 
+// Artifact hashes a downloadable-artifact partition: entries under a.Path,
+// minus the frontend subtree, minus a.Exclude patterns — the same partition
+// rule as Backend. The artifact's name is deliberately not part of the
+// digest: renaming an entry with an unchanged section doesn't rebuild.
+func Artifact(a manifest.Artifact, frontendPath string, entries []gitrepo.TreeEntry) (string, error) {
+	sel := filter(entries, func(p string) bool {
+		return under(p, a.Path) && !under(p, frontendPath) && !excluded(p, a.Exclude)
+	})
+	if len(sel) == 0 {
+		return "", fmt.Errorf("artifact partition matches no files at this commit (path %q)", a.Path)
+	}
+	return digest(a, sel)
+}
+
 func filter(entries []gitrepo.TreeEntry, keep func(string) bool) []gitrepo.TreeEntry {
 	var out []gitrepo.TreeEntry
 	for _, e := range entries {

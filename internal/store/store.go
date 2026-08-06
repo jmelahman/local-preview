@@ -39,11 +39,19 @@ func (s *Store) BackendDir(repo, hash string) string {
 	return filepath.Join(s.artifactsDir, repo, "be", hash)
 }
 
+// ArtifactDir returns the artifact path for a downloadable-artifact hash.
+func (s *Store) ArtifactDir(repo, hash string) string {
+	return filepath.Join(s.artifactsDir, repo, "dl", hash)
+}
+
 // HasFrontend reports whether the frontend artifact is published.
 func (s *Store) HasFrontend(repo, hash string) bool { return dirExists(s.FrontendDir(repo, hash)) }
 
 // HasBackend reports whether the backend artifact is published.
 func (s *Store) HasBackend(repo, hash string) bool { return dirExists(s.BackendDir(repo, hash)) }
+
+// HasArtifact reports whether the downloadable artifact is published.
+func (s *Store) HasArtifact(repo, hash string) bool { return dirExists(s.ArtifactDir(repo, hash)) }
 
 // RemoveRepo deletes every published artifact and state directory for a
 // repo (repo deletion).
@@ -64,6 +72,56 @@ func (s *Store) PublishFrontend(repo, hash, srcDir string, overwrite bool) error
 // PublishBackend moves srcDir into place as the backend artifact.
 func (s *Store) PublishBackend(repo, hash, srcDir string, overwrite bool) error {
 	return s.publish(s.BackendDir(repo, hash), srcDir, overwrite)
+}
+
+// PublishArtifactFiles publishes the named build outputs (slash paths
+// relative to builtDir) as a downloadable artifact. Files are staged flat —
+// downloads are addressed by base name; the manifest rejects duplicate base
+// names — then land with the same atomic rename as every other publish.
+func (s *Store) PublishArtifactFiles(repo, hash, builtDir string, files []string, overwrite bool) error {
+	staging, err := os.MkdirTemp(s.ensureTmp(), "dl-")
+	if err != nil {
+		return fmt.Errorf("create artifact staging: %w", err)
+	}
+	defer os.RemoveAll(staging)
+	for _, f := range files {
+		src := filepath.Join(builtDir, filepath.FromSlash(f))
+		info, err := os.Stat(src)
+		if err != nil {
+			return fmt.Errorf("artifact file %q was not produced by the build", f)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("artifact file %q is not a regular file", f)
+		}
+		if err := copyFile(src, filepath.Join(staging, filepath.Base(f)), info.Mode().Perm()); err != nil {
+			return fmt.Errorf("stage artifact file %q: %w", f, err)
+		}
+	}
+	return s.publish(s.ArtifactDir(repo, hash), staging, overwrite)
+}
+
+// ArtifactFile describes one downloadable file in a published artifact.
+type ArtifactFile struct {
+	Name string
+	Size int64
+}
+
+// ListArtifactFiles returns a published artifact's files sorted by name; nil
+// when the artifact directory doesn't exist (unbuilt or evicted).
+func (s *Store) ListArtifactFiles(repo, hash string) []ArtifactFile {
+	entries, err := os.ReadDir(s.ArtifactDir(repo, hash))
+	if err != nil {
+		return nil
+	}
+	out := make([]ArtifactFile, 0, len(entries))
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		out = append(out, ArtifactFile{Name: e.Name(), Size: info.Size()})
+	}
+	return out
 }
 
 func (s *Store) publish(dest, srcDir string, overwrite bool) error {

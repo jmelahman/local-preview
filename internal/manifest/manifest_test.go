@@ -78,6 +78,91 @@ func TestParseInit(t *testing.T) {
 	}
 }
 
+func TestParseArtifacts(t *testing.T) {
+	src := valid + `
+[artifacts.cli]
+path    = "cli"
+exclude = ["*.md"]
+build   = [["go", "build", "-o", "bin/mycli", "."]]
+files   = ["./bin/mycli", "bin/checksums.txt"]
+`
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, ok := m.Artifacts["cli"]
+	if !ok {
+		t.Fatalf("artifacts = %+v, want cli entry", m.Artifacts)
+	}
+	if a.Path != "cli" || len(a.Build) != 1 {
+		t.Fatalf("unexpected artifact: %+v", a)
+	}
+	// File paths are cleaned at parse time.
+	if a.Files[0] != "bin/mycli" || a.Files[1] != "bin/checksums.txt" {
+		t.Fatalf("files = %v", a.Files)
+	}
+
+	// Artifacts are optional.
+	m, err = Parse([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Artifacts) != 0 {
+		t.Fatalf("artifacts = %+v, want none", m.Artifacts)
+	}
+}
+
+func TestParseArtifactErrors(t *testing.T) {
+	cases := map[string]string{
+		"bad name": `
+[artifacts."My CLI"]
+path  = "cli"
+build = [["true"]]
+files = ["mycli"]
+`,
+		"missing files": `
+[artifacts.cli]
+path  = "cli"
+build = [["true"]]
+`,
+		"dot file": `
+[artifacts.cli]
+path  = "cli"
+build = [["true"]]
+files = ["."]
+`,
+		"escaping file": `
+[artifacts.cli]
+path  = "cli"
+build = [["true"]]
+files = ["../secret"]
+`,
+		"duplicate base name": `
+[artifacts.cli]
+path  = "cli"
+build = [["true"]]
+files = ["linux/mycli", "darwin/mycli"]
+`,
+		"missing build": `
+[artifacts.cli]
+path  = "cli"
+files = ["mycli"]
+`,
+		"unknown key (no run)": `
+[artifacts.cli]
+path  = "cli"
+build = [["true"]]
+files = ["mycli"]
+run   = ["./mycli"]
+`,
+	}
+	for name, section := range cases {
+		if _, err := Parse([]byte(valid + section)); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
 func TestParseAt(t *testing.T) {
 	// The manifest hosted as [previews.*] tables inside a larger config
 	// file, surrounded by foreign tables.

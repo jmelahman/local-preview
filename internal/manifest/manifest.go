@@ -60,6 +60,10 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 type Manifest struct {
 	Frontend Frontend `toml:"frontend" json:"frontend"`
 	Backend  Backend  `toml:"backend" json:"backend"`
+	// Artifacts are prebuilt downloadable outputs ([artifacts.<name>]) —
+	// CLIs and other binaries built per commit and served as file downloads
+	// instead of run.
+	Artifacts map[string]Artifact `toml:"artifacts" json:"artifacts,omitempty"`
 	// Networks names existing external docker networks every containered
 	// process joins — how previews reach shared dependencies the user runs
 	// themselves (e.g. a target repo's own deps compose network).
@@ -124,6 +128,23 @@ type Backend struct {
 	// ExtraRoutes are additional path prefixes proxied to the backend
 	// unstripped (e.g. /openapi.json, /auth/saml) alongside /api.
 	ExtraRoutes []string `toml:"extra_routes" json:"extra_routes,omitempty"`
+}
+
+// Artifact describes a prebuilt downloadable output. Like the other sides,
+// Path is the hash-partition root and the build cwd; the hash covers entries
+// under Path, minus the frontend subtree, minus Exclude patterns — the same
+// partition rule as the backend. Files are the build outputs published for
+// download, relative to Path. Downloads are addressed by base name, so base
+// names must be unique within one artifact. Nothing is ever run: there is
+// no run command, health check, state dir, or env.
+type Artifact struct {
+	Path    string     `toml:"path" json:"path"`
+	Exclude []string   `toml:"exclude" json:"exclude,omitempty"`
+	Build   [][]string `toml:"build" json:"build"`
+	Files   []string   `toml:"files" json:"files"`
+	// Image, when set, runs the build steps inside that container image
+	// instead of on the host.
+	Image string `toml:"image" json:"image,omitempty"`
 }
 
 // ErrNoManifest marks a manifest source that isn't present: the file lacks
@@ -252,6 +273,12 @@ func (m *Manifest) normalize() error {
 			return fmt.Errorf("backend.extra_routes: %q must start with %q", r, "/")
 		}
 	}
+	for name, a := range m.Artifacts {
+		if err := normalizeArtifact(name, &a); err != nil {
+			return err
+		}
+		m.Artifacts[name] = a
+	}
 	if err := validateEnv("frontend.env", m.Frontend.Env, frontendPlaceholders); err != nil {
 		return err
 	}
@@ -265,6 +292,43 @@ func (m *Manifest) normalize() error {
 		if (m.Frontend.RunImage == "") != (m.Backend.RunImage == "") {
 			return fmt.Errorf("frontend.env: {backend_url} requires both sides on the same runtime (both run_image or neither)")
 		}
+	}
+	return nil
+}
+
+// Artifact names appear in download URLs and on-disk layouts; keep them to
+// the same lowercase-label shape as repo names.
+var artifactNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+func normalizeArtifact(name string, a *Artifact) error {
+	field := "artifacts." + name
+	if !artifactNameRE.MatchString(name) {
+		return fmt.Errorf("artifacts: name %q must be a lowercase label (letters, digits, inner hyphens)", name)
+	}
+	var err error
+	if a.Path, err = cleanRel(field+".path", a.Path); err != nil {
+		return err
+	}
+	if err := validateSteps(field+".build", a.Build); err != nil {
+		return err
+	}
+	if len(a.Files) == 0 {
+		return fmt.Errorf("%s.files is required", field)
+	}
+	byBase := map[string]string{}
+	for i, f := range a.Files {
+		cf, err := cleanRel(fmt.Sprintf("%s.files[%d]", field, i), f)
+		if err != nil {
+			return err
+		}
+		if cf == "." {
+			return fmt.Errorf("%s.files[%d] must name a file, not %q", field, i, ".")
+		}
+		if prev, dup := byBase[path.Base(cf)]; dup {
+			return fmt.Errorf("%s.files: %q and %q share a base name (downloads are addressed by base name)", field, prev, cf)
+		}
+		byBase[path.Base(cf)] = cf
+		a.Files[i] = cf
 	}
 	return nil
 }

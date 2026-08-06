@@ -24,6 +24,21 @@ export type DeployStatus = "queued" | "building" | "ready" | "failed" | "evicted
 // `process` for the backend, `fe_process` for process-mode frontends.
 export type ProcessState = "idle" | "starting" | "running";
 
+export type ArtifactFile = {
+  name: string;
+  size: number;
+  // Download path on this host.
+  url: string;
+};
+
+// A named downloadable artifact ([artifacts.<name>] in preview.toml),
+// present on ready deploys.
+export type DeployArtifact = {
+  name: string;
+  hash: string;
+  files: ArtifactFile[];
+};
+
 export type Deploy = {
   id: number;
   repo: string;
@@ -41,6 +56,7 @@ export type Deploy = {
   preview_url?: string;
   process?: ProcessState;
   fe_process?: ProcessState;
+  artifacts?: DeployArtifact[];
   created_at: string;
   updated_at: string;
 };

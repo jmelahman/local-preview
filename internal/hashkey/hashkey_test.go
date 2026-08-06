@@ -88,6 +88,46 @@ func TestPartitionSensitivity(t *testing.T) {
 	}
 }
 
+func TestArtifactPartition(t *testing.T) {
+	art := manifest.Artifact{
+		Path:  ".",
+		Build: [][]string{{"go", "build", "-o", "bin/cli", "./cmd/cli"}},
+		Files: []string{"bin/cli"},
+	}
+	base, err := Artifact(art, fe.Path, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The frontend subtree is subtracted, like the backend partition.
+	mod := append([]gitrepo.TreeEntry(nil), tree...)
+	mod[3] = entry("zzz", "web/index.html")
+	if got, _ := Artifact(art, fe.Path, mod); got != base {
+		t.Fatal("frontend change leaked into the artifact hash")
+	}
+
+	// A change inside the partition rebuilds.
+	mod = append([]gitrepo.TreeEntry(nil), tree...)
+	mod[2] = entry("zzz", "main.go")
+	if got, _ := Artifact(art, fe.Path, mod); got == base {
+		t.Fatal("partition change did not change the artifact hash")
+	}
+
+	// The manifest section feeds the hash.
+	changed := art
+	changed.Files = []string{"bin/other"}
+	if got, _ := Artifact(changed, fe.Path, tree); got == base {
+		t.Fatal("section change did not change the artifact hash")
+	}
+
+	// An empty partition is an error.
+	empty := art
+	empty.Path = "missing"
+	if _, err := Artifact(empty, fe.Path, tree); err == nil {
+		t.Fatal("empty artifact partition should be an error")
+	}
+}
+
 func TestManifestSectionInHash(t *testing.T) {
 	base, err := Frontend(fe, tree)
 	if err != nil {

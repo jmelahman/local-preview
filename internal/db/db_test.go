@@ -304,6 +304,48 @@ func TestMigrateAddsColumnsToExistingDB(t *testing.T) {
 	}
 }
 
+func TestDeployArtifactsRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	r, err := s.CreateRepo("demo", "/src", "/bare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.CreateDeploy(r.ID, shaA, DeployMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Artifacts != nil {
+		t.Fatalf("fresh deploy artifacts = %+v, want none", d.Artifacts)
+	}
+
+	refs := map[string]ArtifactRef{
+		"cli":   {Hash: "abc", LogPath: "/logs/demo/dl/abc.log"},
+		"agent": {Hash: "def", LogPath: "/logs/demo/dl/def.log"},
+	}
+	if err := s.SetDeployArtifacts(d.ID, refs); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetDeployByID(d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Artifacts) != 2 || got.Artifacts["cli"] != refs["cli"] || got.Artifacts["agent"] != refs["agent"] {
+		t.Fatalf("artifacts = %+v, want %+v", got.Artifacts, refs)
+	}
+
+	// An empty map clears the column (a rebuild whose manifest dropped them).
+	if err := s.SetDeployArtifacts(d.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetDeployByID(d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Artifacts != nil {
+		t.Fatalf("cleared artifacts = %+v, want none", got.Artifacts)
+	}
+}
+
 func TestDeploysBySHAPrefix(t *testing.T) {
 	s := newTestStore(t)
 	r, _ := s.CreateRepo("demo", "/src", "/bare")

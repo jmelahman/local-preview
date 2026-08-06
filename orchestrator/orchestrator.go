@@ -22,9 +22,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -148,8 +151,25 @@ type Deploy struct {
 	// process-mode frontend, absent for static frontends.
 	Process   string `json:"process,omitempty"`
 	FeProcess string `json:"fe_process,omitempty"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	// Artifacts are the deploy's named downloadable artifacts, present on
+	// ready deploys whose manifest declares [artifacts.<name>] sections.
+	Artifacts []DeployArtifact `json:"artifacts,omitempty"`
+	CreatedAt string           `json:"created_at"`
+	UpdatedAt string           `json:"updated_at"`
+}
+
+// DeployArtifact is one named downloadable artifact of a ready deploy.
+type DeployArtifact struct {
+	Name  string         `json:"name"`
+	Hash  string         `json:"hash"`
+	Files []ArtifactFile `json:"files"`
+}
+
+// ArtifactFile is one downloadable file within an artifact. Serve its
+// content via ArtifactFilePath.
+type ArtifactFile struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
 }
 
 // Deploy statuses.
@@ -414,10 +434,16 @@ func (o *Orchestrator) DeployLogs(id int64) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
-	for _, part := range []struct{ title, path string }{
+	parts := []struct{ title, path string }{
 		{"frontend build", row.FeBuildLogPath},
 		{"backend build", row.BeBuildLogPath},
-	} {
+	}
+	for _, name := range slices.Sorted(maps.Keys(row.Artifacts)) {
+		parts = append(parts, struct{ title, path string }{
+			"artifacts." + name + " build", row.Artifacts[name].LogPath,
+		})
+	}
+	for _, part := range parts {
 		fmt.Fprintf(&b, "--- %s ---\n", part.title)
 		if part.path == "" {
 			b.WriteString("(not started)\n")
@@ -470,8 +496,41 @@ func (o *Orchestrator) toDeploy(row db.DeployRow) Deploy {
 				d.FeProcess = o.super.Status(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
 			}
 		}
+		for _, name := range slices.Sorted(maps.Keys(row.Artifacts)) {
+			art := DeployArtifact{Name: name, Hash: row.Artifacts[name].Hash, Files: []ArtifactFile{}}
+			for _, f := range o.files.ListArtifactFiles(row.RepoName, art.Hash) {
+				art.Files = append(art.Files, ArtifactFile{Name: f.Name, Size: f.Size})
+			}
+			d.Artifacts = append(d.Artifacts, art)
+		}
 	}
 	return d
+}
+
+// ArtifactFilePath returns the on-disk path of one downloadable artifact
+// file of a ready deploy, for the embedding application to serve (the file
+// is immutable, so http.ServeFile is enough). ErrNotFound covers a missing
+// deploy, artifact name, or file, and deploys that aren't ready.
+func (o *Orchestrator) ArtifactFilePath(deployID int64, artifact, file string) (string, error) {
+	row, err := o.database.GetDeployByID(deployID)
+	if errors.Is(err, db.ErrNotFound) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	ref, ok := row.Artifacts[artifact]
+	if row.Status != db.DeployReady || !ok {
+		return "", ErrNotFound
+	}
+	if file == "" || file == "." || file == ".." || strings.ContainsAny(file, `/\`) {
+		return "", ErrNotFound
+	}
+	path := filepath.Join(o.files.ArtifactDir(row.RepoName, ref.Hash), file)
+	if st, err := os.Stat(path); err != nil || !st.Mode().IsRegular() {
+		return "", ErrNotFound
+	}
+	return path, nil
 }
 
 func (o *Orchestrator) previewURL(row db.DeployRow) string {

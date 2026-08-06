@@ -89,6 +89,9 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - Container tests in CI see the runner host's daemon, not their own
   filesystem — bind mounts silently resolve on the host; probe before
   asserting on bind-mounted output.
+- Side publishes rename their subtree out of the shared scratch dir —
+  anything reading the extracted tree (artifact builds, checksums) must run
+  before `PublishFrontend`/`PublishBackend`.
 
 ## Documentation upkeep
 

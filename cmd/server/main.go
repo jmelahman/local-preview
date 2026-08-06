@@ -164,6 +164,7 @@ func run(opts serveOptions) error {
 		Queue:               queue,
 		Super:               super,
 		Watcher:             watcher,
+		Files:               files,
 		GitHubWebhookSecret: opts.githubSecret,
 		Addr:                opts.addr,
 	})

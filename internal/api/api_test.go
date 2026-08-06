@@ -100,6 +100,7 @@ func newTestMux(t *testing.T) (*http.ServeMux, string) {
 		Git:                 gitMgr,
 		Queue:               queue,
 		Super:               super,
+		Files:               files,
 		GitHubWebhookSecret: testWebhookSecret,
 		Addr:                ":8080",
 	}), root
@@ -240,6 +241,94 @@ func TestDeployEndpoints(t *testing.T) {
 	}
 	if rec := doJSON(t, mux, "GET", "/api/deploys/99", ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("get missing deploy: %d", rec.Code)
+	}
+}
+
+func TestArtifactDownload(t *testing.T) {
+	mux, _ := newTestMux(t)
+	src := newSourceRepo(t)
+	manifest := fixtureManifest + `
+[artifacts.cli]
+path  = "srv"
+build = [["sh", "-c", "echo cli-binary > mycli && chmod +x mycli"]]
+files = ["mycli"]
+`
+	if err := os.WriteFile(filepath.Join(src, "preview.toml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "commit", "-qam", "add artifact")
+
+	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != 201 {
+		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doJSON(t, mux, "POST", "/api/deploys", `{"repo":"demo","ref":"main"}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("create deploy: %d %s", rec.Code, rec.Body)
+	}
+
+	var d struct {
+		Status    string `json:"status"`
+		Artifacts []struct {
+			Name  string `json:"name"`
+			Hash  string `json:"hash"`
+			Files []struct {
+				Name string `json:"name"`
+				Size int64  `json:"size"`
+				URL  string `json:"url"`
+			} `json:"files"`
+		} `json:"artifacts"`
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for d.Status != "ready" {
+		if d.Status == "failed" || time.Now().After(deadline) {
+			logs := doJSON(t, mux, "GET", "/api/deploys/1/logs", "")
+			t.Fatalf("deploy status = %s; logs:\n%s", d.Status, logs.Body)
+		}
+		time.Sleep(50 * time.Millisecond)
+		rec := doJSON(t, mux, "GET", "/api/deploys/1", "")
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if len(d.Artifacts) != 1 || d.Artifacts[0].Name != "cli" || d.Artifacts[0].Hash == "" {
+		t.Fatalf("artifacts = %+v", d.Artifacts)
+	}
+	files := d.Artifacts[0].Files
+	if len(files) != 1 || files[0].Name != "mycli" || files[0].Size == 0 {
+		t.Fatalf("artifact files = %+v", files)
+	}
+	wantURL := "/api/deploys/1/artifacts/cli/mycli"
+	if files[0].URL != wantURL {
+		t.Fatalf("url = %q, want %q", files[0].URL, wantURL)
+	}
+
+	rec := doJSON(t, mux, "GET", wantURL, "")
+	if rec.Code != http.StatusOK || rec.Body.String() != "cli-binary\n" {
+		t.Fatalf("download: %d %q", rec.Code, rec.Body.String())
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, `attachment`) || !strings.Contains(cd, "mycli") {
+		t.Fatalf("Content-Disposition = %q", cd)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+
+	// The artifact build's log is part of the deploy's log snapshot.
+	logs := doJSON(t, mux, "GET", "/api/deploys/1/logs", "")
+	if !strings.Contains(logs.Body.String(), "artifacts.cli build") {
+		t.Fatalf("logs missing artifact section:\n%s", logs.Body)
+	}
+
+	for _, path := range []string{
+		"/api/deploys/1/artifacts/nope/mycli",         // unknown artifact
+		"/api/deploys/1/artifacts/cli/nope",           // unknown file
+		"/api/deploys/1/artifacts/cli/..%2Fmycli",     // encoded traversal
+		"/api/deploys/1/artifacts/cli/%2E%2E%2Fmycli", // fully encoded traversal
+		"/api/deploys/99/artifacts/cli/mycli",         // unknown deploy
+	} {
+		if rec := doJSON(t, mux, "GET", path, ""); rec.Code == http.StatusOK {
+			t.Errorf("GET %s: %d, want an error", path, rec.Code)
+		}
 	}
 }
 

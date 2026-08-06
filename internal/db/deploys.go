@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -18,25 +19,34 @@ const (
 	DeployEvicted  = "evicted"
 )
 
+// ArtifactRef locates one named downloadable artifact of a deploy: its
+// content hash and build log path. Stored as JSON in the deploys.artifacts
+// column, keyed by artifact name.
+type ArtifactRef struct {
+	Hash    string `json:"hash"`
+	LogPath string `json:"log_path"`
+}
+
 // Deploy is a row in the deploys table.
 type Deploy struct {
-	ID             int64  `json:"id"`
-	RepoID         int64  `json:"-"`
-	SHA            string `json:"sha"`
-	ShortSHA       string `json:"short_sha"`
-	Ref            string `json:"ref,omitempty"`
-	Branch         string `json:"branch,omitempty"`
-	AuthorName     string `json:"author_name,omitempty"`
-	AuthorEmail    string `json:"author_email,omitempty"`
-	FeHash         string `json:"fe_hash,omitempty"`
-	BeHash         string `json:"be_hash,omitempty"`
-	Status         string `json:"status"`
-	Error          string `json:"error,omitempty"`
-	AttemptCount   int64  `json:"attempt_count"`
-	FeBuildLogPath string `json:"-"`
-	BeBuildLogPath string `json:"-"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
+	ID             int64                  `json:"id"`
+	RepoID         int64                  `json:"-"`
+	SHA            string                 `json:"sha"`
+	ShortSHA       string                 `json:"short_sha"`
+	Ref            string                 `json:"ref,omitempty"`
+	Branch         string                 `json:"branch,omitempty"`
+	AuthorName     string                 `json:"author_name,omitempty"`
+	AuthorEmail    string                 `json:"author_email,omitempty"`
+	FeHash         string                 `json:"fe_hash,omitempty"`
+	BeHash         string                 `json:"be_hash,omitempty"`
+	Artifacts      map[string]ArtifactRef `json:"-"`
+	Status         string                 `json:"status"`
+	Error          string                 `json:"error,omitempty"`
+	AttemptCount   int64                  `json:"attempt_count"`
+	FeBuildLogPath string                 `json:"-"`
+	BeBuildLogPath string                 `json:"-"`
+	CreatedAt      string                 `json:"created_at"`
+	UpdatedAt      string                 `json:"updated_at"`
 }
 
 // DeployRow is a deploy joined with its repo name.
@@ -48,20 +58,26 @@ type DeployRow struct {
 // deployCols is the scan-ordered column list; deployColsD is the same list
 // qualified for joins (repos shares column names like created_at).
 const deployCols = `id, repo_id, sha, short_sha, ref, branch, author_name, ` +
-	`author_email, fe_hash, be_hash, status, error, attempt_count, ` +
+	`author_email, fe_hash, be_hash, artifacts, status, error, attempt_count, ` +
 	`fe_build_log_path, be_build_log_path, created_at, updated_at`
 
 var deployColsD = "d." + strings.ReplaceAll(deployCols, ", ", ", d.")
 
 func scanDeploy(row interface{ Scan(...any) error }, extra ...any) (Deploy, error) {
 	var d Deploy
+	var artifacts string
 	dest := []any{&d.ID, &d.RepoID, &d.SHA, &d.ShortSHA, &d.Ref, &d.Branch,
-		&d.AuthorName, &d.AuthorEmail, &d.FeHash, &d.BeHash,
+		&d.AuthorName, &d.AuthorEmail, &d.FeHash, &d.BeHash, &artifacts,
 		&d.Status, &d.Error, &d.AttemptCount, &d.FeBuildLogPath, &d.BeBuildLogPath,
 		&d.CreatedAt, &d.UpdatedAt}
 	dest = append(dest, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return Deploy{}, err
+	}
+	if artifacts != "" {
+		if err := json.Unmarshal([]byte(artifacts), &d.Artifacts); err != nil {
+			return Deploy{}, fmt.Errorf("deploy %d: parse artifacts: %w", d.ID, err)
+		}
 	}
 	return d, nil
 }
@@ -240,6 +256,21 @@ func (s *Store) SetDeployHashes(id int64, feHash, beHash, feLog, beLog string) e
 	return s.updateDeploy(id,
 		`fe_hash = ?, be_hash = ?, fe_build_log_path = ?, be_build_log_path = ?`,
 		feHash, beHash, feLog, beLog)
+}
+
+// SetDeployArtifacts records the deploy's named downloadable artifacts —
+// like the partition hashes, written as soon as they're known so they're
+// visible even if the build later fails. An empty map clears the column.
+func (s *Store) SetDeployArtifacts(id int64, refs map[string]ArtifactRef) error {
+	encoded := ""
+	if len(refs) > 0 {
+		b, err := json.Marshal(refs)
+		if err != nil {
+			return err
+		}
+		encoded = string(b)
+	}
+	return s.updateDeploy(id, `artifacts = ?`, encoded)
 }
 
 // SetDeployReady marks the deploy ready to serve.
