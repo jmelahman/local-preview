@@ -57,14 +57,30 @@ func TestAutoRunnerFallsBackWithoutDocker(t *testing.T) {
 }
 
 // TestAutoRunnerContainer runs a real one-shot build container. Skipped when
-// no daemon is reachable (e.g. CI).
+// no daemon is reachable, or when the daemon doesn't share this process's
+// filesystem (CI job containers talk to the runner host's daemon, so bind
+// mounts resolve on the host and build outputs never appear here).
 func TestAutoRunnerContainer(t *testing.T) {
 	ctx := context.Background()
-	if _, err := dockerapi.Connect(ctx); err != nil {
+	cli, err := dockerapi.Connect(ctx)
+	if err != nil {
 		t.Skipf("docker unavailable: %v", err)
 	}
 	r := &autoRunner{}
 	spec := specFor(t, "alpine:3.20", "sh", "-c", "pwd && echo containerized > out.txt")
+
+	marker := filepath.Join(spec.ScratchDir, "marker")
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var probe bytes.Buffer
+	if err := cli.RunStep(ctx, dockerapi.Step{
+		Image: "alpine:3.20",
+		Cmd:   []string{"sh", "-c", "test -f /probe/marker"},
+		Binds: []string{spec.ScratchDir + ":/probe"},
+	}, &probe); err != nil {
+		t.Skipf("daemon does not share this filesystem (sibling daemon?): %v", err)
+	}
 	var out bytes.Buffer
 	if err := r.Run(ctx, spec, &out); err != nil {
 		t.Fatalf("Run: %v\noutput: %s", err, out.String())
