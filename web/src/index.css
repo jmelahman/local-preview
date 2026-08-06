@@ -11,8 +11,8 @@
  * Theme tokens. The same utility name (e.g. bg-surface, text-fg) resolves to
  * different colors depending on data-theme on <html>, which is set by the
  * inline script in index.html before first paint. The palette mirrors
- * agentic-kanban's zinc scale so the two dashboards read as siblings; the
- * accent stays blue to tell them apart.
+ * agentic-kanban's zinc scale and default red accent so the two dashboards
+ * read as siblings.
  */
 @theme {
   --color-bg: #09090b;
@@ -27,9 +27,9 @@
   --color-danger: #f87171;
   --color-success: #4ade80;
   --color-warning: #fbbf24;
-  --color-accent-500: #60a5fa;
-  --color-accent-600: #3b82f6;
-  --color-accent-700: #2563eb;
+  --color-accent-500: oklch(63.7% 0.237 25.331);
+  --color-accent-600: oklch(57.7% 0.245 27.325);
+  --color-accent-700: oklch(50.5% 0.213 27.518);
 }
 
 [data-theme="light"] {
@@ -45,9 +45,6 @@
   --color-danger: #b91c1c;
   --color-success: #15803d;
   --color-warning: #b45309;
-  --color-accent-500: #3b82f6;
-  --color-accent-600: #2563eb;
-  --color-accent-700: #1d4ed8;
 }
 
 html,

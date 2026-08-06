@@ -1,10 +1,10 @@
-/* Brand + surfaces — match the app's blue accent and zinc palette
-   (see web/src/index.css). */
+/* Brand + surfaces — match the app's red accent and zinc palette, shared
+   with agentic-kanban (see web/src/index.css). */
 :root {
-  --vp-c-brand-1: #2563eb;
-  --vp-c-brand-2: #3b82f6;
-  --vp-c-brand-3: #3b82f6;
-  --vp-c-brand-soft: rgba(59, 130, 246, 0.14);
+  --vp-c-brand-1: oklch(57.7% 0.245 27.325);
+  --vp-c-brand-2: oklch(63.7% 0.237 25.331);
+  --vp-c-brand-3: oklch(63.7% 0.237 25.331);
+  --vp-c-brand-soft: oklch(63.7% 0.237 25.331 / 0.14);
 
   --vp-c-bg: #ffffff;
   --vp-c-bg-alt: #fafafa;
@@ -24,14 +24,15 @@
   --vp-custom-block-tip-bg: #f4f4f5;
   --vp-custom-block-tip-border: #e4e4e7;
 
-  --vp-code-color: #2563eb;
+  /* Softer red for inline code + body links so they read as accent, not alarm. */
+  --vp-code-color: oklch(63.7% 0.2 27);
 }
 
 .dark {
-  --vp-c-brand-1: #60a5fa;
-  --vp-c-brand-2: #3b82f6;
-  --vp-c-brand-3: #3b82f6;
-  --vp-c-brand-soft: rgba(96, 165, 250, 0.16);
+  --vp-c-brand-1: oklch(63.7% 0.237 25.331);
+  --vp-c-brand-2: oklch(57.7% 0.245 27.325);
+  --vp-c-brand-3: oklch(50.5% 0.213 27.518);
+  --vp-c-brand-soft: oklch(63.7% 0.237 25.331 / 0.16);
 
   --vp-c-bg: #18181b;
   --vp-c-bg-alt: #09090b;
@@ -49,7 +50,7 @@
   --vp-custom-block-tip-bg: #27272a;
   --vp-custom-block-tip-border: #3f3f46;
 
-  --vp-code-color: #60a5fa;
+  --vp-code-color: oklch(72% 0.2 25);
 }
 
 /* Theme-aware images: pair a light + dark variant with these classes and

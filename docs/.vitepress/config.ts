@@ -23,7 +23,7 @@ export default defineConfig({
   ignoreDeadLinks: 'localhostLinks',
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/local-preview/favicon.svg' }],
-    ['meta', { name: 'theme-color', content: '#3b82f6' }],
+    ['meta', { name: 'theme-color', content: '#ef4444' }],
   ],
   themeConfig: {
     logo: '/favicon.svg',

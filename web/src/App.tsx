@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useState } from "react";
-import { api, type DeployStatus } from "@/api/client";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { api, type DeployStatus, type Repo } from "@/api/client";
 
 const THEME_KEY = "app.themeMode";
 type ThemeMode = "system" | "light" | "dark";
@@ -89,12 +89,14 @@ const inputClass =
   "h-9 w-full rounded-md border border-border bg-bg px-3 text-sm text-fg outline-none transition-colors placeholder:text-fg-muted/60 focus:border-accent-500 focus:ring-2 focus:ring-accent-500/25";
 const buttonClass =
   "inline-flex h-8 shrink-0 items-center rounded-md bg-accent-600 px-3.5 text-sm font-medium text-white transition-colors hover:bg-accent-500 disabled:cursor-not-allowed disabled:opacity-50";
+const ghostButtonClass =
+  "inline-flex h-8 shrink-0 items-center rounded-md border border-border px-3 text-sm font-medium text-fg-muted transition-colors hover:border-border-strong hover:text-fg";
 
 function FieldLabel({ children }: { children: string }) {
   return <span className="mb-1.5 block text-xs font-medium text-fg-muted">{children}</span>;
 }
 
-function CardFooter({
+function DialogFooter({
   error,
   hint,
   children,
@@ -117,12 +119,182 @@ function CardFooter({
   );
 }
 
-export default function App() {
+function Modal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    // Guarded and without a close() cleanup: StrictMode re-runs the effect, and
+    // closing here would fire the close event and unmount the dialog instantly.
+    const dialog = ref.current;
+    if (dialog && !dialog.open) dialog.showModal();
+  }, []);
+  return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click-to-close; Escape is handled natively by <dialog>.
+    <dialog
+      ref={ref}
+      onClose={onClose}
+      onClick={(e) => {
+        if (e.target === ref.current) onClose();
+      }}
+      className="m-auto w-full max-w-md overflow-hidden rounded-xl border border-border bg-surface p-0 text-fg shadow-2xl backdrop:bg-black/50"
+    >
+      <div className="flex items-center justify-between px-5 pt-4">
+        <h2 className="text-sm font-semibold">{title}</h2>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="-mr-1.5 inline-flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+        >
+          <IconX />
+        </button>
+      </div>
+      {children}
+    </dialog>
+  );
+}
+
+function RegisterRepoDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
-  const [repoName, setRepoName] = useState("");
-  const [repoSource, setRepoSource] = useState("");
-  const [deployRepo, setDeployRepo] = useState("");
-  const [deployRef, setDeployRef] = useState("");
+  const [name, setName] = useState("");
+  const [source, setSource] = useState("");
+  const createRepo = useMutation({
+    mutationFn: () => api.createRepo(name.trim(), source.trim()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["repos"] });
+      onClose();
+    },
+  });
+  return (
+    <Modal title="Register a repository" onClose={onClose}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (name.trim() && source.trim()) createRepo.mutate();
+        }}
+      >
+        <div className="space-y-4 p-5 pt-3">
+          <p className="text-[13px] text-fg-muted">
+            Point at a local path or clone URL to start deploying from it.
+          </p>
+          <label className="block">
+            <FieldLabel>Name</FieldLabel>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="my-app"
+              className={inputClass}
+            />
+          </label>
+          <label className="block">
+            <FieldLabel>Source</FieldLabel>
+            <input
+              value={source}
+              onChange={(e) => setSource(e.target.value)}
+              placeholder="/path/to/repo or clone URL"
+              className={inputClass}
+            />
+          </label>
+        </div>
+        <DialogFooter
+          error={createRepo.error}
+          hint="The name becomes the preview subdomain (DNS label)."
+        >
+          <button
+            type="submit"
+            disabled={!name.trim() || !source.trim() || createRepo.isPending}
+            className={buttonClass}
+          >
+            Register
+          </button>
+        </DialogFooter>
+      </form>
+    </Modal>
+  );
+}
+
+function DeployDialog({ repos, onClose }: { repos: Repo[]; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [repo, setRepo] = useState(repos[0]?.name ?? "");
+  const [gitRef, setGitRef] = useState("");
+  const createDeploy = useMutation({
+    mutationFn: () => api.createDeploy(repo, gitRef.trim()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["deploys"] });
+      onClose();
+    },
+  });
+  return (
+    <Modal title="Deploy a commit" onClose={onClose}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (gitRef.trim() && repo) createDeploy.mutate();
+        }}
+      >
+        <div className="space-y-4 p-5 pt-3">
+          <p className="text-[13px] text-fg-muted">
+            Builds are content-addressed; unchanged halves are reused.
+          </p>
+          <label className="block">
+            <FieldLabel>Repository</FieldLabel>
+            <div className="relative">
+              <select
+                value={repo}
+                onChange={(e) => setRepo(e.target.value)}
+                className={`${inputClass} appearance-none pr-8`}
+                aria-label="Repository"
+              >
+                {repos.length === 0 && <option value="">no repositories yet</option>}
+                {repos.map((r) => (
+                  <option key={r.id} value={r.name}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+              <IconChevronDown className="pointer-events-none absolute top-1/2 right-2.5 h-4 w-4 -translate-y-1/2 text-fg-muted" />
+            </div>
+          </label>
+          <label className="block">
+            <FieldLabel>Ref</FieldLabel>
+            <input
+              value={gitRef}
+              onChange={(e) => setGitRef(e.target.value)}
+              placeholder="sha or branch"
+              className={inputClass}
+            />
+          </label>
+        </div>
+        <DialogFooter
+          error={createDeploy.error}
+          hint={
+            repos.length
+              ? "Served at <sha>.<repo>.preview.localhost."
+              : "Register a repository first."
+          }
+        >
+          <button
+            type="submit"
+            disabled={!gitRef.trim() || !repos.length || createDeploy.isPending}
+            className={buttonClass}
+          >
+            Deploy
+          </button>
+        </DialogFooter>
+      </form>
+    </Modal>
+  );
+}
+
+export default function App() {
+  const [dialog, setDialog] = useState<"register" | "deploy" | null>(null);
 
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
   const repos = useQuery({ queryKey: ["repos"], queryFn: api.listRepos });
@@ -134,21 +306,7 @@ export default function App() {
       query.state.data?.some((d) => d.status === "queued" || d.status === "building") ? 1000 : 5000,
   });
 
-  const createRepo = useMutation({
-    mutationFn: () => api.createRepo(repoName.trim(), repoSource.trim()),
-    onSuccess: () => {
-      setRepoName("");
-      setRepoSource("");
-      queryClient.invalidateQueries({ queryKey: ["repos"] });
-    },
-  });
-  const createDeploy = useMutation({
-    mutationFn: () => api.createDeploy(deployRepo || repos.data?.[0]?.name || "", deployRef.trim()),
-    onSuccess: () => {
-      setDeployRef("");
-      queryClient.invalidateQueries({ queryKey: ["deploys"] });
-    },
-  });
+  const hasRepos = (repos.data?.length ?? 0) > 0;
 
   return (
     <div className="flex min-h-screen flex-col bg-bg text-fg">
@@ -156,9 +314,16 @@ export default function App() {
         <div className="mx-auto flex h-14 w-full max-w-5xl items-center justify-between px-4 sm:px-6">
           <div className="flex items-center gap-2.5">
             <Logo />
-            <h1 className="text-sm font-semibold tracking-tight">local-preview</h1>
+            <h1 className="text-sm font-semibold tracking-tight">Previews</h1>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setDialog("register")}
+              className={ghostButtonClass}
+            >
+              Register repo
+            </button>
             <div className="flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-fg-muted">
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
@@ -176,123 +341,18 @@ export default function App() {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-5xl flex-1 space-y-10 px-4 py-10 sm:px-6">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Previews</h2>
-          <p className="mt-1 text-sm text-fg-muted">
-            Per-commit preview deployments, served from one binary.
-          </p>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <form
-            className="flex flex-col overflow-hidden rounded-xl border border-border bg-surface"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (repoName.trim() && repoSource.trim()) createRepo.mutate();
-            }}
-          >
-            <div className="flex-1 space-y-4 p-5">
-              <div>
-                <h3 className="text-sm font-medium">Register a repository</h3>
-                <p className="mt-1 text-[13px] text-fg-muted">
-                  Point at a local path or clone URL to start deploying from it.
-                </p>
-              </div>
-              <label className="block">
-                <FieldLabel>Name</FieldLabel>
-                <input
-                  value={repoName}
-                  onChange={(e) => setRepoName(e.target.value)}
-                  placeholder="my-app"
-                  className={inputClass}
-                />
-              </label>
-              <label className="block">
-                <FieldLabel>Source</FieldLabel>
-                <input
-                  value={repoSource}
-                  onChange={(e) => setRepoSource(e.target.value)}
-                  placeholder="/path/to/repo or clone URL"
-                  className={inputClass}
-                />
-              </label>
-            </div>
-            <CardFooter
-              error={createRepo.error}
-              hint="The name becomes the preview subdomain (DNS label)."
-            >
-              <button
-                type="submit"
-                disabled={!repoName.trim() || !repoSource.trim() || createRepo.isPending}
-                className={buttonClass}
-              >
-                Register
-              </button>
-            </CardFooter>
-          </form>
-
-          <form
-            className="flex flex-col overflow-hidden rounded-xl border border-border bg-surface"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (deployRef.trim()) createDeploy.mutate();
-            }}
-          >
-            <div className="flex-1 space-y-4 p-5">
-              <div>
-                <h3 className="text-sm font-medium">Deploy a commit</h3>
-                <p className="mt-1 text-[13px] text-fg-muted">
-                  Builds are content-addressed; unchanged halves are reused.
-                </p>
-              </div>
-              <label className="block">
-                <FieldLabel>Repository</FieldLabel>
-                <div className="relative">
-                  <select
-                    value={deployRepo}
-                    onChange={(e) => setDeployRepo(e.target.value)}
-                    className={`${inputClass} appearance-none pr-8`}
-                    aria-label="Repository"
-                  >
-                    {repos.data?.length === 0 && <option value="">no repositories yet</option>}
-                    {repos.data?.map((r) => (
-                      <option key={r.id} value={r.name}>
-                        {r.name}
-                      </option>
-                    ))}
-                  </select>
-                  <IconChevronDown className="pointer-events-none absolute top-1/2 right-2.5 h-4 w-4 -translate-y-1/2 text-fg-muted" />
-                </div>
-              </label>
-              <label className="block">
-                <FieldLabel>Ref</FieldLabel>
-                <input
-                  value={deployRef}
-                  onChange={(e) => setDeployRef(e.target.value)}
-                  placeholder="sha or branch"
-                  className={inputClass}
-                />
-              </label>
-            </div>
-            <CardFooter error={createDeploy.error} hint="Served at <sha>.<repo>.preview.localhost.">
-              <button
-                type="submit"
-                disabled={!deployRef.trim() || !repos.data?.length || createDeploy.isPending}
-                className={buttonClass}
-              >
-                Deploy
-              </button>
-            </CardFooter>
-          </form>
-        </div>
-
+      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-10 sm:px-6">
         <section>
-          <div className="mb-3 flex items-baseline justify-between">
-            <h2 className="text-sm font-medium">Deployments</h2>
-            {deploys.data && deploys.data.length > 0 && (
-              <span className="text-xs text-fg-muted tabular-nums">{deploys.data.length}</span>
-            )}
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <div className="flex items-baseline gap-2.5">
+              <h2 className="text-lg font-semibold tracking-tight">Deployments</h2>
+              {deploys.data && deploys.data.length > 0 && (
+                <span className="text-xs text-fg-muted tabular-nums">{deploys.data.length}</span>
+              )}
+            </div>
+            <button type="button" onClick={() => setDialog("deploy")} className={buttonClass}>
+              Deploy
+            </button>
           </div>
           <div className="overflow-hidden rounded-xl border border-border bg-surface">
             {deploys.isPending && (
@@ -311,8 +371,17 @@ export default function App() {
                 <IconDeploy className="mb-2 h-8 w-8 text-fg-muted/50" />
                 <p className="text-sm font-medium">No deployments yet</p>
                 <p className="text-[13px] text-fg-muted">
-                  Register a repository and deploy a commit to get your first preview.
+                  {hasRepos
+                    ? "Deploy a commit to get your first preview."
+                    : "Register a repository to get started."}
                 </p>
+                <button
+                  type="button"
+                  onClick={() => setDialog(hasRepos ? "deploy" : "register")}
+                  className={`${buttonClass} mt-3`}
+                >
+                  {hasRepos ? "Deploy a commit" : "Register a repository"}
+                </button>
               </div>
             )}
             <ul className="divide-y divide-border">
@@ -379,6 +448,11 @@ export default function App() {
           </div>
         </section>
       </main>
+
+      {dialog === "register" && <RegisterRepoDialog onClose={() => setDialog(null)} />}
+      {dialog === "deploy" && (
+        <DeployDialog repos={repos.data ?? []} onClose={() => setDialog(null)} />
+      )}
     </div>
   );
 }
@@ -442,6 +516,23 @@ function IconMonitor() {
     >
       <rect x="2" y="3" width="20" height="14" rx="2" />
       <path d="M8 21h8m-4-4v4" />
+    </svg>
+  );
+}
+
+function IconX() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M18 6 6 18M6 6l12 12" />
     </svg>
   );
 }
