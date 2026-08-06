@@ -37,6 +37,15 @@ preview serve
 The server listens on `:8080`. Open <http://localhost:8080/> for the
 dashboard.
 
+Or with Docker Compose (see
+[Install](https://jmelahman.github.io/local-preview/guide/install) for
+rootless daemons):
+
+```sh
+mkdir -p ~/.local/share/local-preview
+DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock) docker compose up -d
+```
+
 ## 📖 Documentation
 
 Full documentation lives at **<https://jmelahman.github.io/local-preview/>**:

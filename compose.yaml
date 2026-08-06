@@ -15,12 +15,36 @@ services:
       args:
         VERSION: ${VERSION:-dev}
     restart: unless-stopped
+    # The image entrypoint runs as UID 65532 (nonroot). Override with the
+    # invoking host user so the bind-mounted data dir under $HOME stays
+    # writable, and grant the supplementary GID that owns the docker socket
+    # so build steps can run in manifest-declared images (preview.toml
+    # `image` keys). E.g.:
+    #   DOCKER_SOCK_GID=$(stat -c '%g' "${DOCKER_SOCK_PATH:-/var/run/docker.sock}") \
+    #   docker compose up -d
+    # Rootless daemon: the socket lives in $XDG_RUNTIME_DIR, and container
+    # root maps to the daemon's host user, so run as 0:0 instead:
+    #   DOCKER_SOCK_PATH=$XDG_RUNTIME_DIR/docker.sock \
+    #   PREVIEW_UID=0 PREVIEW_GID=0 \
+    #   docker compose up -d
+    user: "${PREVIEW_UID:-1000}:${PREVIEW_GID:-1000}"
+    group_add:
+      - "${DOCKER_SOCK_GID:-0}"
     ports:
       - "8080:8080"
+    environment:
+      # Same absolute path on the host and in the container: build
+      # containers are started via the host daemon, which resolves bind
+      # sources against ITS filesystem, so the scratch-dir paths the server
+      # hands it must mean the same thing on both sides. A named volume
+      # can't provide that — keep this in lockstep with the bind below.
+      PREVIEW_DATA_DIR: ${HOME}/.local/share/local-preview
     volumes:
-      # The image runs as UID 65532 (nonroot) and owns /data, so a named
-      # volume inherits the right permissions on first mount.
-      - preview-data:/data
-
-volumes:
-  preview-data:
+      # Host path of the docker socket. Without it the server warns at
+      # build time and falls back to host execution — and the image bundles
+      # no toolchains, so only shell-only builds would work.
+      - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+      - ${HOME}/.local/share/local-preview:${HOME}/.local/share/local-preview
+      # Repos registered by local path must be visible in-container at the
+      # registered path, e.g.:
+      # - /home/me/code/myapp:/home/me/code/myapp:ro
