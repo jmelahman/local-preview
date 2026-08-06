@@ -3,54 +3,58 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import { api, type DeployStatus, type Repo } from "@/api/client";
 
 const THEME_KEY = "app.themeMode";
-type ThemeMode = "system" | "light" | "dark";
+type Theme = "light" | "dark";
 
-function loadThemeMode(): ThemeMode {
+function storedTheme(): Theme | null {
   try {
     const raw = localStorage.getItem(THEME_KEY);
-    return raw === "light" || raw === "dark" ? raw : "system";
+    return raw === "light" || raw === "dark" ? raw : null;
   } catch {
-    return "system";
+    return null;
   }
 }
 
-function applyThemeMode(mode: ThemeMode) {
-  const dark =
-    mode === "dark" || (mode === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
+function systemTheme(): Theme {
+  return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function ThemeToggle() {
-  const [mode, setMode] = useState<ThemeMode>(loadThemeMode);
+  const [theme, setTheme] = useState<Theme>(() => storedTheme() ?? systemTheme());
+  // Follow the OS appearance until the user explicitly picks a side; after
+  // that the choice is persisted and system flips are ignored.
+  const chosen = useRef(storedTheme() != null);
 
   useEffect(() => {
-    applyThemeMode(mode);
-    try {
-      localStorage.setItem(THEME_KEY, mode);
-    } catch {
-      // Private browsing; theme just won't persist.
-    }
-  }, [mode]);
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
 
   useEffect(() => {
-    if (mode !== "system") return;
     const mq = matchMedia("(prefers-color-scheme: dark)");
-    const onChange = () => applyThemeMode("system");
+    const onChange = () => {
+      if (!chosen.current) setTheme(mq.matches ? "dark" : "light");
+    };
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
-  }, [mode]);
+  }, []);
 
-  const next: Record<ThemeMode, ThemeMode> = { system: "light", light: "dark", dark: "system" };
-  const icon = mode === "light" ? <IconSun /> : mode === "dark" ? <IconMoon /> : <IconMonitor />;
+  const other: Theme = theme === "dark" ? "light" : "dark";
   return (
     <button
       type="button"
-      onClick={() => setMode(next[mode])}
-      title={`Theme: ${mode}`}
-      aria-label={`Theme: ${mode} (click to change)`}
-      className="inline-flex h-8 w-8 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+      onClick={() => {
+        chosen.current = true;
+        setTheme(other);
+        try {
+          localStorage.setItem(THEME_KEY, other);
+        } catch {
+          // Private browsing; theme just won't persist.
+        }
+      }}
+      title={`Switch to ${other} theme`}
+      aria-label={`Switch to ${other} theme`}
+      className="inline-flex h-7 w-7 items-center justify-center rounded bg-surface-2 text-fg transition-colors duration-150 hover:bg-surface-3"
     >
-      {icon}
+      {theme === "dark" ? <IconMoon /> : <IconSun />}
     </button>
   );
 }
@@ -86,14 +90,20 @@ function timeAgo(iso: string): string {
 }
 
 const inputClass =
-  "h-9 w-full rounded-md border border-border bg-bg px-3 text-sm text-fg outline-none transition-colors placeholder:text-fg-muted/60 focus:border-accent-500 focus:ring-2 focus:ring-accent-500/25";
+  "w-full rounded bg-surface px-2 py-1 text-sm text-fg placeholder:text-fg-muted/60";
 const buttonClass =
-  "inline-flex h-8 shrink-0 items-center rounded-md bg-accent-600 px-3.5 text-sm font-medium text-white transition-colors hover:bg-accent-500 disabled:cursor-not-allowed disabled:opacity-50";
-const ghostButtonClass =
-  "inline-flex h-8 shrink-0 items-center rounded-md border border-border px-3 text-sm font-medium text-fg-muted transition-colors hover:border-border-strong hover:text-fg";
+  "inline-flex shrink-0 items-center rounded bg-accent-700 px-3 py-1 text-sm text-white transition-colors duration-150 hover:bg-accent-600 disabled:cursor-not-allowed disabled:opacity-50";
+const neutralButtonClass =
+  "inline-flex shrink-0 items-center rounded bg-surface-2 px-2 py-1 text-xs text-fg transition-colors duration-150 hover:bg-surface-3";
 
-function FieldLabel({ children }: { children: string }) {
-  return <span className="mb-1.5 block text-xs font-medium text-fg-muted">{children}</span>;
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    // biome-ignore lint/a11y/noLabelWithoutControl: children slot holds the control at runtime.
+    <label className="flex flex-col gap-1">
+      <span className="text-xs text-fg-muted">{label}</span>
+      {children}
+    </label>
+  );
 }
 
 function DialogFooter({
@@ -106,7 +116,7 @@ function DialogFooter({
   children: ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-t border-border bg-surface-2/50 px-5 py-3">
+    <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-2">
       {error ? (
         <p className="min-w-0 truncate text-xs text-danger" title={String(error)}>
           {String(error)}
@@ -143,19 +153,19 @@ function Modal({
       onClick={(e) => {
         if (e.target === ref.current) onClose();
       }}
-      className="m-auto w-full max-w-md overflow-hidden rounded-xl border border-border bg-surface p-0 text-fg shadow-2xl backdrop:bg-black/50"
+      className="m-auto w-[520px] max-w-[calc(100vw-2rem)] rounded border border-border bg-bg p-0 text-fg shadow-lg backdrop:bg-black/50"
     >
-      <div className="flex items-center justify-between px-5 pt-4">
+      <header className="flex items-center justify-between border-b border-border px-3 py-2">
         <h2 className="text-sm font-semibold">{title}</h2>
         <button
           type="button"
           onClick={onClose}
           aria-label="Close"
-          className="-mr-1.5 inline-flex h-7 w-7 items-center justify-center rounded-md text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+          className="inline-flex h-7 w-7 items-center justify-center rounded bg-surface-2 text-fg transition-colors duration-150 hover:bg-surface-3"
         >
           <IconX />
         </button>
-      </div>
+      </header>
       {children}
     </dialog>
   );
@@ -180,28 +190,26 @@ function RegisterRepoDialog({ onClose }: { onClose: () => void }) {
           if (name.trim() && source.trim()) createRepo.mutate();
         }}
       >
-        <div className="space-y-4 p-5 pt-3">
-          <p className="text-[13px] text-fg-muted">
+        <div className="flex flex-col gap-3 p-4 text-sm">
+          <p className="text-xs text-fg-muted">
             Point at a local path or clone URL to start deploying from it.
           </p>
-          <label className="block">
-            <FieldLabel>Name</FieldLabel>
+          <Field label="Name">
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="my-app"
               className={inputClass}
             />
-          </label>
-          <label className="block">
-            <FieldLabel>Source</FieldLabel>
+          </Field>
+          <Field label="Source">
             <input
               value={source}
               onChange={(e) => setSource(e.target.value)}
               placeholder="/path/to/repo or clone URL"
               className={inputClass}
             />
-          </label>
+          </Field>
         </div>
         <DialogFooter
           error={createRepo.error}
@@ -239,38 +247,32 @@ function DeployDialog({ repos, onClose }: { repos: Repo[]; onClose: () => void }
           if (gitRef.trim() && repo) createDeploy.mutate();
         }}
       >
-        <div className="space-y-4 p-5 pt-3">
-          <p className="text-[13px] text-fg-muted">
+        <div className="flex flex-col gap-3 p-4 text-sm">
+          <p className="text-xs text-fg-muted">
             Builds are content-addressed; unchanged halves are reused.
           </p>
-          <label className="block">
-            <FieldLabel>Repository</FieldLabel>
-            <div className="relative">
-              <select
-                value={repo}
-                onChange={(e) => setRepo(e.target.value)}
-                className={`${inputClass} appearance-none pr-8`}
-                aria-label="Repository"
-              >
-                {repos.length === 0 && <option value="">no repositories yet</option>}
-                {repos.map((r) => (
-                  <option key={r.id} value={r.name}>
-                    {r.name}
-                  </option>
-                ))}
-              </select>
-              <IconChevronDown className="pointer-events-none absolute top-1/2 right-2.5 h-4 w-4 -translate-y-1/2 text-fg-muted" />
-            </div>
-          </label>
-          <label className="block">
-            <FieldLabel>Ref</FieldLabel>
+          <Field label="Repository">
+            <select
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              className="w-full cursor-pointer rounded bg-surface px-2 py-1 text-sm"
+            >
+              {repos.length === 0 && <option value="">no repositories yet</option>}
+              {repos.map((r) => (
+                <option key={r.id} value={r.name}>
+                  {r.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Ref">
             <input
               value={gitRef}
               onChange={(e) => setGitRef(e.target.value)}
               placeholder="sha or branch"
               className={inputClass}
             />
-          </label>
+          </Field>
         </div>
         <DialogFooter
           error={createDeploy.error}
@@ -296,7 +298,12 @@ function DeployDialog({ repos, onClose }: { repos: Repo[]; onClose: () => void }
 export default function App() {
   const [dialog, setDialog] = useState<"register" | "deploy" | null>(null);
 
-  const health = useQuery({ queryKey: ["health"], queryFn: api.health });
+  const health = useQuery({
+    queryKey: ["health"],
+    queryFn: api.health,
+    // Keep polling so the unreachable banner clears itself on recovery.
+    refetchInterval: 5000,
+  });
   const repos = useQuery({ queryKey: ["repos"], queryFn: api.listRepos });
   const deploys = useQuery({
     queryKey: ["deploys"],
@@ -310,42 +317,33 @@ export default function App() {
 
   return (
     <div className="flex min-h-screen flex-col bg-bg text-fg">
-      <header className="sticky top-0 z-10 border-b border-border bg-bg/80 backdrop-blur">
-        <div className="mx-auto flex h-14 w-full max-w-5xl items-center justify-between px-4 sm:px-6">
-          <div className="flex items-center gap-2.5">
-            <Logo />
-            <h1 className="text-sm font-semibold tracking-tight">Previews</h1>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setDialog("register")}
-              className={ghostButtonClass}
-            >
-              Register repo
-            </button>
-            <div className="flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs text-fg-muted">
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${
-                  health.data ? "bg-success" : health.isPending ? "bg-fg-muted" : "bg-danger"
-                }`}
-              />
-              {health.data
-                ? `server ${health.data.version}`
-                : health.isPending
-                  ? "server …"
-                  : "server unreachable"}
-            </div>
-            <ThemeToggle />
-          </div>
+      <header className="flex items-center gap-3 border-b border-border px-3 py-2">
+        <div className="flex items-center gap-2.5">
+          <Logo />
+          <h1 className="text-lg font-semibold">Previews</h1>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setDialog("register")}
+            className={neutralButtonClass}
+          >
+            Register repo
+          </button>
+          <ThemeToggle />
         </div>
       </header>
+      {health.isError && (
+        <div className="border-b border-amber-700 bg-amber-950/60 px-4 py-1 text-xs text-amber-200">
+          Server unreachable — retrying…
+        </div>
+      )}
 
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-10 sm:px-6">
+      <main className="mx-auto w-full max-w-5xl flex-1 px-3 py-4">
         <section>
-          <div className="mb-4 flex items-center justify-between gap-4">
-            <div className="flex items-baseline gap-2.5">
-              <h2 className="text-lg font-semibold tracking-tight">Deployments</h2>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-baseline gap-2">
+              <h2 className="text-sm font-semibold uppercase tracking-wide">Deployments</h2>
               {deploys.data && deploys.data.length > 0 && (
                 <span className="text-xs text-fg-muted tabular-nums">{deploys.data.length}</span>
               )}
@@ -354,11 +352,11 @@ export default function App() {
               Deploy
             </button>
           </div>
-          <div className="overflow-hidden rounded-xl border border-border bg-surface">
+          <div className="overflow-hidden rounded border border-border bg-surface">
             {deploys.isPending && (
               <div className="divide-y divide-border">
                 {[0, 1, 2].map((i) => (
-                  <div key={i} className="flex animate-pulse items-center gap-4 px-4 py-3.5">
+                  <div key={i} className="flex animate-pulse items-center gap-4 px-3 py-3">
                     <div className="h-5 w-16 rounded-full bg-surface-2" />
                     <div className="h-4 w-40 rounded bg-surface-2" />
                     <div className="ml-auto h-4 w-24 rounded bg-surface-2" />
@@ -370,7 +368,7 @@ export default function App() {
               <div className="flex flex-col items-center gap-1 px-6 py-16 text-center">
                 <IconDeploy className="mb-2 h-8 w-8 text-fg-muted/50" />
                 <p className="text-sm font-medium">No deployments yet</p>
-                <p className="text-[13px] text-fg-muted">
+                <p className="text-xs text-fg-muted">
                   {hasRepos
                     ? "Deploy a commit to get your first preview."
                     : "Register a repository to get started."}
@@ -396,7 +394,7 @@ export default function App() {
                 return (
                   <li
                     key={d.id}
-                    className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-3.5 transition-colors hover:bg-surface-2/40"
+                    className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-3 py-3 transition-colors hover:bg-surface-2/40"
                   >
                     <StatusBadge status={d.status} />
                     <div className="min-w-0 flex-1">
@@ -433,7 +431,7 @@ export default function App() {
                         href={d.preview_url}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2.5 text-xs font-medium text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
+                        className={`${neutralButtonClass} gap-1`}
                       >
                         open
                         <IconArrowUpRight className="h-3 w-3" />
@@ -448,6 +446,10 @@ export default function App() {
           </div>
         </section>
       </main>
+
+      <footer className="border-t border-border px-3 py-2 font-mono text-[11px] text-fg-muted">
+        {health.data ? `server ${health.data.version}` : "server …"}
+      </footer>
 
       {dialog === "register" && <RegisterRepoDialog onClose={() => setDialog(null)} />}
       {dialog === "deploy" && (
@@ -502,24 +504,6 @@ function IconMoon() {
   );
 }
 
-function IconMonitor() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      className="h-4 w-4"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="2" y="3" width="20" height="14" rx="2" />
-      <path d="M8 21h8m-4-4v4" />
-    </svg>
-  );
-}
-
 function IconX() {
   return (
     <svg
@@ -533,23 +517,6 @@ function IconX() {
       aria-hidden="true"
     >
       <path d="M18 6 6 18M6 6l12 12" />
-    </svg>
-  );
-}
-
-function IconChevronDown({ className = "" }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      className={className}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="m6 9 6 6 6-6" />
     </svg>
   );
 }

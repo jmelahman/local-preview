@@ -41,9 +41,9 @@ Commit it. Previews always build from committed trees, so an uncommitted
 
 ## 3. Register the repository
 
-In the **Register a repository** card, pick a name and point the source at
-the repo. The name becomes the preview subdomain, so it must be a lowercase
-DNS label. The source can be a local path or any clone URL.
+Click **Register repo** in the header, then pick a name and point the source
+at the repo. The name becomes the preview subdomain, so it must be a
+lowercase DNS label. The source can be a local path or any clone URL.
 
 <img class="light-only" src="/quickstart-02-register-light.png" alt="Register a repository" />
 <img class="dark-only" src="/quickstart-02-register-dark.png" alt="Register a repository" />
@@ -59,9 +59,9 @@ preview repo create myapp --source ~/code/myapp
 
 ## 4. Deploy a commit
 
-In the **Deploy a commit** card, the repository you just registered is
-already selected. Enter a ref — a branch, a tag, or a sha — and click
-**Deploy**.
+Click **Deploy** above the deployments list. The repository you just
+registered is already selected; enter a ref — a branch, a tag, or a sha —
+and click **Deploy**.
 
 <img class="light-only" src="/quickstart-03-deploy-light.png" alt="Deploy a commit" />
 <img class="dark-only" src="/quickstart-03-deploy-dark.png" alt="Deploy a commit" />
@@ -79,7 +79,7 @@ preview deploy main       # or any branch, tag, or sha
 ```
 
 ```
-ready: http://f9dc05b.myapp.preview.localhost:8080/
+ready: http://d9ebf14.myapp.preview.localhost:8080/
 ```
 
 ## 5. Open the preview
@@ -89,7 +89,7 @@ Once the deployment is `ready`, the row grows an **open** link:
 <img class="light-only" src="/quickstart-04-ready-light.png" alt="A ready deployment" />
 <img class="dark-only" src="/quickstart-04-ready-dark.png" alt="A ready deployment" />
 
-It leads to `http://f9dc05b.myapp.preview.localhost:8080/` — every commit
+It leads to `http://d9ebf14.myapp.preview.localhost:8080/` — every commit
 gets a subdomain of the form `<sha>.<repo>`, and browsers resolve
 `*.localhost` names without any DNS setup.
 
