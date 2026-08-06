@@ -37,36 +37,6 @@ preview serve
 The server listens on `:8080`. Open <http://localhost:8080/> for the
 dashboard.
 
-Or with Docker:
-
-```sh
-docker compose up -d --build
-```
-
-## Develop
-
-```sh
-# Backend on :8080 (wgo restarts on save; plain `go run` works too)
-wgo run . serve
-
-# Frontend on :5173, proxying /api to the backend
-cd web && npm install && npm run dev
-```
-
-### Docs site
-
-The `docs/` VitePress site deploys to GitHub Pages automatically: pushes to
-`master` that touch `docs/**` run `.github/workflows/docs.yml`, which builds
-the site and publishes it through the Pages Actions deploy (no `gh-pages`
-branch). Run it locally with:
-
-```sh
-cd docs && npm install && npm run docs:dev   # http://localhost:5175
-```
-
-See `CLAUDE.md` for the full development reference (tests, lint, E2E, docs
-conventions).
-
 ## 📖 Documentation
 
 Full documentation lives at **<https://jmelahman.github.io/local-preview/>**:
