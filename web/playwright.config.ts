@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
 // E2E suite. Spins up the real Go backend against an in-memory SQLite DB and
@@ -5,6 +8,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 const BACKEND_PORT = 8080;
 const FRONTEND_PORT = 5174;
+
+// Builds, artifacts, and state need real disk even with an in-memory DB.
+const DATA_DIR = mkdtempSync(join(tmpdir(), "preview-e2e-"));
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -21,7 +27,7 @@ export default defineConfig({
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: [
     {
-      command: "go run . serve --in-memory",
+      command: `go run . serve --in-memory --data-dir ${DATA_DIR}`,
       cwd: "..",
       url: `http://localhost:${BACKEND_PORT}/api/health`,
       reuseExistingServer: !process.env.CI,

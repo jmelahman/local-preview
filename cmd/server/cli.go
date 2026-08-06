@@ -10,6 +10,7 @@ import (
 // They're thin wrappers over the HTTP API, useful for scripting and remote
 // control of a running `preview serve`.
 func addClientCommands(root *cobra.Command) {
+	root.AddCommand(repoCmd(), deployCmd(), installHookCmd())
 }
 
 // resolveURL returns the effective server URL for a leaf command. PREVIEW_URL

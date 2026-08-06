@@ -1,0 +1,37 @@
+package db
+
+// BackendArtifact records a provisioned backend: its state dir and the run
+// contract (backend section of preview.toml as JSON). Row existence means
+// the state dir is fully provisioned.
+type BackendArtifact struct {
+	RepoID     int64
+	BeHash     string
+	ForkedFrom string
+	StateDir   string
+	RunConfig  string
+	CreatedAt  string
+}
+
+// CreateBackendArtifact records a provisioned backend artifact. Idempotent:
+// an existing row is left untouched.
+func (s *Store) CreateBackendArtifact(a BackendArtifact) error {
+	_, err := s.db.Exec(
+		`INSERT INTO backend_artifacts (repo_id, be_hash, forked_from, state_dir, run_config)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (repo_id, be_hash) DO NOTHING`,
+		a.RepoID, a.BeHash, a.ForkedFrom, a.StateDir, a.RunConfig)
+	return err
+}
+
+// GetBackendArtifact returns the artifact row, or ErrNotFound.
+func (s *Store) GetBackendArtifact(repoID int64, beHash string) (BackendArtifact, error) {
+	var a BackendArtifact
+	err := s.db.QueryRow(
+		`SELECT repo_id, be_hash, forked_from, state_dir, run_config, created_at
+		 FROM backend_artifacts WHERE repo_id = ? AND be_hash = ?`, repoID, beHash,
+	).Scan(&a.RepoID, &a.BeHash, &a.ForkedFrom, &a.StateDir, &a.RunConfig, &a.CreatedAt)
+	if err != nil {
+		return BackendArtifact{}, mapNoRows(err)
+	}
+	return a, nil
+}

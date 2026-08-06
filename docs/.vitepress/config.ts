@@ -40,6 +40,7 @@ export default defineConfig({
             { text: 'Introduction', link: '/guide/' },
             { text: 'Install', link: '/guide/install' },
             { text: 'Quickstart', link: '/guide/quickstart' },
+            { text: 'Concepts', link: '/guide/concepts' },
             { text: 'Configuration', link: '/guide/configuration' },
           ],
         },
@@ -50,6 +51,7 @@ export default defineConfig({
           items: [
             { text: 'REST API', link: '/reference/api' },
             { text: 'CLI', link: '/reference/cli' },
+            { text: 'preview.toml', link: '/reference/preview-toml' },
           ],
         },
       ],
