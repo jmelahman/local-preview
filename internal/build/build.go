@@ -76,7 +76,9 @@ type Queue struct {
 // Call Start to launch workers.
 func NewQueue(database *db.Store, git *gitrepo.Manager, files *store.Store, super *supervise.Manager, logsDir string, runner Runner) *Queue {
 	if runner == nil {
-		runner = HostRunner{}
+		// The default routes image-declared steps into containers and
+		// everything else to the host.
+		runner = &autoRunner{}
 	}
 	return &Queue{
 		db:           database,
@@ -328,7 +330,7 @@ func (q *Queue) buildFrontend(ctx context.Context, row db.DeployRow, fe manifest
 	}
 	defer logF.Close()
 	for _, step := range fe.Build {
-		if err := q.runStep(ctx, row, scratch, fe.Path, step, logF); err != nil {
+		if err := q.runStep(ctx, row, scratch, fe.Path, fe.Image, step, logF); err != nil {
 			return err
 		}
 	}
@@ -346,14 +348,14 @@ func (q *Queue) buildBackend(ctx context.Context, row db.DeployRow, be manifest.
 	}
 	defer logF.Close()
 	for _, step := range be.Build {
-		if err := q.runStep(ctx, row, scratch, be.Path, step, logF); err != nil {
+		if err := q.runStep(ctx, row, scratch, be.Path, be.Image, step, logF); err != nil {
 			return err
 		}
 	}
 	return q.files.PublishBackend(row.RepoName, hash, filepath.Join(scratch, be.Path), overwrite)
 }
 
-func (q *Queue) runStep(ctx context.Context, row db.DeployRow, scratch, dir string, argv []string, logF io.Writer) error {
+func (q *Queue) runStep(ctx context.Context, row db.DeployRow, scratch, dir, image string, argv []string, logF io.Writer) error {
 	cctx, cancel := context.WithTimeout(ctx, q.buildTimeout)
 	defer cancel()
 	fmt.Fprintf(logF, "$ %s\n", strings.Join(argv, " "))
@@ -363,6 +365,7 @@ func (q *Queue) runStep(ctx context.Context, row db.DeployRow, scratch, dir stri
 		ScratchDir: scratch,
 		Dir:        dir,
 		Argv:       argv,
+		Image:      image,
 	}, logF)
 }
 

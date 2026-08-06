@@ -35,6 +35,7 @@ start_timeout = "20s"            # optional
 | `path` | yes | Subtree that defines the frontend hash; build commands run with this as their working directory |
 | `build` | yes | Build steps as argv arrays (no shell; use `["sh", "-c", "..."]` explicitly if you need one) |
 | `dist` | yes | Directory the build produces, relative to `path`; published as the static bundle |
+| `image` | no | Container image the build steps run in (see [Build images](#build-images)) |
 
 The bundle must be deploy-agnostic: base path `/`, relative `/api` calls, no
 per-deploy values baked in at build time. One bundle is served under every
@@ -51,6 +52,7 @@ subdomain that references it.
 | `health_path` | yes | Path polled until it returns 200 after start |
 | `start_timeout` | no | How long the process gets to become healthy (default `20s`) |
 | `idle_timeout` | no | Idle period before the process is stopped (default `30m`; enforcement lands in a future release) |
+| `image` | no | Container image the build steps (not the server) run in (see [Build images](#build-images)) |
 
 ### Run templating
 
@@ -86,6 +88,22 @@ Sources are tried in order (`preview.toml` first, by convention) and the
 manifest is still always read from the committed tree. Artifact hashes cover
 the parsed manifest, not its location, so moving unchanged config between
 sources doesn't invalidate caches.
+
+## Build images
+
+With `image` set on a side, its build steps run inside one-shot containers
+(the extracted commit tree bind-mounted, output streamed into the build
+log) instead of on the server's host — reproducible toolchains that don't
+care what the host has installed, including when the server itself runs in
+a toolchain-less container. The image is part of the manifest section, so
+it feeds the artifact hash: bumping the image rebuilds.
+
+Requires a reachable Docker daemon (`$DOCKER_HOST`, `/var/run/docker.sock`,
+or the rootless per-user socket). If none is reachable, the build logs a
+warning and falls back to host execution. Toolchain caches (npm, Go) are
+kept warm on a named volume per image. Embedding applications with their
+own runners (agentic-kanban's devcontainer builds) honor `image` when set —
+an explicit image beats environment discovery.
 
 ## Hashing caveats
 

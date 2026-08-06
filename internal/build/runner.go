@@ -13,12 +13,15 @@ import (
 // on the host; Dir is the working directory relative to it. A containerized
 // runner mounts ScratchDir and maps Dir inside the mount, so builds that
 // reference sibling files (lockfiles, workspace configs) keep working.
+// Image is the manifest-declared build image for this step's side ("" =
+// unspecified; the default runner then execs on the host).
 type RunSpec struct {
 	RepoName   string
 	SHA        string
 	ScratchDir string
 	Dir        string
 	Argv       []string
+	Image      string
 }
 
 // Runner executes build steps. The default HostRunner execs directly on the

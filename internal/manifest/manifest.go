@@ -62,11 +62,15 @@ type Manifest struct {
 
 // Frontend describes how to hash, build, and locate the static bundle.
 // Build commands run with cwd <extracted-tree>/<Path>; Dist is relative to
-// Path. Path doubles as the hash-partition root.
+// Path. Path doubles as the hash-partition root. Image, when set, runs the
+// build steps inside that container image instead of on the host — being
+// part of the manifest section, it feeds the artifact hash, so changing the
+// image rebuilds.
 type Frontend struct {
 	Path  string     `toml:"path" json:"path"`
 	Build [][]string `toml:"build" json:"build"`
 	Dist  string     `toml:"dist" json:"dist"`
+	Image string     `toml:"image" json:"image,omitempty"`
 }
 
 // Backend describes how to hash, build, and run the backend. The hash covers
@@ -80,6 +84,9 @@ type Backend struct {
 	HealthPath   string     `toml:"health_path" json:"health_path"`
 	StartTimeout Duration   `toml:"start_timeout" json:"start_timeout,omitempty"`
 	IdleTimeout  Duration   `toml:"idle_timeout" json:"idle_timeout,omitempty"`
+	// Image, when set, runs the build steps (not the server) inside that
+	// container image instead of on the host.
+	Image string `toml:"image" json:"image,omitempty"`
 }
 
 // ErrNoManifest marks a manifest source that isn't present: the file lacks
