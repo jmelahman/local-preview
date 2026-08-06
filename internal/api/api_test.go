@@ -332,6 +332,143 @@ files = ["mycli"]
 	}
 }
 
+// TestObservabilityEndpoints covers the run-log tail and stats endpoints
+// against a ready (never-started) deploy: incremental offsets, restart
+// (new-attempt) resets, side validation, and the idle stats shape.
+func TestObservabilityEndpoints(t *testing.T) {
+	mux, root := newTestMux(t)
+	src := newSourceRepo(t)
+	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != 201 {
+		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doJSON(t, mux, "POST", "/api/deploys", `{"repo":"demo","ref":"main"}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("create deploy: %d %s", rec.Code, rec.Body)
+	}
+	var d struct {
+		Status string `json:"status"`
+		BeHash string `json:"be_hash"`
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for d.Status != "ready" {
+		if d.Status == "failed" || time.Now().After(deadline) {
+			t.Fatalf("deploy status = %s", d.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+		rec := doJSON(t, mux, "GET", "/api/deploys/1", "")
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Stats: the backend was never started, so state only; the static
+	// frontend has no process side.
+	rec := doJSON(t, mux, "GET", "/api/deploys/1/stats", "")
+	if rec.Code != 200 {
+		t.Fatalf("stats: %d %s", rec.Code, rec.Body)
+	}
+	var stats struct {
+		Backend *struct {
+			State       string  `json:"state"`
+			MemoryBytes *uint64 `json:"memory_bytes"`
+		} `json:"backend"`
+		Frontend json.RawMessage `json:"frontend"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.Backend == nil || stats.Backend.State != "idle" || stats.Backend.MemoryBytes != nil {
+		t.Fatalf("backend stats = %s", rec.Body)
+	}
+	if string(stats.Frontend) != "null" {
+		t.Fatalf("frontend stats = %s, want null", stats.Frontend)
+	}
+
+	// Run log before any start: attempt 0, empty.
+	var chunk struct {
+		Side      string `json:"side"`
+		Attempt   int    `json:"attempt"`
+		Offset    int64  `json:"offset"`
+		Content   string `json:"content"`
+		Truncated bool   `json:"truncated"`
+	}
+	getChunk := func(query string) {
+		t.Helper()
+		rec := doJSON(t, mux, "GET", "/api/deploys/1/logs/run"+query, "")
+		if rec.Code != 200 {
+			t.Fatalf("run log %s: %d %s", query, rec.Code, rec.Body)
+		}
+		chunk = struct {
+			Side      string `json:"side"`
+			Attempt   int    `json:"attempt"`
+			Offset    int64  `json:"offset"`
+			Content   string `json:"content"`
+			Truncated bool   `json:"truncated"`
+		}{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	getChunk("")
+	if chunk.Attempt != 0 || chunk.Content != "" {
+		t.Fatalf("chunk before start = %+v", chunk)
+	}
+
+	// Simulate a start attempt by writing the file the supervisor would.
+	dir := filepath.Join(root, "logs", "demo", "run", "be-"+d.BeHash)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "1.log")
+	if err := os.WriteFile(logPath, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	getChunk("")
+	if chunk.Attempt != 1 || chunk.Content != "hello\n" || chunk.Offset != 6 {
+		t.Fatalf("first chunk = %+v", chunk)
+	}
+
+	// Appended bytes arrive incrementally from the echoed offset.
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("world\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	getChunk("?attempt=1&offset=6")
+	if chunk.Content != "world\n" || chunk.Offset != 12 {
+		t.Fatalf("incremental chunk = %+v", chunk)
+	}
+	getChunk("?attempt=1&offset=12")
+	if chunk.Content != "" || chunk.Offset != 12 {
+		t.Fatalf("caught-up chunk = %+v", chunk)
+	}
+
+	// A new attempt file resets the view to the new log.
+	if err := os.WriteFile(filepath.Join(dir, "2.log"), []byte("restarted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	getChunk("?attempt=1&offset=12")
+	if chunk.Attempt != 2 || chunk.Content != "restarted\n" {
+		t.Fatalf("restart chunk = %+v", chunk)
+	}
+
+	// Side validation: the fixture frontend is static.
+	if rec := doJSON(t, mux, "GET", "/api/deploys/1/logs/run?side=fe", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("fe run log on static frontend: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doJSON(t, mux, "GET", "/api/deploys/1/logs/run?side=nope", ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bogus side: %d", rec.Code)
+	}
+	if rec := doJSON(t, mux, "GET", "/api/deploys/99/logs/run", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing deploy run log: %d", rec.Code)
+	}
+	if rec := doJSON(t, mux, "GET", "/api/deploys/99/stats", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing deploy stats: %d", rec.Code)
+	}
+}
+
 func TestDeleteRepo(t *testing.T) {
 	mux, root := newTestMux(t)
 	src := newSourceRepo(t)

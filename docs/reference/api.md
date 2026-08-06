@@ -158,6 +158,68 @@ Returns one deploy (`404` if missing).
 Returns a plain-text snapshot of the frontend, backend, and artifact build
 logs. Deploys that share an artifact share that artifact's build log.
 
+### `GET /api/deploys/{id}/logs/run`
+
+Returns an incremental slice of a **run log** — the supervised process's
+combined stdout+stderr (init output included), the docker-logs view of a
+preview. Run logs outlive their process, so crash output stays readable
+after an exit.
+
+| Query param | Meaning |
+| --- | --- |
+| `side` | `be` (default) or `fe` (process-mode frontends only; `404` for static frontends) |
+| `attempt` | The attempt whose bytes the client already has |
+| `offset` | How many bytes of it the client already has |
+
+```json
+{
+  "side": "be",
+  "attempt": 3,
+  "offset": 4096,
+  "content": "listening on 127.0.0.1:41234\n…",
+  "truncated": false,
+  "process": "running"
+}
+```
+
+Each response covers the **latest start attempt** of the deploy's artifact
+(processes are shared per artifact, so deploys with the same hash share a
+run log; `attempt` counts that artifact's starts, `0` meaning it never
+started). Echo `attempt` and `offset` back to receive only bytes appended
+since — the polling loop behind the dashboard's live tail. When the
+requested attempt is stale (the process restarted) the response resets to a
+tail of the new attempt's log, with `truncated: true` if history beyond the
+last 256 KiB was skipped. `process` is the side's live state
+(`idle`/`starting`/`running`).
+
+### `GET /api/deploys/{id}/stats`
+
+Live resource usage of the deploy's supervised processes — the docker-stats
+view. A side the deploy doesn't have is `null`.
+
+```json
+{
+  "backend": {
+    "state": "running",
+    "runtime": "host",
+    "cpu_percent": 1.2,
+    "memory_bytes": 5709824,
+    "memory_limit_bytes": 32887226368,
+    "started_at": "2026-08-06T22:09:49Z"
+  },
+  "frontend": null
+}
+```
+
+`state` is always present; the sampled fields appear only while the process
+runs. `cpu_percent` is percent of one core (docker-stats convention — it can
+exceed 100 on multi-core use) and needs two samples, so it appears from the
+second request onward; poll at a steady interval for stable readings.
+`memory_limit_bytes` is the container's cgroup limit or, for host
+processes, total system memory. `runtime` is `host` or `container`. Host
+processes are sampled from `/proc` (process-group-wide, so forked children
+count); on non-Linux hosts only container-mode processes report samples.
+
 ### `GET /api/deploys/{id}/artifacts/{name}/{file}`
 
 Downloads one file of a ready deploy's named
@@ -189,15 +251,3 @@ Responses:
   `ping` answers `{"status": "pong"}`.
 - `404` — no registered repo matches the payload's repository.
 - `503` — the server has no webhook secret configured.
-=======
-Returns a plain-text snapshot of the frontend, backend, and artifact build
-logs. Deploys that share an artifact share that artifact's build log.
-
-### `GET /api/deploys/{id}/artifacts/{name}/{file}`
-
-Downloads one file of a ready deploy's named
-[downloadable artifact](/reference/preview-toml#artifacts-name), as
-`application/octet-stream` with an attachment disposition. The URL is what
-the deploy's `artifacts` field lists. `404` for an unknown deploy,
-artifact, or file; `409` while the deploy isn't ready.
->>>>>>> 4708d14 (extend to artifacts)

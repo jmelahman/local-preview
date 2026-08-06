@@ -73,26 +73,136 @@ func deployCmd() *cobra.Command {
 		},
 	}
 
+	var runLog, follow bool
+	var side string
 	logs := &cobra.Command{
 		Use:   "logs <id>",
-		Short: "Print a deploy's build logs",
+		Short: "Print a deploy's build logs, or its process run log with --run",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, err := parseInt64(args[0], "deploy id")
 			if err != nil {
 				return err
 			}
-			text, err := client.New(resolveURL(cmd, serverURL), nil).GetDeployLogs(cmd.Context(), id)
+			c := client.New(resolveURL(cmd, serverURL), nil)
+			if !runLog {
+				if follow || cmd.Flags().Changed("side") {
+					return fmt.Errorf("--follow and --side apply to the run log; add --run")
+				}
+				text, err := c.GetDeployLogs(cmd.Context(), id)
+				if err != nil {
+					return err
+				}
+				fmt.Fprint(cmd.OutOrStdout(), text)
+				return nil
+			}
+			return printRunLog(cmd.Context(), c, cmd.OutOrStdout(), id, side, follow)
+		},
+	}
+	logs.Flags().BoolVar(&runLog, "run", false, "Print the process run log (the preview server's stdout+stderr) instead of build logs")
+	logs.Flags().StringVar(&side, "side", "be", "Which process: be (backend) or fe (process-mode frontend)")
+	logs.Flags().BoolVarP(&follow, "follow", "f", false, "Keep polling for new run-log output until interrupted")
+
+	stats := &cobra.Command{
+		Use:   "stats <id>",
+		Short: "Show live CPU/memory of a deploy's processes",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := parseInt64(args[0], "deploy id")
 			if err != nil {
 				return err
 			}
-			fmt.Fprint(cmd.OutOrStdout(), text)
-			return nil
+			return runDeployStats(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(), id)
 		},
 	}
 
-	parent.AddCommand(list, show, logs)
+	parent.AddCommand(list, show, logs, stats)
 	return parent
+}
+
+// printRunLog prints the current run-log tail and, with follow, keeps
+// polling for appended bytes — the CLI's `docker logs -f`.
+func printRunLog(ctx context.Context, c *client.Client, out io.Writer, id int64, side string, follow bool) error {
+	chunk, err := c.GetDeployRunLog(ctx, id, side, 0, 0)
+	if err != nil {
+		return err
+	}
+	if chunk.Truncated {
+		fmt.Fprintln(out, "… (earlier output omitted)")
+	}
+	fmt.Fprint(out, chunk.Content)
+	for follow {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(time.Second):
+		}
+		next, err := c.GetDeployRunLog(ctx, id, side, chunk.Attempt, chunk.Offset)
+		if err != nil {
+			return err
+		}
+		if chunk.Attempt != 0 && next.Attempt != chunk.Attempt {
+			fmt.Fprintf(out, "--- process restarted (attempt %d) ---\n", next.Attempt)
+		}
+		fmt.Fprint(out, next.Content)
+		chunk = next
+	}
+	return nil
+}
+
+// runDeployStats samples twice a second apart — a CPU percentage needs a
+// delta — and prints one docker-stats-like table.
+func runDeployStats(ctx context.Context, url string, out io.Writer, id int64) error {
+	c := client.New(url, nil)
+	if _, err := c.GetDeployStats(ctx, id); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(time.Second):
+	}
+	s, err := c.GetDeployStats(ctx, id)
+	if err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "SIDE\tSTATE\tRUNTIME\tCPU\tMEM\tSTARTED")
+	for _, row := range []struct {
+		side  string
+		stats *client.SideStats
+	}{{"be", s.Backend}, {"fe", s.Frontend}} {
+		if row.stats == nil {
+			continue
+		}
+		cpu, mem := "-", "-"
+		if row.stats.CPUPercent != nil {
+			cpu = fmt.Sprintf("%.1f%%", *row.stats.CPUPercent)
+		}
+		if row.stats.MemoryBytes != nil {
+			mem = formatBytes(*row.stats.MemoryBytes)
+			if row.stats.MemoryLimitBytes > 0 {
+				mem += " / " + formatBytes(row.stats.MemoryLimitBytes)
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", row.side, row.stats.State,
+			orDash(row.stats.Runtime), cpu, mem, orDash(row.stats.StartedAt))
+	}
+	return tw.Flush()
+}
+
+// formatBytes renders a byte count in binary units, docker-stats style.
+func formatBytes(n uint64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := uint64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func runDeploy(ctx context.Context, url string, out io.Writer, repoName, ref string, rebuild, noWait, asJSON bool) error {

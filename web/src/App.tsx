@@ -1,6 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { api, type Deploy, type DeployStatus, type ProcessState, type Repo } from "@/api/client";
+import {
+  api,
+  type Deploy,
+  type DeployStatus,
+  type LogSide,
+  type ProcessState,
+  type Repo,
+  type SideStats,
+} from "@/api/client";
 
 const THEME_KEY = "app.themeMode";
 type Theme = "light" | "dark";
@@ -129,15 +137,6 @@ function StatusBadge({ state }: { state: DeployState }) {
   );
 }
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const kb = bytes / 1024;
-  if (kb < 1024) return `${kb.toFixed(1)} KB`;
-  const mb = kb / 1024;
-  if (mb < 1024) return `${mb.toFixed(1)} MB`;
-  return `${(mb / 1024).toFixed(1)} GB`;
-}
-
 function timeAgo(iso: string): string {
   const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
   if (secs < 45) return "just now";
@@ -191,10 +190,12 @@ function DialogFooter({
 function Modal({
   title,
   onClose,
+  wide = false,
   children,
 }: {
   title: string;
   onClose: () => void;
+  wide?: boolean;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -212,7 +213,7 @@ function Modal({
       onClick={(e) => {
         if (e.target === ref.current) onClose();
       }}
-      className="m-auto w-[520px] max-w-[calc(100vw-2rem)] rounded border border-border bg-bg p-0 text-fg shadow-lg backdrop:bg-black/50"
+      className={`m-auto ${wide ? "w-[780px]" : "w-[520px]"} max-w-[calc(100vw-2rem)] rounded border border-border bg-bg p-0 text-fg shadow-lg backdrop:bg-black/50`}
     >
       <header className="flex items-center justify-between border-b border-border px-3 py-2">
         <h2 className="text-sm font-semibold">{title}</h2>
@@ -354,8 +355,235 @@ function DeployDialog({ repos, onClose }: { repos: Repo[]; onClose: () => void }
   );
 }
 
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
+}
+
+function uptime(iso: string): string {
+  const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ${secs % 60}s`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ${mins % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+// usePinnedScroll keeps a log pane glued to its bottom edge as content
+// streams in, unless the user scrolled up to read history.
+function usePinnedScroll(dep: unknown) {
+  const ref = useRef<HTMLPreElement>(null);
+  const pinned = useRef(true);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: dep drives re-scroll on content change.
+  useEffect(() => {
+    const el = ref.current;
+    if (el && pinned.current) el.scrollTop = el.scrollHeight;
+  }, [dep]);
+  const onScroll = () => {
+    const el = ref.current;
+    if (el) pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
+  return { ref, onScroll };
+}
+
+const logPaneClass =
+  "h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-surface p-2 font-mono text-xs leading-relaxed";
+
+function Metric({ label, value, title }: { label: string; value: string; title?: string }) {
+  return (
+    <span className="inline-flex items-baseline gap-1 tabular-nums" title={title}>
+      <span className="text-[10px] uppercase tracking-wide text-fg-muted">{label}</span>
+      {value}
+    </span>
+  );
+}
+
+// StatsRow is one side's docker-stats-like line: state, CPU, memory, uptime.
+function StatsRow({ label, stats }: { label: string; stats: SideStats }) {
+  const mem =
+    stats.memory_bytes != null
+      ? `${formatBytes(stats.memory_bytes)}${
+          stats.memory_limit_bytes ? ` / ${formatBytes(stats.memory_limit_bytes)}` : ""
+        }`
+      : "—";
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1.5 text-xs">
+      <span className="w-16 font-medium">{label}</span>
+      <StatusBadge state={stats.state} />
+      <Metric
+        label="cpu"
+        value={stats.cpu_percent != null ? `${stats.cpu_percent.toFixed(1)}%` : "—"}
+        title="Percent of one CPU core, like docker stats"
+      />
+      <Metric label="mem" value={mem} title="Resident memory / total available" />
+      <Metric label="up" value={stats.started_at ? uptime(stats.started_at) : "—"} />
+      {stats.runtime && <span className="ml-auto text-fg-muted">{stats.runtime}</span>}
+    </div>
+  );
+}
+
+// RunLogPane tails a process run log: an initial tail, then only appended
+// bytes each poll. A restart (new attempt) resets the view.
+function RunLogPane({ deployId, side }: { deployId: number; side: LogSide }) {
+  const [text, setText] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  const [truncated, setTruncated] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const cursor = useRef({ attempt: 0, offset: 0 });
+  const { ref, onScroll } = usePinnedScroll(text);
+
+  useEffect(() => {
+    setText("");
+    setAttempt(0);
+    setTruncated(false);
+    cursor.current = { attempt: 0, offset: 0 };
+    let stopped = false;
+    let inFlight = false;
+    const tick = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        const c = await api.getRunLog(
+          deployId,
+          side,
+          cursor.current.attempt,
+          cursor.current.offset,
+        );
+        if (stopped) return;
+        setError(null);
+        if (c.attempt !== cursor.current.attempt) {
+          // First fetch, or the process restarted into a fresh log file.
+          setText(c.content);
+          setTruncated(c.truncated ?? false);
+          setAttempt(c.attempt);
+        } else if (c.content) {
+          setText((t) => t + c.content);
+        }
+        cursor.current = { attempt: c.attempt, offset: c.offset };
+      } catch (e) {
+        if (!stopped) setError(String(e));
+      } finally {
+        inFlight = false;
+      }
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [deployId, side]);
+
+  return (
+    <div className="flex flex-col gap-1">
+      <pre ref={ref} onScroll={onScroll} className={logPaneClass}>
+        {truncated && <span className="text-fg-muted">{"… earlier output omitted\n"}</span>}
+        {text ||
+          (attempt === 0 ? (
+            <span className="text-fg-muted">
+              No output yet — the process starts on the preview's first request.
+            </span>
+          ) : (
+            <span className="text-fg-muted">The process hasn't written any output.</span>
+          ))}
+      </pre>
+      <div className="flex justify-between font-mono text-[11px] text-fg-muted">
+        <span>{error ? `log fetch failed: ${error}` : "stdout+stderr, refreshed live"}</span>
+        {attempt > 0 && <span>start attempt {attempt}</span>}
+      </div>
+    </div>
+  );
+}
+
+// BuildLogPane shows the build-log snapshot, refreshing while a build runs.
+function BuildLogPane({ deployId, building }: { deployId: number; building: boolean }) {
+  const logs = useQuery({
+    queryKey: ["deploy-build-log", deployId],
+    queryFn: () => api.getBuildLogs(deployId),
+    refetchInterval: building ? 1000 : false,
+  });
+  const { ref, onScroll } = usePinnedScroll(logs.data);
+  return (
+    <div className="flex flex-col gap-1">
+      <pre ref={ref} onScroll={onScroll} className={logPaneClass}>
+        {logs.error ? String(logs.error) : (logs.data ?? "loading…")}
+      </pre>
+      <div className="font-mono text-[11px] text-fg-muted">
+        {building ? "build in progress — refreshing" : "frontend and backend build output"}
+      </div>
+    </div>
+  );
+}
+
+type LogTab = LogSide | "build";
+
+// DeployDetailDialog is the observability view of one deployment: live
+// resource stats plus docker-logs-like views of its process and build logs.
+function DeployDetailDialog({ deploy, onClose }: { deploy: Deploy; onClose: () => void }) {
+  const building = deploy.status === "queued" || deploy.status === "building";
+  const hasBackend = !!deploy.be_hash;
+  const hasFeProcess = deploy.fe_process != null;
+  const [tab, setTab] = useState<LogTab>(hasBackend && !building ? "be" : "build");
+
+  const stats = useQuery({
+    queryKey: ["deploy-stats", deploy.id],
+    queryFn: () => api.getDeployStats(deploy.id),
+    // Two samples make a CPU percentage, so keep a steady cadence.
+    refetchInterval: 2000,
+  });
+
+  const tabs: { id: LogTab; label: string }[] = [
+    ...(hasBackend ? [{ id: "be" as const, label: "backend log" }] : []),
+    ...(hasFeProcess ? [{ id: "fe" as const, label: "frontend log" }] : []),
+    { id: "build", label: "build log" },
+  ];
+
+  return (
+    <Modal title={`${deploy.repo} @ ${deploy.short_sha}`} onClose={onClose} wide>
+      <div className="flex flex-col gap-3 p-4">
+        {(stats.data?.backend || stats.data?.frontend) && (
+          <div className="divide-y divide-border rounded border border-border">
+            {stats.data.backend && <StatsRow label="backend" stats={stats.data.backend} />}
+            {stats.data.frontend && <StatsRow label="frontend" stats={stats.data.frontend} />}
+          </div>
+        )}
+        <div className="flex gap-1">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              className={`rounded px-2 py-1 text-xs transition-colors duration-150 ${
+                tab === t.id
+                  ? "bg-surface-3 font-medium text-fg"
+                  : "bg-surface-2 text-fg-muted hover:bg-surface-3"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {tab === "build" ? (
+          <BuildLogPane deployId={deploy.id} building={building} />
+        ) : (
+          <RunLogPane deployId={deploy.id} side={tab} />
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 export default function App() {
   const [dialog, setDialog] = useState<"register" | "deploy" | null>(null);
+  const [detailId, setDetailId] = useState<number | null>(null);
 
   const health = useQuery({
     queryKey: ["health"],
@@ -382,6 +610,9 @@ export default function App() {
   });
 
   const hasRepos = (repos.data?.length ?? 0) > 0;
+  // Resolve from the live list each render so the dialog tracks state
+  // changes (build finishing, processes warming) instead of a snapshot.
+  const detail = detailId != null ? deploys.data?.find((d) => d.id === detailId) : undefined;
 
   return (
     <div className="flex min-h-screen flex-col bg-bg text-fg">
@@ -510,7 +741,7 @@ export default function App() {
                           key={`${a.name}/${f.name}`}
                           href={f.url}
                           download={f.name}
-                          title={`${a.name}: ${f.name} (${formatSize(f.size)})`}
+                          title={`${a.name}: ${f.name} (${formatBytes(f.size)})`}
                           className={`${neutralButtonClass} gap-1 font-mono`}
                         >
                           <IconDownload className="h-3 w-3" />
@@ -518,6 +749,15 @@ export default function App() {
                         </a>
                       )),
                     )}
+                    <button
+                      type="button"
+                      onClick={() => setDetailId(d.id)}
+                      title="Logs and resource usage"
+                      className={`${neutralButtonClass} gap-1`}
+                    >
+                      <IconPulse className="h-3 w-3" />
+                      logs
+                    </button>
                     {d.preview_url ? (
                       <a
                         href={d.preview_url}
@@ -547,6 +787,7 @@ export default function App() {
       {dialog === "deploy" && (
         <DeployDialog repos={repos.data ?? []} onClose={() => setDialog(null)} />
       )}
+      {detail && <DeployDetailDialog deploy={detail} onClose={() => setDetailId(null)} />}
     </div>
   );
 }
@@ -664,6 +905,23 @@ function IconDownload({ className = "" }: { className?: string }) {
     >
       <path d="M12 3v12m0 0 4-4m-4 4-4-4" />
       <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+    </svg>
+  );
+}
+
+function IconPulse({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
     </svg>
   );
 }

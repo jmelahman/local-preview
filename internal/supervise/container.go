@@ -118,6 +118,7 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, argv, env []st
 		return fmt.Errorf("start container: %w", err)
 	}
 	p.containerID = id
+	p.startedAt = time.Now()
 	m.db.AddProcessEvent(k.RepoID, k.Hash, "start_attempt",
 		fmt.Sprintf("container %.12s port %d", id, port))
 

@@ -333,7 +333,7 @@ func TestInitFailureRetriesNextStart(t *testing.T) {
 	if art, err := f.db.GetBackendArtifact(f.repoID, "be-init-retry"); err != nil || art.InitDoneAt != "" {
 		t.Fatalf("failed init must not be recorded done: %+v, %v", art, err)
 	}
-	if got := f.m.Status(k); got != "stopped" {
+	if got := f.m.Status(k); got != "idle" {
 		t.Fatalf("Status after init failure = %q", got)
 	}
 

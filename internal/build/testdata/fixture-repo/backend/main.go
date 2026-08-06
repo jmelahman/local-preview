@@ -34,6 +34,8 @@ func main() {
 		}
 		fmt.Fprintf(w, "%d", n)
 	})
+	// The startup line makes the run log observable in tests.
+	fmt.Printf("fixture backend listening on %s\n", *addr)
 	if err := http.ListenAndServe(*addr, mux); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

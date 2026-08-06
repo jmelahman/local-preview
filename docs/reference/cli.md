@@ -36,6 +36,8 @@ Start the orchestrator.
 | `preview deploy list` | List deploys (`--repo`, `--branch`, `--author` to filter) |
 | `preview deploy show <id>` | Print one deploy as JSON |
 | `preview deploy logs <id>` | Print a deploy's build logs |
+| `preview deploy logs <id> --run` | Print the process run log — the preview server's stdout+stderr, init output included. `--side fe` selects a process-mode frontend; `-f`/`--follow` keeps polling for new output until interrupted |
+| `preview deploy stats <id>` | Show live CPU/memory of the deploy's processes (docker-stats-like; samples twice a second apart to compute the CPU percentage) |
 
 Flags on `preview deploy`:
 

@@ -104,9 +104,24 @@ func TestContainerBackendLifecycle(t *testing.T) {
 		t.Fatalf("status = %q", got)
 	}
 
+	// Container stats come from the daemon; the second sample carries a CPU
+	// percentage.
+	first := f.m.Stats(ctx, k)
+	if first == nil || first.Runtime != "container" || first.MemoryBytes == 0 {
+		t.Fatalf("first stats sample = %+v", first)
+	}
+	time.Sleep(50 * time.Millisecond)
+	second := f.m.Stats(ctx, k)
+	if second == nil || second.CPUPercent == nil || *second.CPUPercent < 0 {
+		t.Fatalf("second stats sample = %+v, want cpu_percent set", second)
+	}
+
 	f.m.Stop(k, "test")
 	if got := f.m.Status(k); got != "idle" {
 		t.Fatalf("status after stop = %q", got)
+	}
+	if s := f.m.Stats(ctx, k); s != nil {
+		t.Fatalf("stats after stop = %+v, want nil", s)
 	}
 	// The container is removed, not just stopped.
 	cli, _ := dockerapi.Connect(context.Background())

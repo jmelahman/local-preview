@@ -61,6 +61,41 @@ export type Deploy = {
   updated_at: string;
 };
 
+export type ProcessRuntime = "host" | "container";
+
+// One side's live resource sample. Sampled fields are absent while the
+// process isn't running; cpu_percent needs two samples, so it appears from
+// the second poll onward.
+export type SideStats = {
+  state: ProcessState;
+  runtime?: ProcessRuntime;
+  cpu_percent?: number;
+  memory_bytes?: number;
+  memory_limit_bytes?: number;
+  started_at?: string;
+};
+
+// Live resource usage of a deploy's processes; a side the deploy doesn't
+// have is null.
+export type DeployStats = {
+  backend: SideStats | null;
+  frontend: SideStats | null;
+};
+
+export type LogSide = "be" | "fe";
+
+// An incremental slice of a process run log (the supervised server's
+// stdout+stderr). Echo attempt/offset back to receive only new bytes; a
+// changed attempt means the process restarted and the view reset.
+export type RunLogChunk = {
+  side: LogSide;
+  attempt: number;
+  offset: number;
+  content: string;
+  truncated?: boolean;
+  process?: ProcessState;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -88,4 +123,14 @@ export const api = {
   listDeploys: () => request<Deploy[]>("/api/deploys"),
   createDeploy: (repo: string, ref: string) =>
     request<Deploy>("/api/deploys", { method: "POST", body: JSON.stringify({ repo, ref }) }),
+  getDeployStats: (id: number) => request<DeployStats>(`/api/deploys/${id}/stats`),
+  getRunLog: (id: number, side: LogSide, attempt: number, offset: number) =>
+    request<RunLogChunk>(
+      `/api/deploys/${id}/logs/run?side=${side}&attempt=${attempt}&offset=${offset}`,
+    ),
+  getBuildLogs: async (id: number): Promise<string> => {
+    const res = await fetch(`/api/deploys/${id}/logs`);
+    if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText}`);
+    return res.text();
+  },
 };

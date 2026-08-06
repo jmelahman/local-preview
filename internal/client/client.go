@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -208,6 +209,68 @@ func (c *Client) GetDeployLogs(ctx context.Context, id int64) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+// RunLogChunk mirrors the API's incremental run-log slice.
+type RunLogChunk struct {
+	Side      string `json:"side"`
+	Attempt   int    `json:"attempt"`
+	Offset    int64  `json:"offset"`
+	Content   string `json:"content"`
+	Truncated bool   `json:"truncated"`
+	Process   string `json:"process"`
+}
+
+// GetDeployRunLog fetches a slice of the deploy's process run log. side is
+// "be" or "fe". Zero attempt/offset fetch a fresh tail; passing the prior
+// chunk's values back yields only bytes appended since.
+func (c *Client) GetDeployRunLog(ctx context.Context, id int64, side string, attempt int, offset int64) (RunLogChunk, error) {
+	q := url.Values{"side": {side}}
+	if attempt > 0 {
+		q.Set("attempt", strconv.Itoa(attempt))
+		q.Set("offset", strconv.FormatInt(offset, 10))
+	}
+	raw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/api/deploys/%d/logs/run?%s", id, q.Encode()), nil)
+	if err != nil {
+		return RunLogChunk{}, err
+	}
+	var chunk RunLogChunk
+	if err := json.Unmarshal(raw, &chunk); err != nil {
+		return RunLogChunk{}, fmt.Errorf("decode run log: %w", err)
+	}
+	return chunk, nil
+}
+
+// SideStats mirrors one side of the API's deploy stats response. Sampled
+// fields are nil/zero while the process isn't running; CPUPercent needs two
+// samples, so it is nil on the first call after a start.
+type SideStats struct {
+	State            string   `json:"state"`
+	Runtime          string   `json:"runtime"`
+	CPUPercent       *float64 `json:"cpu_percent"`
+	MemoryBytes      *uint64  `json:"memory_bytes"`
+	MemoryLimitBytes uint64   `json:"memory_limit_bytes"`
+	StartedAt        string   `json:"started_at"`
+}
+
+// DeployStats is live resource usage of a deploy's processes; a side the
+// deploy doesn't have is nil.
+type DeployStats struct {
+	Backend  *SideStats `json:"backend"`
+	Frontend *SideStats `json:"frontend"`
+}
+
+// GetDeployStats fetches live resource usage of the deploy's processes.
+func (c *Client) GetDeployStats(ctx context.Context, id int64) (DeployStats, error) {
+	raw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/api/deploys/%d/stats", id), nil)
+	if err != nil {
+		return DeployStats{}, err
+	}
+	var s DeployStats
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return DeployStats{}, fmt.Errorf("decode stats: %w", err)
+	}
+	return s, nil
 }
 
 // do performs a request and returns the response body, converting non-2xx

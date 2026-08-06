@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jmelahman/local-preview/internal/build"
 	"github.com/jmelahman/local-preview/internal/config"
@@ -68,6 +70,8 @@ func NewMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("GET /api/deploys", d.handleListDeploys)
 	mux.HandleFunc("GET /api/deploys/{id}", d.handleGetDeploy)
 	mux.HandleFunc("GET /api/deploys/{id}/logs", d.handleDeployLogs)
+	mux.HandleFunc("GET /api/deploys/{id}/logs/run", d.handleDeployRunLog)
+	mux.HandleFunc("GET /api/deploys/{id}/stats", d.handleDeployStats)
 	mux.HandleFunc("GET /api/deploys/{id}/artifacts/{name}/{file}", d.handleArtifactDownload)
 	mux.Handle("/", web.Handler())
 	return mux
@@ -435,6 +439,171 @@ func (d Deps) handleDeployLogs(w http.ResponseWriter, r *http.Request) {
 		w.Write(b)
 		fmt.Fprintln(w)
 	}
+}
+
+// runLogTailBytes caps how much history a fresh run-log view loads; the
+// client keeps the returned offset and receives only appended bytes after.
+const runLogTailBytes = 256 * 1024
+
+// runLogChunkBytes caps one response; a lagging client catches up across
+// polls.
+const runLogChunkBytes = 1 << 20
+
+// runLogChunk is one incremental slice of a process run log.
+type runLogChunk struct {
+	Side    string `json:"side"`
+	Attempt int    `json:"attempt"` // Nth start of the artifact; 0 = never started
+	Offset  int64  `json:"offset"`  // echo back to receive only new bytes
+	Content string `json:"content"`
+	// Truncated marks a fresh view that skipped history beyond the tail cap.
+	Truncated bool `json:"truncated,omitempty"`
+	// Process is the side's live state, so a log view can label itself.
+	Process string `json:"process,omitempty"`
+}
+
+// sideKey resolves the ?side= query to the deploy's supervisor key and
+// artifact hash. ok=false means the error response was already written.
+func (d Deps) sideKey(w http.ResponseWriter, r *http.Request, row db.DeployRow) (side, hash string, key supervise.Key, ok bool) {
+	side = r.URL.Query().Get("side")
+	switch side {
+	case "", "be":
+		side = "be"
+		return side, row.BeHash, supervise.BackendKey(row.RepoID, row.BeHash), true
+	case "fe":
+		if row.FeHash != "" {
+			if _, err := d.Store.GetFrontendArtifact(row.RepoID, row.FeHash); err != nil {
+				httpError(w, http.StatusNotFound, "deploy has no frontend process (static frontend)")
+				return "", "", key, false
+			}
+		}
+		return side, row.FeHash, supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash), true
+	default:
+		httpError(w, http.StatusBadRequest, `side must be "be" or "fe"`)
+		return "", "", key, false
+	}
+}
+
+// handleDeployRunLog returns an incremental slice of a run log — the
+// supervised process's combined stdout+stderr (init output included), the
+// docker-logs view of a preview. Each call returns the latest start
+// attempt's log from the requested offset; echoing attempt and offset back
+// yields only new bytes, and a restart (new attempt) resets the view to a
+// tail of the new file. Run logs outlive their process, so crash output is
+// readable after the exit.
+func (d Deps) handleDeployRunLog(w http.ResponseWriter, r *http.Request) {
+	row, ok := d.deployFromPath(w, r)
+	if !ok {
+		return
+	}
+	side, hash, key, ok := d.sideKey(w, r, row)
+	if !ok {
+		return
+	}
+	if hash == "" {
+		// No artifact yet (still building) or the deploy has no such side.
+		writeJSON(w, http.StatusOK, runLogChunk{Side: side})
+		return
+	}
+	chunk := runLogChunk{Side: side, Process: d.Super.Status(key)}
+
+	// Run logs are per artifact (shared by every deploy with the same
+	// hash), one numbered file per start attempt.
+	dir := filepath.Join(d.Config.LogsDir(), row.RepoName, "run", side+"-"+hash)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if base, found := strings.CutSuffix(e.Name(), ".log"); found {
+			if n, err := strconv.Atoi(base); err == nil && n > chunk.Attempt {
+				chunk.Attempt = n
+			}
+		}
+	}
+	if chunk.Attempt == 0 {
+		writeJSON(w, http.StatusOK, chunk)
+		return
+	}
+
+	f, err := os.Open(filepath.Join(dir, strconv.Itoa(chunk.Attempt)+".log"))
+	if err != nil {
+		internalError(w, "open run log", err)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		internalError(w, "stat run log", err)
+		return
+	}
+	size := info.Size()
+
+	q := r.URL.Query()
+	start := int64(0)
+	if att, err := strconv.Atoi(q.Get("attempt")); err == nil && att == chunk.Attempt {
+		if off, err := strconv.ParseInt(q.Get("offset"), 10, 64); err == nil && off >= 0 && off <= size {
+			start = off
+		}
+	} else if size > runLogTailBytes {
+		start = size - runLogTailBytes
+		chunk.Truncated = true
+	}
+
+	buf := make([]byte, min(size-start, runLogChunkBytes))
+	n, err := f.ReadAt(buf, start)
+	if err != nil && err != io.EOF {
+		internalError(w, "read run log", err)
+		return
+	}
+	chunk.Content = string(buf[:n])
+	chunk.Offset = start + int64(n)
+	writeJSON(w, http.StatusOK, chunk)
+}
+
+// sideStats is one side's slice of a deploy stats response. Sampled fields
+// are absent while the process isn't running (or can't be sampled);
+// cpu_percent additionally needs two samples, so it appears from the second
+// poll onward.
+type sideStats struct {
+	State            string   `json:"state"`
+	Runtime          string   `json:"runtime,omitempty"`
+	CPUPercent       *float64 `json:"cpu_percent,omitempty"`
+	MemoryBytes      *uint64  `json:"memory_bytes,omitempty"`
+	MemoryLimitBytes uint64   `json:"memory_limit_bytes,omitempty"`
+	StartedAt        string   `json:"started_at,omitempty"`
+}
+
+// handleDeployStats reports live resource usage — the docker-stats view of
+// a preview — for the deploy's supervised processes. A side the deploy
+// doesn't have is null.
+func (d Deps) handleDeployStats(w http.ResponseWriter, r *http.Request) {
+	row, ok := d.deployFromPath(w, r)
+	if !ok {
+		return
+	}
+	sample := func(k supervise.Key) *sideStats {
+		s := &sideStats{State: d.Super.Status(k)}
+		if ps := d.Super.Stats(r.Context(), k); ps != nil {
+			s.Runtime = ps.Runtime
+			s.CPUPercent = ps.CPUPercent
+			s.MemoryBytes = &ps.MemoryBytes
+			s.MemoryLimitBytes = ps.MemoryLimitBytes
+			if !ps.StartedAt.IsZero() {
+				s.StartedAt = ps.StartedAt.UTC().Format(time.RFC3339)
+			}
+		}
+		return s
+	}
+	resp := struct {
+		Backend  *sideStats `json:"backend"`
+		Frontend *sideStats `json:"frontend"`
+	}{}
+	if row.BeHash != "" {
+		resp.Backend = sample(supervise.BackendKey(row.RepoID, row.BeHash))
+	}
+	if row.FeHash != "" {
+		if _, err := d.Store.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
+			resp.Frontend = sample(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

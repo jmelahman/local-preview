@@ -151,9 +151,13 @@ type process struct {
 	port        int
 	cmd         *exec.Cmd
 	containerID string
+	startedAt   time.Time // when the child/container launched
 
 	lastTouch time.Time     // guarded by Manager.mu; recency for the reaper
 	idleAfter time.Duration // idle_timeout from the run config
+
+	statsMu sync.Mutex // guards prevCPU
+	prevCPU cpuSample  // prior sample for CPU-percent deltas
 
 	ready  chan struct{}
 	failed chan struct{}
@@ -421,6 +425,7 @@ func (m *Manager) start(k Key, p *process) {
 			return
 		}
 		p.cmd = cmd
+		p.startedAt = time.Now()
 		m.db.AddProcessEvent(k.RepoID, k.Hash, "start_attempt",
 			fmt.Sprintf("pid %d port %d", cmd.Process.Pid, port))
 		m.db.UpsertProcessRecord(db.ProcessRecord{
