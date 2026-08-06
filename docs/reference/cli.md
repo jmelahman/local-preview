@@ -56,7 +56,19 @@ Run from inside a target repository. Installs a git post-commit hook that
 requests a preview deploy of every new commit (`--dry-run` to preview). If
 the repo uses the pre-commit framework, the equivalent
 `.pre-commit-config.yaml` stanza is printed instead, for use with
-`pre-commit install --hook-type post-commit`.
+`pre-commit install --hook-type post-commit`:
+
+```yaml
+  - repo: local
+    hooks:
+      - id: local-preview
+        name: local-preview deploy
+        entry: sh -c 'preview deploy "$(git rev-parse HEAD)" --no-wait'
+        language: system
+        stages: [post-commit]
+        always_run: true
+        pass_filenames: false
+```
 
 Existing hand-written post-commit hooks are never overwritten.
 
