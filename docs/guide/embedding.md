@@ -44,6 +44,25 @@ Notes:
 - `Close()` stops build workers and every supervised backend; previews
   never outlive the embedding process.
 
+## Custom manifest locations
+
+By default target repos declare themselves in `preview.toml`. Embedders can
+accept the same schema from inside their own config file so repos need only
+one file:
+
+```go
+orchestrator.Options{
+    // preview.toml wins when both exist; sources are tried in order.
+    ManifestSources: []orchestrator.ManifestSource{
+        {Path: "preview.toml"},
+        {Path: ".kanban.toml", Table: "previews"},
+    },
+}
+```
+
+Hashes cover the parsed manifest rather than its location, so relocating
+unchanged config busts no caches.
+
 ## Custom build execution
 
 By default build steps exec on the host. Inject `Options.Runner` to run

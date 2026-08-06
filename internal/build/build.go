@@ -35,8 +35,23 @@ import (
 // DefaultBuildTimeout bounds a single build step.
 const DefaultBuildTimeout = 10 * time.Minute
 
-// ManifestName is the contract file read from the committed tree.
+// ManifestName is the default contract file read from the committed tree.
 const ManifestName = "preview.toml"
+
+// ManifestRef locates a preview manifest in a target repo: a TOML file at
+// the repo root, optionally rooted at a top-level table (so embedders can
+// host the manifest inside a larger config file).
+type ManifestRef struct {
+	Path  string
+	Table string
+}
+
+func (r ManifestRef) String() string {
+	if r.Table == "" {
+		return r.Path
+	}
+	return fmt.Sprintf("%s [%s]", r.Path, r.Table)
+}
 
 // Queue coordinates deploys: request → queued row → worker → artifacts →
 // state provisioning → ready.
@@ -48,6 +63,7 @@ type Queue struct {
 	logsDir string
 	runner  Runner
 
+	manifestRefs []ManifestRef
 	buildTimeout time.Duration
 	sf           singleflight.Group
 	work         chan int64
@@ -69,9 +85,18 @@ func NewQueue(database *db.Store, git *gitrepo.Manager, files *store.Store, supe
 		super:        super,
 		logsDir:      logsDir,
 		runner:       runner,
+		manifestRefs: []ManifestRef{{Path: ManifestName}},
 		buildTimeout: DefaultBuildTimeout,
 		work:         make(chan int64, 256),
 		rebuild:      make(map[int64]bool),
+	}
+}
+
+// SetManifestRefs replaces the manifest locations tried (in order) at each
+// deployed commit. Call before Start.
+func (q *Queue) SetManifestRefs(refs []ManifestRef) {
+	if len(refs) > 0 {
+		q.manifestRefs = refs
 	}
 }
 
@@ -202,11 +227,7 @@ func (q *Queue) process(ctx context.Context, id int64) {
 func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool) error {
 	gr := q.git.Open(row.RepoName)
 
-	raw, err := gr.ReadFile(ctx, row.SHA, ManifestName)
-	if err != nil {
-		return fmt.Errorf("%s not found at %s (is the repo onboarded?): %w", ManifestName, row.ShortSHA, err)
-	}
-	m, err := manifest.Parse(raw)
+	m, err := q.loadManifest(ctx, gr, row)
 	if err != nil {
 		return err
 	}
@@ -273,6 +294,31 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 		return err
 	}
 	return q.super.ForkOrInitStateDir(ctx, gr, repo.ID, row.RepoName, beHash, row.SHA, string(runCfg))
+}
+
+// loadManifest reads the first present manifest source at the deployed
+// commit. A missing file or table means "try the next source"; a present
+// but invalid manifest fails the deploy with its parse error.
+func (q *Queue) loadManifest(ctx context.Context, gr gitrepo.Repo, row db.DeployRow) (manifest.Manifest, error) {
+	tried := make([]string, 0, len(q.manifestRefs))
+	for _, ref := range q.manifestRefs {
+		tried = append(tried, ref.String())
+		raw, err := gr.ReadFile(ctx, row.SHA, ref.Path)
+		if err != nil {
+			continue
+		}
+		m, err := manifest.ParseAt(raw, ref.Table)
+		if errors.Is(err, manifest.ErrNoManifest) {
+			continue
+		}
+		if err != nil {
+			return manifest.Manifest{}, fmt.Errorf("%s: %w", ref, err)
+		}
+		return m, nil
+	}
+	return manifest.Manifest{}, fmt.Errorf(
+		"no preview manifest at %s (looked for %s) — is the repo onboarded?",
+		row.ShortSHA, strings.Join(tried, ", "))
 }
 
 func (q *Queue) buildFrontend(ctx context.Context, row db.DeployRow, fe manifest.Frontend, scratch, hash, logPath string, overwrite bool) error {

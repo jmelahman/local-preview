@@ -15,14 +15,17 @@ builds:
     ldflags:
       - -s -w
       - -X github.com/jmelahman/local-preview/cmd/server.version={{.Version}}
+    # The supervisor is Unix process-group machinery (Setpgid, kill(-pgid));
+    # no Windows builds until it grows a Windows backend.
+    goos:
+      - linux
+      - darwin
     goarch:
       - amd64
       - arm64
 
 archives:
-  - format_overrides:
-      - goos: windows
-        formats: [zip]
+  - {}
 
 changelog:
   sort: asc

@@ -80,6 +80,20 @@ type Options struct {
 	BuildConcurrency int
 	// Runner executes build steps. Defaults to host execution.
 	Runner Runner
+	// ManifestSources are the locations tried, in order, for the preview
+	// manifest at each deployed commit. Defaults to preview.toml at the
+	// repo root. Embedders can add their own config file with a table —
+	// e.g. {Path: ".kanban.toml", Table: "previews"}. Artifact hashes cover
+	// the parsed manifest, not its location, so moving unchanged config
+	// between sources doesn't invalidate caches.
+	ManifestSources []ManifestSource
+}
+
+// ManifestSource locates a preview manifest: a TOML file at the target
+// repo's root, optionally rooted at a top-level table of that file.
+type ManifestSource struct {
+	Path  string
+	Table string
 }
 
 // Repo is a registered repository.
@@ -182,6 +196,13 @@ func New(opts Options) (*Orchestrator, error) {
 		runner = runnerAdapter{r: opts.Runner}
 	}
 	queue := build.NewQueue(database, gitMgr, files, super, opts.DataDir+"/logs", runner)
+	if len(opts.ManifestSources) > 0 {
+		refs := make([]build.ManifestRef, len(opts.ManifestSources))
+		for i, s := range opts.ManifestSources {
+			refs[i] = build.ManifestRef{Path: s.Path, Table: s.Table}
+		}
+		queue.SetManifestRefs(refs)
+	}
 	queue.Start(ctx, opts.BuildConcurrency)
 
 	return &Orchestrator{

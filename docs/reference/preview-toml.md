@@ -61,6 +61,32 @@ Two placeholders are substituted into every `run` argv element:
 | `{port}` | The loopback port assigned to this process — bind `127.0.0.1:{port}` |
 | `{state_dir}` | The artifact's mutable state directory (see [state lineage](/guide/concepts#state-follows-git-lineage)) |
 
+## Alternate locations (embedders)
+
+Applications embedding the orchestrator can offer additional manifest
+locations via `Options.ManifestSources` — typically a table inside their own
+config file, so target repos need only one file. agentic-kanban, for
+example, accepts the same schema under a `[previews]` table in
+`.kanban.toml`:
+
+```toml
+[previews.frontend]
+path  = "web"
+build = [["npm", "ci"], ["npm", "run", "build"]]
+dist  = "dist"
+
+[previews.backend]
+path        = "."
+build       = [["go", "build", "-o", "bin/server", "."]]
+run         = ["./bin/server", "serve", "--addr", "127.0.0.1:{port}", "--data-dir", "{state_dir}"]
+health_path = "/api/health"
+```
+
+Sources are tried in order (`preview.toml` first, by convention) and the
+manifest is still always read from the committed tree. Artifact hashes cover
+the parsed manifest, not its location, so moving unchanged config between
+sources doesn't invalidate caches.
+
 ## Hashing caveats
 
 Each side's hash covers its declared partition **plus its own manifest

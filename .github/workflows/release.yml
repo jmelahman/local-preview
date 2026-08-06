@@ -58,10 +58,10 @@ jobs:
     strategy:
       matrix:
         os-arch:
+          # Unix-only: the supervisor is process-group machinery with no
+          # Windows backend yet.
           - {goos: "linux", goarch: "amd64"}
           - {goos: "linux", goarch: "arm64"}
-          - {goos: "windows", goarch: "amd64"}
-          - {goos: "windows", goarch: "arm64"}
           - {goos: "darwin", goarch: "amd64"}
           - {goos: "darwin", goarch: "arm64"}
           - {goos: "", goarch: ""}

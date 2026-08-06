@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,39 @@ func TestParseTimeouts(t *testing.T) {
 	}
 	if time.Duration(m.Backend.IdleTimeout) != time.Hour {
 		t.Fatalf("idle_timeout = %v, want 1h", m.Backend.IdleTimeout)
+	}
+}
+
+func TestParseAt(t *testing.T) {
+	// The manifest hosted as [previews.*] tables inside a larger config
+	// file, surrounded by foreign tables.
+	hosted := "[harness]\nname = \"claude\"\n" +
+		strings.ReplaceAll(valid, "\n[", "\n[previews.") +
+		"\n[other]\nkey = true\n"
+
+	m, err := ParseAt([]byte(hosted), "previews")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Frontend.Path != "web" || m.Backend.HealthPath != "/api/health" {
+		t.Fatalf("unexpected manifest: %+v", m)
+	}
+
+	// Empty table name = whole-file manifest.
+	if _, err := ParseAt([]byte(valid), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Missing table is ErrNoManifest (caller tries the next source).
+	if _, err := ParseAt([]byte("[sync]\nallow_rebase = true\n"), "previews"); !errors.Is(err, ErrNoManifest) {
+		t.Fatalf("err = %v, want ErrNoManifest", err)
+	}
+
+	// Unknown keys inside the table are an error; outside it they're not
+	// ours to police.
+	bad := hosted + "\n[previews.typo]\nx = 1\n"
+	if _, err := ParseAt([]byte(bad), "previews"); err == nil || !strings.Contains(err.Error(), "unknown keys") {
+		t.Fatalf("err = %v, want unknown-keys error", err)
 	}
 }
 

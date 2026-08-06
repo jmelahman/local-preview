@@ -5,6 +5,7 @@ package manifest
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -79,6 +80,48 @@ type Backend struct {
 	HealthPath   string     `toml:"health_path" json:"health_path"`
 	StartTimeout Duration   `toml:"start_timeout" json:"start_timeout,omitempty"`
 	IdleTimeout  Duration   `toml:"idle_timeout" json:"idle_timeout,omitempty"`
+}
+
+// ErrNoManifest marks a manifest source that isn't present: the file lacks
+// the requested table. Callers with multiple candidate sources treat it as
+// "try the next one".
+var ErrNoManifest = errors.New("no preview manifest at this location")
+
+// ParseAt decodes a manifest rooted at a top-level table of a larger TOML
+// file — e.g. table "previews" inside a .kanban.toml — so embedders can
+// offer repos a single config file. An empty table means the whole file is
+// the manifest (preview.toml). Keys outside the table are ignored; unknown
+// keys inside it are a hard error.
+func ParseAt(data []byte, table string) (Manifest, error) {
+	if table == "" {
+		return Parse(data)
+	}
+	var doc map[string]toml.Primitive
+	md, err := toml.Decode(string(data), &doc)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("parse manifest host file: %w", err)
+	}
+	prim, ok := doc[table]
+	if !ok {
+		return Manifest{}, ErrNoManifest
+	}
+	var m Manifest
+	if err := md.PrimitiveDecode(prim, &m); err != nil {
+		return Manifest{}, fmt.Errorf("parse [%s]: %w", table, err)
+	}
+	var unknown []string
+	for _, k := range md.Undecoded() {
+		if len(k) > 0 && k[0] == table {
+			unknown = append(unknown, k.String())
+		}
+	}
+	if len(unknown) > 0 {
+		return Manifest{}, fmt.Errorf("[%s]: unknown keys: %s", table, strings.Join(unknown, ", "))
+	}
+	if err := m.normalize(); err != nil {
+		return Manifest{}, fmt.Errorf("[%s]: %w", table, err)
+	}
+	return m, nil
 }
 
 // Parse decodes and validates preview.toml content. Unknown keys are a hard
