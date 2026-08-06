@@ -101,7 +101,7 @@ func newEnv(t *testing.T, srcRepo string) *env {
 	}
 	super := supervise.New(database, files, filepath.Join(root, "logs"))
 	t.Cleanup(super.StopAll)
-	q := NewQueue(database, gitMgr, files, super, filepath.Join(root, "logs"))
+	q := NewQueue(database, gitMgr, files, super, filepath.Join(root, "logs"), nil)
 	qctx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
 	q.Start(qctx, 2)

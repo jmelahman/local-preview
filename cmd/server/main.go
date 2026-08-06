@@ -127,7 +127,7 @@ func run(addr, dataDirOverride string, inMemory bool, previewDomain string, buil
 	gitMgr := gitrepo.NewManager(cfg.ReposDir())
 	super := supervise.New(database, files, cfg.LogsDir())
 	super.ReclaimOrphans()
-	queue := build.NewQueue(database, gitMgr, files, super, cfg.LogsDir())
+	queue := build.NewQueue(database, gitMgr, files, super, cfg.LogsDir(), nil)
 	queue.Start(workCtx, buildConcurrency)
 
 	apex := api.NewMux(api.Deps{
