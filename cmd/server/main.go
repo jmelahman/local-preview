@@ -15,8 +15,13 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/jmelahman/local-preview/internal/api"
+	"github.com/jmelahman/local-preview/internal/build"
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/gitrepo"
+	"github.com/jmelahman/local-preview/internal/proxy"
+	"github.com/jmelahman/local-preview/internal/store"
+	"github.com/jmelahman/local-preview/internal/supervise"
 )
 
 // version is populated at build time via -ldflags -X (see Dockerfile /
@@ -65,6 +70,8 @@ func Root() *cobra.Command {
 	var addr string
 	var dataDir string
 	var inMemory bool
+	var previewDomain string
+	var buildConcurrency int
 
 	cmd := &cobra.Command{
 		Use:     "preview",
@@ -76,12 +83,14 @@ func Root() *cobra.Command {
 		Use:   "serve",
 		Short: "Start the HTTP server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(addr, dataDir, inMemory)
+			return run(addr, dataDir, inMemory, previewDomain, buildConcurrency)
 		},
 	}
 	serve.Flags().StringVar(&addr, "addr", ":8080", "HTTP listen address")
 	serve.Flags().StringVar(&dataDir, "data-dir", "", "Override data directory (default: $PREVIEW_DATA_DIR or XDG)")
 	serve.Flags().BoolVar(&inMemory, "in-memory", false, "Use an ephemeral in-memory SQLite database; all data is discarded on shutdown")
+	serve.Flags().StringVar(&previewDomain, "preview-domain", "", "Base domain previews are served under (default: $PREVIEW_DOMAIN or preview.localhost)")
+	serve.Flags().IntVar(&buildConcurrency, "build-concurrency", 2, "Number of deploys built in parallel")
 	cmd.AddCommand(serve)
 
 	addClientCommands(cmd)
@@ -89,10 +98,15 @@ func Root() *cobra.Command {
 	return cmd
 }
 
-func run(addr, dataDirOverride string, inMemory bool) error {
-	cfg, err := config.Load(dataDirOverride)
+func run(addr, dataDirOverride string, inMemory bool, previewDomain string, buildConcurrency int) error {
+	cfg, err := config.Load(dataDirOverride, previewDomain)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	workCtx, stopWork := context.WithCancel(context.Background())
+	defer stopWork()
+	if err := gitrepo.CheckGit(workCtx); err != nil {
+		return err
 	}
 
 	dbPath := cfg.DBPath()
@@ -100,25 +114,41 @@ func run(addr, dataDirOverride string, inMemory bool) error {
 		log.Printf("WARNING: --in-memory set; using ephemeral SQLite, all data is lost on shutdown")
 		dbPath = ":memory:"
 	}
-	store, err := db.Open(dbPath)
+	database, err := db.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
-	defer store.Close()
+	defer database.Close()
 
-	mux := api.NewMux(api.Deps{
-		Store: store,
-		Build: api.BuildInfo(Build()),
+	files := store.New(cfg.ArtifactsDir(), cfg.StateDir(), cfg.TmpDir())
+	if err := files.SweepTmp(24 * time.Hour); err != nil {
+		log.Printf("sweep tmp: %v", err)
+	}
+	gitMgr := gitrepo.NewManager(cfg.ReposDir())
+	super := supervise.New(database, files, cfg.LogsDir())
+	super.ReclaimOrphans()
+	queue := build.NewQueue(database, gitMgr, files, super, cfg.LogsDir())
+	queue.Start(workCtx, buildConcurrency)
+
+	apex := api.NewMux(api.Deps{
+		Store:  database,
+		Build:  api.BuildInfo(Build()),
+		Config: cfg,
+		Git:    gitMgr,
+		Queue:  queue,
+		Super:  super,
+		Addr:   addr,
 	})
+	router := proxy.New(database, files, super, cfg.PreviewDomain, apex)
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           recoverPanics(logRequests(mux)),
+		Handler:           recoverPanics(logRequests(router)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
-		log.Printf("listening on %s", addr)
+		log.Printf("listening on %s (previews at *.%s)", addr, cfg.PreviewDomain)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}
@@ -131,7 +161,10 @@ func run(addr, dataDirOverride string, inMemory bool) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return srv.Shutdown(ctx)
+	err = srv.Shutdown(ctx)
+	stopWork()
+	super.StopAll()
+	return err
 }
 
 type statusRecorder struct {

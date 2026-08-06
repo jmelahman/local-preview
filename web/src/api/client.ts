@@ -11,6 +11,32 @@ export type Health = {
   version: string;
 };
 
+export type Repo = {
+  id: number;
+  name: string;
+  source: string;
+  created_at: string;
+};
+
+export type DeployStatus = "queued" | "building" | "ready" | "failed" | "evicted";
+
+export type Deploy = {
+  id: number;
+  repo: string;
+  sha: string;
+  short_sha: string;
+  ref?: string;
+  fe_hash?: string;
+  be_hash?: string;
+  status: DeployStatus;
+  error?: string;
+  attempt_count: number;
+  preview_url?: string;
+  process?: string;
+  created_at: string;
+  updated_at: string;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -32,4 +58,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<Health>("/api/health"),
+  listRepos: () => request<Repo[]>("/api/repos"),
+  createRepo: (name: string, source: string) =>
+    request<Repo>("/api/repos", { method: "POST", body: JSON.stringify({ name, source }) }),
+  listDeploys: () => request<Deploy[]>("/api/deploys"),
+  createDeploy: (repo: string, ref: string) =>
+    request<Deploy>("/api/deploys", { method: "POST", body: JSON.stringify({ repo, ref }) }),
 };

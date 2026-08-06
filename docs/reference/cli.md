@@ -1,28 +1,59 @@
 # CLI
 
 The binary is both the server and a client for it. Client subcommands talk to
-a running `app serve` over HTTP; point them at a non-default server with
-`--server` or `$APP_URL`.
+a running `preview serve` over HTTP; point them at a non-default server with
+`--server` or `$PREVIEW_URL`.
 
-## `app serve`
+## `preview serve`
 
-Start the HTTP server.
+Start the orchestrator.
 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--addr` | `:8080` | HTTP listen address |
 | `--data-dir` | (XDG) | Override the data directory |
 | `--in-memory` | `false` | Ephemeral in-memory SQLite |
+| `--preview-domain` | `preview.localhost` | Base domain previews are served under |
+| `--build-concurrency` | `2` | Number of deploys built in parallel |
 
-## `app item`
+## `preview repo`
 
 | Command | Description |
 | --- | --- |
-| `app item list` | List items as a table |
-| `app item create --title <title>` | Create an item (`--json` for the full body) |
-| `app item delete <id>` | Delete an item |
+| `preview repo create <name> --source <path-or-url>` | Register a repository (mirror clone) |
+| `preview repo list` | List registered repositories |
 
-## `app version`
+## `preview deploy`
 
-`app --version` prints the build version (populated from `git describe` at
-release time).
+| Command | Description |
+| --- | --- |
+| `preview deploy [ref]` | Deploy a commit (default: HEAD of the current repo) and print its preview URL |
+| `preview deploy list` | List deploys (`--repo` to filter) |
+| `preview deploy show <id>` | Print one deploy as JSON |
+| `preview deploy logs <id>` | Print a deploy's build logs |
+
+Flags on `preview deploy`:
+
+| Flag | Description |
+| --- | --- |
+| `--repo` | Registered repo name; by default the current directory is matched against registered sources |
+| `--rebuild` | Rebuild artifacts even if cached (a live backend keeps its old binary until restarted) |
+| `--no-wait` | Return immediately instead of waiting for the build |
+| `--json` | Print the deploy as JSON |
+
+The command exits non-zero if the deploy fails, so it can gate scripts.
+
+## `preview install-hook`
+
+Run from inside a target repository. Installs a git post-commit hook that
+requests a preview deploy of every new commit (`--dry-run` to preview). If
+the repo uses the pre-commit framework, the equivalent
+`.pre-commit-config.yaml` stanza is printed instead, for use with
+`pre-commit install --hook-type post-commit`.
+
+Existing hand-written post-commit hooks are never overwritten.
+
+## `preview version`
+
+`preview --version` prints the build version (populated from `git describe`
+at release time).

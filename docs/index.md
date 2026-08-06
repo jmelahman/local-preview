@@ -2,9 +2,9 @@
 layout: home
 
 hero:
-  name: Fullstack Template
-  text: A template for fullstack Go + React applications.
-  tagline: A Go backend with an embedded SQLite database serving an embedded React frontend — server, web UI, REST API, and CLI in one self-contained binary.
+  name: local-preview
+  text: A preview deployment per commit.
+  tagline: A local-first preview orchestrator — every commit of your repos becomes a servable deployment at its own subdomain, built once, deduplicated by content, served from one binary.
   actions:
     - theme: brand
       text: Get Started
@@ -14,19 +14,19 @@ hero:
       link: /guide/quickstart
     - theme: alt
       text: View on GitHub
-      link: https://github.com/jmelahman/fullstack-template
+      link: https://github.com/jmelahman/local-preview
 
 features:
+  - title: A URL for every commit
+    details: Previews are served at <sha>.<repo>.preview.localhost — wildcard *.localhost resolves in every modern browser with zero DNS setup, and the same routing maps onto real wildcard domains later.
+  - title: Content-addressed builds
+    details: Each commit resolves to a (frontend, backend) artifact pair hashed from its git tree. Commits that don't touch a side reuse the existing artifact — a docs-only commit deploys in milliseconds.
+  - title: Shared backends, on demand
+    details: One supervised process per distinct backend version, started on the first request and reused by every commit that shares it. Hundreds of previews, a handful of processes.
+  - title: State follows git lineage
+    details: A new backend version forks its database from the nearest deployed ancestor. Straight-line commits feel like one persistent database; divergent branches can never corrupt each other.
+  - title: Triggers are adapters
+    details: One deploy API behind a CLI, a git post-commit hook, and (soon) pollers and webhooks. preview install-hook makes every commit deploy itself.
   - title: One small binary
-    details: Server, web UI, REST API, and CLI ship in a single self-contained Go binary. No runtime, no node_modules, no sidecar processes — also distributed as a Docker image and a Python wrapper on PyPI.
-  - title: Modern frontend toolchain
-    details: Vite + React 19 + Tailwind 4, typechecked with TypeScript, linted and formatted with Biome, and covered by a Playwright E2E suite that boots the real backend.
-  - title: Local SQLite storage
-    details: A pure-Go SQLite driver (no CGO) with an idempotent schema. Use --in-memory for ephemeral runs and tests.
-  - title: REST + CLI
-    details: A small JSON API plus noun-verb CLI subcommands for scripting against a running server.
-  - title: Release automation included
-    details: GoReleaser for GitHub releases, multi-arch Docker images, and PyPI wheels built per-platform with a Go build hook — all wired into GitHub Actions.
-  - title: Guardrails from day one
-    details: prek (pre-commit) hooks, govulncheck, npm audit, actionlint, zizmor, ripsecrets, and Dependabot are configured out of the box.
+    details: Reverse proxy, build queue, artifact store, process supervisor, REST API, CLI, and dashboard in a single self-contained Go binary with SQLite.
 ---

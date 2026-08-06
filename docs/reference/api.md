@@ -1,7 +1,8 @@
 # REST API
 
-All endpoints are JSON over HTTP, rooted at `/api/`. Errors return a JSON body
-of the form `{"error": "message"}`.
+All endpoints are JSON over HTTP, rooted at `/api/` on the apex host (any
+Host that isn't a preview subdomain). Errors return a JSON body of the form
+`{"error": "message"}`.
 
 ## Health
 
@@ -11,32 +12,78 @@ of the form `{"error": "message"}`.
 { "status": "ok", "version": "v0.1.0" }
 ```
 
-## Items
+## Repos
 
-### `GET /api/items`
+### `POST /api/repos`
 
-Returns all items, newest first.
-
-```json
-[
-  { "id": 2, "title": "Second", "created_at": "2026-01-01T00:00:10Z" },
-  { "id": 1, "title": "First", "created_at": "2026-01-01T00:00:00Z" }
-]
-```
-
-### `POST /api/items`
-
-Creates an item. The title is required and trimmed.
+Registers a repository: the server mirror-clones `source` (a local path or
+clone URL). `name` must be a lowercase DNS label — it becomes the subdomain
+segment.
 
 Request:
 
 ```json
-{ "title": "First" }
+{ "name": "myapp", "source": "/home/me/code/myapp" }
 ```
 
-Response: `201 Created` with the created item.
+Response: `201 Created` with the repo. `400` for an invalid name/source or a
+failed clone, `409` if the name is taken.
 
-### `DELETE /api/items/{id}`
+```json
+{ "id": 1, "name": "myapp", "source": "/home/me/code/myapp", "created_at": "2026-01-01T00:00:00Z" }
+```
 
-Deletes an item. Responds `204 No Content` on success, `404 Not Found` if the
-item does not exist.
+### `GET /api/repos`
+
+Returns all repos. `GET /api/repos/{name}` returns one (`404` if missing).
+
+## Deploys
+
+### `POST /api/deploys`
+
+Requests a deploy of `ref` (branch, tag, or full/abbreviated sha) in `repo`.
+Idempotent per commit: re-posting a sha whose deploy is queued, building, or
+ready returns the existing deploy; failed and evicted deploys are re-queued.
+`rebuild: true` rebuilds artifacts even when cached.
+
+Request:
+
+```json
+{ "repo": "myapp", "ref": "main", "rebuild": false }
+```
+
+Response: `202 Accepted` with the deploy. `404` for an unknown repo, `400`
+for an unresolvable ref.
+
+```json
+{
+  "id": 7,
+  "repo": "myapp",
+  "sha": "a1b2c3d4…",
+  "short_sha": "a1b2c3d",
+  "ref": "main",
+  "fe_hash": "…",
+  "be_hash": "…",
+  "status": "queued",
+  "attempt_count": 0,
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z"
+}
+```
+
+`status` is one of `queued`, `building`, `ready`, `failed`, `evicted`. Ready
+deploys additionally carry `preview_url` and `process` (the live backend
+state: `running`, `starting`, or `stopped` — backends start on demand).
+
+### `GET /api/deploys`
+
+Returns deploys, newest first. Filter with `?repo=<name>`.
+
+### `GET /api/deploys/{id}`
+
+Returns one deploy (`404` if missing).
+
+### `GET /api/deploys/{id}/logs`
+
+Returns a plain-text snapshot of the frontend and backend build logs.
+Deploys that share an artifact share that artifact's build log.

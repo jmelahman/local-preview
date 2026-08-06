@@ -1,0 +1,118 @@
+package hashkey
+
+import (
+	"testing"
+
+	"github.com/jmelahman/local-preview/internal/gitrepo"
+	"github.com/jmelahman/local-preview/internal/manifest"
+)
+
+func entry(oid, p string) gitrepo.TreeEntry {
+	return gitrepo.TreeEntry{Mode: "100644", Type: "blob", OID: oid, Path: p}
+}
+
+var (
+	fe = manifest.Frontend{Path: "web", Build: [][]string{{"npm", "run", "build"}}, Dist: "dist"}
+	be = manifest.Backend{
+		Path:       ".",
+		Exclude:    []string{"docs/", "*.md"},
+		Build:      [][]string{{"go", "build", "."}},
+		Run:        []string{"./server", "{port}"},
+		HealthPath: "/api/health",
+	}
+	tree = []gitrepo.TreeEntry{
+		entry("aaa", "README.md"),
+		entry("bbb", "docs/guide.md"),
+		entry("ccc", "main.go"),
+		entry("ddd", "web/index.html"),
+		entry("eee", "web/src/app.tsx"),
+	}
+)
+
+func TestDeterminism(t *testing.T) {
+	h1, err := Frontend(fe, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2, err := Frontend(fe, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 != h2 || len(h1) != 64 {
+		t.Fatalf("unstable or malformed hash: %q vs %q", h1, h2)
+	}
+}
+
+func TestPartitionSensitivity(t *testing.T) {
+	feBase, err := Frontend(fe, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beBase, err := Backend(be, fe.Path, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Changing a frontend blob changes fe_hash but not be_hash.
+	mod := append([]gitrepo.TreeEntry(nil), tree...)
+	mod[3] = entry("zzz", "web/index.html")
+	feMod, _ := Frontend(fe, mod)
+	beMod, _ := Backend(be, fe.Path, mod)
+	if feMod == feBase {
+		t.Fatal("frontend change did not change fe_hash")
+	}
+	if beMod != beBase {
+		t.Fatal("frontend change leaked into be_hash")
+	}
+
+	// Changing an excluded file (docs/, *.md) changes neither hash.
+	mod = append([]gitrepo.TreeEntry(nil), tree...)
+	mod[0] = entry("zzz", "README.md")
+	mod[1] = entry("yyy", "docs/guide.md")
+	feMod, _ = Frontend(fe, mod)
+	beMod, _ = Backend(be, fe.Path, mod)
+	if feMod != feBase || beMod != beBase {
+		t.Fatal("excluded-file change affected a hash")
+	}
+
+	// Changing a backend blob changes be_hash but not fe_hash.
+	mod = append([]gitrepo.TreeEntry(nil), tree...)
+	mod[2] = entry("zzz", "main.go")
+	feMod, _ = Frontend(fe, mod)
+	beMod, _ = Backend(be, fe.Path, mod)
+	if beMod == beBase {
+		t.Fatal("backend change did not change be_hash")
+	}
+	if feMod != feBase {
+		t.Fatal("backend change leaked into fe_hash")
+	}
+}
+
+func TestManifestSectionInHash(t *testing.T) {
+	base, err := Frontend(fe, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := fe
+	changed.Build = [][]string{{"npm", "run", "build:prod"}}
+	got, err := Frontend(changed, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == base {
+		t.Fatal("build-command change did not change the hash")
+	}
+}
+
+func TestEmptyPartitionIsError(t *testing.T) {
+	feBad := fe
+	feBad.Path = "missing"
+	if _, err := Frontend(feBad, tree); err == nil {
+		t.Fatal("empty frontend partition should be an error")
+	}
+	beBad := be
+	beBad.Path = "web" // frontend subtracts everything
+	if _, err := Backend(beBad, "web", tree); err == nil {
+		t.Fatal("empty backend partition should be an error")
+	}
+}

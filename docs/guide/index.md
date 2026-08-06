@@ -1,23 +1,28 @@
 # Introduction
 
-Fullstack Template is a starting point for applications that pair a Go backend
-with a React frontend, shipped as one self-contained binary.
+local-preview is a self-hostable preview-deployment orchestrator: it turns
+every commit of your registered git repositories into a servable preview at
+its own subdomain, like `a1b2c3d.myapp.preview.localhost:8080`.
 
-The backend embeds:
+The server is one Go binary that embeds:
 
-- a JSON REST API under `/api/`
+- a reverse proxy routing previews by Host header
+- a build queue producing content-addressed artifacts
+- a process supervisor running backend processes on demand
+- a JSON REST API under `/api/`, a CLI, and a dashboard SPA
 - a SQLite database (pure Go, no CGO)
-- the production build of the frontend (with `-tags embed`)
 
-The `web/` frontend is a Vite + React 19 + Tailwind 4 app that proxies `/api`
-to the backend during development.
+Target applications declare how to build and run themselves in a small
+[`preview.toml`](/reference/preview-toml) at their repo root. The
+[Concepts](/guide/concepts) page explains the ideas that make previews cheap:
+content addressing, backend sharing, and lineage-forked state.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
 | `main.go`, `cmd/`, `internal/` | Go server and CLI subcommands |
-| `web/` | Vite + React frontend, embedded into the binary at release |
+| `web/` | Vite + React dashboard, embedded into the binary at release |
 | `docs/` | This VitePress site |
 | `.github/`, `.goreleaser.yaml`, `pyproject.toml` | CI and release automation |
 

@@ -1,0 +1,209 @@
+package gitrepo
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func runTestGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func writeFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newSourceRepo creates a working git repo with one commit containing
+// web/index.html and main.go.
+func newSourceRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	runTestGit(t, dir, "init", "-q", "-b", "main")
+	writeFile(t, dir, "web/index.html", "<html>v1</html>")
+	writeFile(t, dir, "main.go", "package main")
+	runTestGit(t, dir, "add", "-A")
+	runTestGit(t, dir, "commit", "-q", "-m", "initial")
+	return dir
+}
+
+func TestValidateName(t *testing.T) {
+	for _, ok := range []string{"demo", "my-app", "a", "a1", "x0-9y"} {
+		if err := ValidateName(ok); err != nil {
+			t.Errorf("ValidateName(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "My-App", "has.dot", "-lead", "trail-", "under_score", "spaced name"} {
+		if err := ValidateName(bad); err == nil {
+			t.Errorf("ValidateName(%q) = nil, want error", bad)
+		}
+	}
+}
+
+func TestAddResolveFetch(t *testing.T) {
+	ctx := context.Background()
+	src := newSourceRepo(t)
+	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
+
+	repo, err := mgr.Add(ctx, "demo", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Add(ctx, "demo", src); err == nil {
+		t.Fatal("second Add should fail")
+	}
+
+	head := runTestGit(t, src, "rev-parse", "HEAD")
+	sha, err := repo.ResolveRef(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha != head {
+		t.Fatalf("ResolveRef(main) = %s, want %s", sha, head)
+	}
+
+	// A commit made after the clone resolves via the fetch-and-retry path.
+	writeFile(t, src, "web/index.html", "<html>v2</html>")
+	runTestGit(t, src, "commit", "-qam", "v2")
+	newHead := runTestGit(t, src, "rev-parse", "HEAD")
+	sha, err = repo.ResolveRef(ctx, newHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha != newHead {
+		t.Fatalf("ResolveRef(new sha) = %s, want %s", sha, newHead)
+	}
+
+	if _, err := repo.ResolveRef(ctx, "no-such-ref"); err == nil {
+		t.Fatal("ResolveRef of unknown ref should fail")
+	}
+}
+
+func TestLsTreeReadFileArchive(t *testing.T) {
+	ctx := context.Background()
+	src := newSourceRepo(t)
+	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
+	repo, err := mgr.Add(ctx, "demo", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha, err := repo.ResolveRef(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := repo.LsTree(ctx, sha, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, e := range entries {
+		if e.Type != "blob" || e.OID == "" || e.Mode == "" {
+			t.Fatalf("bad entry: %+v", e)
+		}
+		paths = append(paths, e.Path)
+	}
+	if strings.Join(paths, ",") != "main.go,web/index.html" {
+		t.Fatalf("paths = %v", paths)
+	}
+
+	sub, err := repo.LsTree(ctx, sha, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sub) != 1 || sub[0].Path != "web/index.html" {
+		t.Fatalf("subtree entries = %+v", sub)
+	}
+
+	content, err := repo.ReadFile(ctx, sha, "web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "<html>v1</html>" {
+		t.Fatalf("ReadFile = %q", content)
+	}
+	if _, err := repo.ReadFile(ctx, sha, "missing.txt"); err == nil {
+		t.Fatal("ReadFile of missing path should fail")
+	}
+
+	dest := filepath.Join(t.TempDir(), "extract")
+	if err := repo.Archive(ctx, sha, dest); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "package main" {
+		t.Fatalf("extracted main.go = %q", got)
+	}
+}
+
+func TestFirstParentAncestry(t *testing.T) {
+	ctx := context.Background()
+	src := newSourceRepo(t)
+	c1 := runTestGit(t, src, "rev-parse", "HEAD")
+
+	writeFile(t, src, "a.txt", "a")
+	runTestGit(t, src, "add", "-A")
+	runTestGit(t, src, "commit", "-qm", "c2")
+	c2 := runTestGit(t, src, "rev-parse", "HEAD")
+
+	// Merge a side branch so first-parent order is observable.
+	runTestGit(t, src, "checkout", "-qb", "side", c1)
+	writeFile(t, src, "b.txt", "b")
+	runTestGit(t, src, "add", "-A")
+	runTestGit(t, src, "commit", "-qm", "side")
+	side := runTestGit(t, src, "rev-parse", "HEAD")
+	runTestGit(t, src, "checkout", "-q", "main")
+	runTestGit(t, src, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+	merge := runTestGit(t, src, "rev-parse", "HEAD")
+
+	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
+	repo, err := mgr.Add(ctx, "demo", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	anc, err := repo.FirstParentAncestry(ctx, merge, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First-parent walk from the merge: c2 then c1, never the side branch.
+	if len(anc) != 2 || anc[0] != c2 || anc[1] != c1 {
+		t.Fatalf("ancestry = %v, want [%s %s]", anc, c2, c1)
+	}
+	for _, sha := range anc {
+		if sha == side {
+			t.Fatal("first-parent ancestry must not include the side branch")
+		}
+	}
+
+	limited, err := repo.FirstParentAncestry(ctx, merge, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 1 || limited[0] != c2 {
+		t.Fatalf("limited ancestry = %v", limited)
+	}
+}

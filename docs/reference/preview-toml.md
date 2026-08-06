@@ -1,0 +1,69 @@
+# preview.toml
+
+The contract a target repository declares at its root so the orchestrator can
+build and run it. It is always read from the committed tree of the deployed
+sha (`git show <sha>:preview.toml`) — never from a checkout — so old commits
+build with the manifest they shipped with.
+
+Unknown keys are a hard error, so typos fail the deploy instead of silently
+changing nothing.
+
+## Example
+
+The shape this repository itself uses (Go backend at the root, Vite frontend
+in `web/`):
+
+```toml
+[frontend]
+path  = "web"                    # hash root + build cwd (repo-relative)
+build = [["npm", "ci"], ["npm", "run", "build"]]
+dist  = "dist"                   # build output, relative to path
+
+[backend]
+path          = "."              # hash root + build cwd
+exclude       = ["docs/", "*.md", ".github/"]   # hashing only
+build         = [["go", "build", "-o", "bin/server", "."]]
+run           = ["./bin/server", "--addr", ":{port}", "--data-dir", "{state_dir}"]
+health_path   = "/api/health"
+start_timeout = "20s"            # optional
+```
+
+## `[frontend]`
+
+| Key | Required | Description |
+| --- | --- | --- |
+| `path` | yes | Subtree that defines the frontend hash; build commands run with this as their working directory |
+| `build` | yes | Build steps as argv arrays (no shell; use `["sh", "-c", "..."]` explicitly if you need one) |
+| `dist` | yes | Directory the build produces, relative to `path`; published as the static bundle |
+
+The bundle must be deploy-agnostic: base path `/`, relative `/api` calls, no
+per-deploy values baked in at build time. One bundle is served under every
+subdomain that references it.
+
+## `[backend]`
+
+| Key | Required | Description |
+| --- | --- | --- |
+| `path` | yes | Subtree that defines the backend hash (minus `frontend.path` and `exclude`); build cwd; the built subtree becomes the artifact |
+| `exclude` | no | Patterns removed from the backend hash: `dir/` prefixes, or globs matched against the full path and basename (`*.md`) |
+| `build` | yes | Build steps as argv arrays |
+| `run` | yes | Command that starts the server, executed with the artifact directory as cwd |
+| `health_path` | yes | Path polled until it returns 200 after start |
+| `start_timeout` | no | How long the process gets to become healthy (default `20s`) |
+| `idle_timeout` | no | Idle period before the process is stopped (default `30m`; enforcement lands in a future release) |
+
+### Run templating
+
+Two placeholders are substituted into every `run` argv element:
+
+| Placeholder | Value |
+| --- | --- |
+| `{port}` | The loopback port assigned to this process — bind `127.0.0.1:{port}` |
+| `{state_dir}` | The artifact's mutable state directory (see [state lineage](/guide/concepts#state-follows-git-lineage)) |
+
+## Hashing caveats
+
+Each side's hash covers its declared partition **plus its own manifest
+section** — editing a build command rebuilds that side. Files outside the
+declared partition don't bust the cache; if your backend depends on files
+across the whole tree, use `path = "."`.
