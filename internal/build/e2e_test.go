@@ -179,6 +179,9 @@ func TestVerticalSlice(t *testing.T) {
 	if a.FeHash == "" || a.BeHash == "" || a.Ref != "main" {
 		t.Fatalf("deploy A: %+v", a)
 	}
+	if a.Branch != "main" || a.AuthorName != "test" || a.AuthorEmail != "test@example.com" {
+		t.Fatalf("deploy A commit metadata: %+v", a)
+	}
 	if !e.files.HasFrontend("demo", a.FeHash) || !e.files.HasBackend("demo", a.BeHash) {
 		t.Fatal("artifacts not published")
 	}
@@ -202,6 +205,9 @@ func TestVerticalSlice(t *testing.T) {
 	shaB := runTestGit(t, src, "rev-parse", "HEAD")
 
 	b := e.deployAndWait(t, shaB)
+	if b.Ref != "" || b.Branch != "main" {
+		t.Fatalf("sha deploy should derive its branch: %+v", b)
+	}
 	if b.BeHash != a.BeHash {
 		t.Fatalf("frontend-only commit changed be_hash: %s → %s", a.BeHash, b.BeHash)
 	}

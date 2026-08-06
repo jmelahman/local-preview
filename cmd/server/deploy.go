@@ -44,13 +44,17 @@ func deployCmd() *cobra.Command {
 	parent.Flags().BoolVar(&noWait, "no-wait", false, "Return immediately instead of waiting for the build")
 	parent.Flags().BoolVar(&asJSON, "json", false, "Print the deploy as JSON")
 
+	var listFilter client.DeployFilter
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "List deploys",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeployList(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(), repoFlag)
+			return runDeployList(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(), listFilter)
 		},
 	}
+	list.Flags().StringVar(&listFilter.Repo, "repo", "", "Only deploys of this repo")
+	list.Flags().StringVar(&listFilter.Branch, "branch", "", "Only deploys of this branch")
+	list.Flags().StringVar(&listFilter.Author, "author", "", "Only deploys whose commit author name or email contains this (case-insensitive)")
 
 	show := &cobra.Command{
 		Use:   "show <id>",
@@ -189,21 +193,29 @@ func gitOutput(ctx context.Context, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func runDeployList(ctx context.Context, url string, out io.Writer, repoName string) error {
-	deploys, err := client.New(url, nil).ListDeploys(ctx, repoName)
+func runDeployList(ctx context.Context, url string, out io.Writer, f client.DeployFilter) error {
+	deploys, err := client.New(url, nil).ListDeploys(ctx, f)
 	if err != nil {
 		return err
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tREPO\tSHA\tSTATUS\tURL")
+	fmt.Fprintln(tw, "ID\tREPO\tSHA\tBRANCH\tAUTHOR\tSTATUS\tURL")
 	for _, d := range deploys {
 		url := d.PreviewURL
 		if url == "" {
 			url = "-"
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", d.ID, d.Repo, d.ShortSHA, d.Status, url)
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			d.ID, d.Repo, d.ShortSHA, orDash(d.Branch), orDash(d.AuthorName), d.Status, url)
 	}
 	return tw.Flush()
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func printDeployJSON(out io.Writer, d client.Deploy) error {

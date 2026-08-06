@@ -144,8 +144,8 @@ func TestRepoEndpoints(t *testing.T) {
 
 	for body, want := range map[string]int{
 		`{"name":"demo","source":` + jsonQuote(src) + `}`: http.StatusConflict,
-		`{"name":"Bad.Name","source":"/x"}`:             http.StatusBadRequest,
-		`{"name":"orphan","source":"/does/not/exist"}`:  http.StatusBadRequest,
+		`{"name":"Bad.Name","source":"/x"}`:               http.StatusBadRequest,
+		`{"name":"orphan","source":"/does/not/exist"}`:    http.StatusBadRequest,
 		`{`: http.StatusBadRequest,
 	} {
 		if rec := doJSON(t, mux, "POST", "/api/repos", body); rec.Code != want {
@@ -178,13 +178,19 @@ func TestDeployEndpoints(t *testing.T) {
 		t.Fatalf("create deploy: %d %s", rec.Code, rec.Body)
 	}
 	var d struct {
-		ID         int64  `json:"id"`
-		Status     string `json:"status"`
-		PreviewURL string `json:"preview_url"`
-		ShortSHA   string `json:"short_sha"`
+		ID          int64  `json:"id"`
+		Status      string `json:"status"`
+		PreviewURL  string `json:"preview_url"`
+		ShortSHA    string `json:"short_sha"`
+		Branch      string `json:"branch"`
+		AuthorName  string `json:"author_name"`
+		AuthorEmail string `json:"author_email"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
 		t.Fatal(err)
+	}
+	if d.Branch != "main" || d.AuthorName != "test" || d.AuthorEmail != "test@example.com" {
+		t.Fatalf("commit metadata missing from response: %s", rec.Body)
 	}
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -204,10 +210,20 @@ func TestDeployEndpoints(t *testing.T) {
 		t.Fatalf("preview_url = %q, want %q", d.PreviewURL, wantURL)
 	}
 
-	rec = doJSON(t, mux, "GET", "/api/deploys?repo=demo", "")
-	var list []json.RawMessage
-	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list) != 1 {
-		t.Fatalf("list deploys: %s (%v)", rec.Body, err)
+	for query, want := range map[string]int{
+		"?repo=demo":                         1,
+		"?branch=main":                       1,
+		"?author=test%40exam":                1,
+		"?author=TEST":                       1,
+		"?repo=demo&branch=main&author=test": 1,
+		"?branch=other":                      0,
+		"?author=someone-else":               0,
+	} {
+		rec = doJSON(t, mux, "GET", "/api/deploys"+query, "")
+		var list []json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list) != want {
+			t.Fatalf("list deploys %s: got %d (%v), want %d: %s", query, len(list), err, want, rec.Body)
+		}
 	}
 
 	rec = doJSON(t, mux, "GET", "/api/deploys/1/logs", "")

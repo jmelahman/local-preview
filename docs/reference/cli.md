@@ -29,7 +29,7 @@ Start the orchestrator.
 | Command | Description |
 | --- | --- |
 | `preview deploy [ref]` | Deploy a commit (default: HEAD of the current repo) and print its preview URL |
-| `preview deploy list` | List deploys (`--repo` to filter) |
+| `preview deploy list` | List deploys (`--repo`, `--branch`, `--author` to filter) |
 | `preview deploy show <id>` | Print one deploy as JSON |
 | `preview deploy logs <id>` | Print a deploy's build logs |
 

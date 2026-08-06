@@ -70,6 +70,9 @@ for an unresolvable ref.
   "sha": "a1b2c3d4…",
   "short_sha": "a1b2c3d",
   "ref": "main",
+  "branch": "main",
+  "author_name": "Ada Lovelace",
+  "author_email": "ada@example.com",
   "fe_hash": "…",
   "be_hash": "…",
   "status": "queued",
@@ -86,9 +89,24 @@ state: `running`, `starting`, or `stopped` — backends start on demand), and
 [process](/reference/preview-toml#process-mode-frontends) rather than a
 static bundle.
 
+`ref` is what the deploy request asked for (empty when it was a sha);
+`branch`, `author_name`, and `author_email` are captured from git when the
+deploy is created. `branch` is best-effort: the requested ref when it is a
+branch, otherwise the first branch whose tip is the commit — deploys of
+commits that are no longer any branch's tip leave it empty. Deploys made
+before these fields existed omit them.
+
 ### `GET /api/deploys`
 
-Returns deploys, newest first. Filter with `?repo=<name>`.
+Returns deploys, newest first. Narrow the list with any combination of:
+
+| Query param | Match |
+| --- | --- |
+| `?repo=<name>` | exact repo name |
+| `?branch=<name>` | exact branch name |
+| `?author=<text>` | case-insensitive substring of the commit author's name or email |
+
+`?author=ada@example.com` is the "only my deployments" filter.
 
 ### `GET /api/deploys/{id}`
 

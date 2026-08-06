@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -63,12 +64,17 @@ func TestDeployLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d, err := s.CreateDeploy(r.ID, shaA, "main")
+	d, err := s.CreateDeploy(r.ID, shaA, DeployMeta{
+		Ref: "main", Branch: "main", AuthorName: "Ada", AuthorEmail: "ada@example.com",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d.Status != DeployQueued || d.ShortSHA != shaA[:7] || d.Ref != "main" {
 		t.Fatalf("unexpected deploy: %+v", d)
+	}
+	if d.Branch != "main" || d.AuthorName != "Ada" || d.AuthorEmail != "ada@example.com" {
+		t.Fatalf("commit metadata not stored: %+v", d)
 	}
 
 	if err := s.SetDeployBuilding(d.ID); err != nil {
@@ -112,11 +118,11 @@ func TestShortSHAGrowsOnCollision(t *testing.T) {
 	// Two shas sharing a 7-char prefix force the second to use 8 chars.
 	shaX := "abcdef0" + strings.Repeat("1", 33)
 	shaY := "abcdef0" + strings.Repeat("2", 33)
-	d1, err := s.CreateDeploy(r.ID, shaX, "")
+	d1, err := s.CreateDeploy(r.ID, shaX, DeployMeta{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	d2, err := s.CreateDeploy(r.ID, shaY, "")
+	d2, err := s.CreateDeploy(r.ID, shaY, DeployMeta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,15 +134,110 @@ func TestShortSHAGrowsOnCollision(t *testing.T) {
 	}
 
 	// Same sha again is a conflict (redeploy resets the row instead).
-	if _, err := s.CreateDeploy(r.ID, shaX, ""); !errors.Is(err, ErrConflict) {
+	if _, err := s.CreateDeploy(r.ID, shaX, DeployMeta{}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate sha err = %v, want ErrConflict", err)
+	}
+}
+
+func TestListDeploysFilter(t *testing.T) {
+	s := newTestStore(t)
+	r1, _ := s.CreateRepo("app", "/src/app", "/bare/app")
+	r2, _ := s.CreateRepo("lib", "/src/lib", "/bare/lib")
+
+	shaB := "bbbbbbb2222222222222222222222222222222222"
+	shaC := "ccccccc3333333333333333333333333333333333"
+	seed := []struct {
+		repoID int64
+		sha    string
+		meta   DeployMeta
+	}{
+		{r1.ID, shaA, DeployMeta{Branch: "main", AuthorName: "Ada Lovelace", AuthorEmail: "ada@example.com"}},
+		{r1.ID, shaB, DeployMeta{Branch: "feature", AuthorName: "Grace Hopper", AuthorEmail: "grace@example.com"}},
+		{r2.ID, shaC, DeployMeta{Branch: "main", AuthorName: "Ada Lovelace", AuthorEmail: "ada@example.com"}},
+	}
+	for _, sd := range seed {
+		if _, err := s.CreateDeploy(sd.repoID, sd.sha, sd.meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for name, tc := range map[string]struct {
+		f    DeployFilter
+		want int
+	}{
+		"all":              {DeployFilter{}, 3},
+		"repo":             {DeployFilter{Repo: "app"}, 2},
+		"branch":           {DeployFilter{Branch: "main"}, 2},
+		"repo+branch":      {DeployFilter{Repo: "app", Branch: "main"}, 1},
+		"author name":      {DeployFilter{Author: "grace hopper"}, 1},
+		"author email":     {DeployFilter{Author: "ADA@example"}, 2},
+		"author substring": {DeployFilter{Author: "lovelace"}, 2},
+		"author wildcards": {DeployFilter{Author: "%"}, 0},
+		"no match":         {DeployFilter{Branch: "gone"}, 0},
+	} {
+		got, err := s.ListDeploys(tc.f)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(got) != tc.want {
+			t.Errorf("%s: %d deploys, want %d", name, len(got), tc.want)
+		}
+	}
+}
+
+func TestMigrateAddsColumnsToExistingDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A deploys table from before the commit-metadata columns existed.
+	if _, err := old.Exec(`CREATE TABLE deploys (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_id INTEGER NOT NULL,
+		sha TEXT NOT NULL,
+		short_sha TEXT NOT NULL,
+		ref TEXT NOT NULL DEFAULT '',
+		fe_hash TEXT NOT NULL DEFAULT '',
+		be_hash TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'queued',
+		error TEXT NOT NULL DEFAULT '',
+		attempt_count INTEGER NOT NULL DEFAULT 0,
+		fe_build_log_path TEXT NOT NULL DEFAULT '',
+		be_build_log_path TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL DEFAULT '',
+		UNIQUE (repo_id, sha),
+		UNIQUE (repo_id, short_sha)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	r, err := s.CreateRepo("demo", "/src", "/bare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.CreateDeploy(r.ID, shaA, DeployMeta{Branch: "main", AuthorName: "Ada"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Branch != "main" || d.AuthorName != "Ada" {
+		t.Fatalf("migrated columns not usable: %+v", d)
 	}
 }
 
 func TestDeploysBySHAPrefix(t *testing.T) {
 	s := newTestStore(t)
 	r, _ := s.CreateRepo("demo", "/src", "/bare")
-	if _, err := s.CreateDeploy(r.ID, shaA, ""); err != nil {
+	if _, err := s.CreateDeploy(r.ID, shaA, DeployMeta{}); err != nil {
 		t.Fatal(err)
 	}
 

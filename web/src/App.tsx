@@ -403,9 +403,20 @@ export default function App() {
                       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                         <span className="text-sm font-medium">{d.repo}</span>
                         <code className="font-mono text-xs text-fg-muted">{d.short_sha}</code>
-                        {d.ref && (
+                        {d.branch && (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-px font-mono text-[11px] text-fg-muted">
+                            <IconGitBranch className="h-3 w-3" />
+                            {d.branch}
+                          </span>
+                        )}
+                        {d.ref && d.ref !== d.branch && (
                           <span className="rounded-full border border-border bg-surface-2 px-2 py-px font-mono text-[11px] text-fg-muted">
                             {d.ref}
+                          </span>
+                        )}
+                        {d.author_name && (
+                          <span className="text-xs text-fg-muted" title={d.author_email}>
+                            by {d.author_name}
                           </span>
                         )}
                       </div>
@@ -519,6 +530,26 @@ function IconX() {
       aria-hidden="true"
     >
       <path d="M18 6 6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
+function IconGitBranch({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <line x1="6" y1="3" x2="6" y2="15" />
+      <circle cx="18" cy="6" r="3" />
+      <circle cx="6" cy="18" r="3" />
+      <path d="M18 9a9 9 0 0 1-9 9" />
     </svg>
   );
 }

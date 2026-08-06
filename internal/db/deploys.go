@@ -25,6 +25,9 @@ type Deploy struct {
 	SHA            string `json:"sha"`
 	ShortSHA       string `json:"short_sha"`
 	Ref            string `json:"ref,omitempty"`
+	Branch         string `json:"branch,omitempty"`
+	AuthorName     string `json:"author_name,omitempty"`
+	AuthorEmail    string `json:"author_email,omitempty"`
 	FeHash         string `json:"fe_hash,omitempty"`
 	BeHash         string `json:"be_hash,omitempty"`
 	Status         string `json:"status"`
@@ -44,15 +47,16 @@ type DeployRow struct {
 
 // deployCols is the scan-ordered column list; deployColsD is the same list
 // qualified for joins (repos shares column names like created_at).
-const deployCols = `id, repo_id, sha, short_sha, ref, fe_hash, be_hash, ` +
-	`status, error, attempt_count, fe_build_log_path, be_build_log_path, ` +
-	`created_at, updated_at`
+const deployCols = `id, repo_id, sha, short_sha, ref, branch, author_name, ` +
+	`author_email, fe_hash, be_hash, status, error, attempt_count, ` +
+	`fe_build_log_path, be_build_log_path, created_at, updated_at`
 
 var deployColsD = "d." + strings.ReplaceAll(deployCols, ", ", ", d.")
 
 func scanDeploy(row interface{ Scan(...any) error }, extra ...any) (Deploy, error) {
 	var d Deploy
-	dest := []any{&d.ID, &d.RepoID, &d.SHA, &d.ShortSHA, &d.Ref, &d.FeHash, &d.BeHash,
+	dest := []any{&d.ID, &d.RepoID, &d.SHA, &d.ShortSHA, &d.Ref, &d.Branch,
+		&d.AuthorName, &d.AuthorEmail, &d.FeHash, &d.BeHash,
 		&d.Status, &d.Error, &d.AttemptCount, &d.FeBuildLogPath, &d.BeBuildLogPath,
 		&d.CreatedAt, &d.UpdatedAt}
 	dest = append(dest, extra...)
@@ -62,12 +66,21 @@ func scanDeploy(row interface{ Scan(...any) error }, extra ...any) (Deploy, erro
 	return d, nil
 }
 
+// DeployMeta is the commit metadata captured when a deploy is created. All
+// fields are optional; Branch and the author fields are best-effort.
+type DeployMeta struct {
+	Ref         string
+	Branch      string
+	AuthorName  string
+	AuthorEmail string
+}
+
 // CreateDeploy inserts a queued deploy, computing the shortest sha prefix
 // (>=7 chars) unique among the repo's deploys. The UNIQUE(repo_id,
 // short_sha) constraint backstops races: on collision the prefix grows.
-func (s *Store) CreateDeploy(repoID int64, sha, ref string) (Deploy, error) {
+func (s *Store) CreateDeploy(repoID int64, sha string, meta DeployMeta) (Deploy, error) {
 	for n := 7; n <= len(sha); n++ {
-		d, err := s.insertDeploy(repoID, sha, sha[:n], ref)
+		d, err := s.insertDeploy(repoID, sha, sha[:n], meta)
 		if err == nil {
 			return d, nil
 		}
@@ -83,10 +96,12 @@ func (s *Store) CreateDeploy(repoID int64, sha, ref string) (Deploy, error) {
 	return Deploy{}, fmt.Errorf("could not find a unique short sha for %s", sha)
 }
 
-func (s *Store) insertDeploy(repoID int64, sha, shortSHA, ref string) (Deploy, error) {
+func (s *Store) insertDeploy(repoID int64, sha, shortSHA string, meta DeployMeta) (Deploy, error) {
 	return scanDeploy(s.db.QueryRow(
-		`INSERT INTO deploys (repo_id, sha, short_sha, ref) VALUES (?, ?, ?, ?)
-		 RETURNING `+deployCols, repoID, sha, shortSHA, ref))
+		`INSERT INTO deploys (repo_id, sha, short_sha, ref, branch, author_name, author_email)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 RETURNING `+deployCols,
+		repoID, sha, shortSHA, meta.Ref, meta.Branch, meta.AuthorName, meta.AuthorEmail))
 }
 
 // GetDeployBySHA returns the deploy for (repo, sha), or ErrNotFound.
@@ -111,13 +126,36 @@ func (s *Store) GetDeployByID(id int64) (DeployRow, error) {
 	return DeployRow{Deploy: d, RepoName: name}, nil
 }
 
-// ListDeploys returns deploys newest first, optionally filtered by repo name.
-func (s *Store) ListDeploys(repoName string) ([]DeployRow, error) {
+// DeployFilter narrows ListDeploys; zero-value fields don't filter.
+type DeployFilter struct {
+	// Repo and Branch match exactly.
+	Repo   string
+	Branch string
+	// Author is a case-insensitive substring of the author name or email.
+	Author string
+}
+
+// ListDeploys returns deploys newest first, narrowed by the filter.
+func (s *Store) ListDeploys(f DeployFilter) ([]DeployRow, error) {
 	q := `SELECT ` + deployColsD + `, r.name FROM deploys d JOIN repos r ON r.id = d.repo_id`
+	where := []string{}
 	args := []any{}
-	if repoName != "" {
-		q += ` WHERE r.name = ?`
-		args = append(args, repoName)
+	if f.Repo != "" {
+		where = append(where, `r.name = ?`)
+		args = append(args, f.Repo)
+	}
+	if f.Branch != "" {
+		where = append(where, `d.branch = ?`)
+		args = append(args, f.Branch)
+	}
+	if f.Author != "" {
+		// instr instead of LIKE so % and _ in the query aren't wildcards.
+		where = append(where,
+			`(instr(lower(d.author_name), lower(?)) > 0 OR instr(lower(d.author_email), lower(?)) > 0)`)
+		args = append(args, f.Author, f.Author)
+	}
+	if len(where) > 0 {
+		q += ` WHERE ` + strings.Join(where, ` AND `)
 	}
 	q += ` ORDER BY d.id DESC`
 	rows, err := s.db.Query(q, args...)

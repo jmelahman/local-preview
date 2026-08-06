@@ -335,7 +335,7 @@ func TestForkOrInitStateDir(t *testing.T) {
 
 	// c1 was deployed with backend be1; give be1 observable state.
 	f.provision(t, "be1", serverArgv(t))
-	d1, err := f.db.CreateDeploy(f.repoID, c1, "main")
+	d1, err := f.db.CreateDeploy(f.repoID, c1, db.DeployMeta{Ref: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}

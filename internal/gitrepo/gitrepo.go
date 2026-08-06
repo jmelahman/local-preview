@@ -142,6 +142,48 @@ func (r Repo) revParse(ctx context.Context, ref string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// CommitMeta is display metadata for one commit.
+type CommitMeta struct {
+	AuthorName  string
+	AuthorEmail string
+}
+
+// CommitMeta returns the author of sha.
+func (r Repo) CommitMeta(ctx context.Context, sha string) (CommitMeta, error) {
+	out, err := runGit(ctx, r.Path, "show", "-s", "--format=%an%x00%ae", sha)
+	if err != nil {
+		return CommitMeta{}, err
+	}
+	name, email, ok := strings.Cut(strings.TrimRight(string(out), "\n"), "\x00")
+	if !ok {
+		return CommitMeta{}, fmt.Errorf("unexpected commit format for %s: %q", sha, out)
+	}
+	return CommitMeta{AuthorName: name, AuthorEmail: email}, nil
+}
+
+// IsBranch reports whether name is a branch head in the mirror.
+func (r Repo) IsBranch(ctx context.Context, name string) bool {
+	_, err := runGit(ctx, r.Path, "rev-parse", "--verify", "--quiet", "refs/heads/"+name)
+	return err == nil
+}
+
+// BranchesPointingAt returns the branches whose tip is sha, in refname
+// order. Commits that are no longer any branch's tip return none.
+func (r Repo) BranchesPointingAt(ctx context.Context, sha string) ([]string, error) {
+	out, err := runGit(ctx, r.Path,
+		"for-each-ref", "--points-at", sha, "--format=%(refname:short)", "refs/heads")
+	if err != nil {
+		return nil, err
+	}
+	var branches []string
+	for line := range strings.Lines(string(out)) {
+		if b := strings.TrimSpace(line); b != "" {
+			branches = append(branches, b)
+		}
+	}
+	return branches, nil
+}
+
 // ReadFile returns the content of path at sha.
 func (r Repo) ReadFile(ctx context.Context, sha, path string) ([]byte, error) {
 	return runGit(ctx, r.Path, "show", sha+":"+path)

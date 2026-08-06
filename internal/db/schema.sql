@@ -1,5 +1,7 @@
 -- Schema for the local-preview orchestrator. Applied idempotently on every
--- Open; add new tables as CREATE TABLE IF NOT EXISTS statements.
+-- Open; add new tables as CREATE TABLE IF NOT EXISTS statements. New columns
+-- on existing tables also need an ALTER TABLE entry in db.go's migrate —
+-- CREATE TABLE IF NOT EXISTS is a no-op on databases that predate them.
 --
 -- Log/artifact CONTENT never lives here (single-connection SQLite) — only
 -- paths. The supervisor's live process state is in-memory; process_records
@@ -22,6 +24,12 @@ CREATE TABLE IF NOT EXISTS deploys (
     -- time; preview hosts route on sha prefixes.
     short_sha TEXT NOT NULL,
     ref TEXT NOT NULL DEFAULT '',
+    -- Commit metadata captured at deploy creation. ref is what the caller
+    -- asked for (possibly a tag or sha); branch is the branch the commit was
+    -- attributed to, best-effort.
+    branch TEXT NOT NULL DEFAULT '',
+    author_name TEXT NOT NULL DEFAULT '',
+    author_email TEXT NOT NULL DEFAULT '',
     fe_hash TEXT NOT NULL DEFAULT '',
     be_hash TEXT NOT NULL DEFAULT '',
     -- Build outcome only. Process runtime status is the supervisor's,

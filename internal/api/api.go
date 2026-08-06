@@ -223,7 +223,12 @@ func (d Deps) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d Deps) handleListDeploys(w http.ResponseWriter, r *http.Request) {
-	rows, err := d.Store.ListDeploys(r.URL.Query().Get("repo"))
+	q := r.URL.Query()
+	rows, err := d.Store.ListDeploys(db.DeployFilter{
+		Repo:   q.Get("repo"),
+		Branch: q.Get("branch"),
+		Author: q.Get("author"),
+	})
 	if err != nil {
 		internalError(w, "list deploys", err)
 		return

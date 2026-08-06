@@ -71,10 +71,14 @@ test("register, deploy, and open a preview", async ({ page }) => {
     )
     .toBe("ready");
 
-  // Dashboard lists the deploy with a preview link.
+  // Dashboard lists the deploy with a preview link and the commit's
+  // metadata: the branch is derived even for this deploy-by-sha, and the
+  // author comes from the fixture commit.
   await page.goto("/");
   await expect(page.getByText(latest.short_sha)).toBeVisible();
   await expect(page.getByText("ready", { exact: true })).toBeVisible();
+  await expect(page.getByText("main", { exact: true })).toBeVisible();
+  await expect(page.getByText("by e2e")).toBeVisible();
   await expect(page.getByRole("link", { name: /open/ })).toBeVisible();
 
   // The preview itself, at its real subdomain, served by Host routing.

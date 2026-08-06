@@ -28,6 +28,9 @@ type Deploy struct {
 	SHA          string `json:"sha"`
 	ShortSHA     string `json:"short_sha"`
 	Ref          string `json:"ref"`
+	Branch       string `json:"branch"`
+	AuthorName   string `json:"author_name"`
+	AuthorEmail  string `json:"author_email"`
 	FeHash       string `json:"fe_hash"`
 	BeHash       string `json:"be_hash"`
 	Status       string `json:"status"`
@@ -109,11 +112,26 @@ func (c *Client) CreateDeploy(ctx context.Context, repo, ref string, rebuild boo
 	return d, nil
 }
 
-// ListDeploys fetches deploys, optionally filtered by repo name.
-func (c *Client) ListDeploys(ctx context.Context, repo string) ([]Deploy, error) {
+// DeployFilter narrows ListDeploys; zero-value fields don't filter. It
+// mirrors the API's query params: repo and branch match exactly, author is a
+// case-insensitive substring of the author name or email.
+type DeployFilter struct {
+	Repo   string
+	Branch string
+	Author string
+}
+
+// ListDeploys fetches deploys narrowed by the filter.
+func (c *Client) ListDeploys(ctx context.Context, f DeployFilter) ([]Deploy, error) {
+	q := url.Values{}
+	for key, val := range map[string]string{"repo": f.Repo, "branch": f.Branch, "author": f.Author} {
+		if val != "" {
+			q.Set(key, val)
+		}
+	}
 	path := "/api/deploys"
-	if repo != "" {
-		path += "?repo=" + url.QueryEscape(repo)
+	if len(q) > 0 {
+		path += "?" + q.Encode()
 	}
 	raw, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {

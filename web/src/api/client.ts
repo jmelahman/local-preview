@@ -26,6 +26,9 @@ export type Deploy = {
   sha: string;
   short_sha: string;
   ref?: string;
+  branch?: string;
+  author_name?: string;
+  author_email?: string;
   fe_hash?: string;
   be_hash?: string;
   status: DeployStatus;

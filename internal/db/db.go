@@ -44,7 +44,38 @@ func Open(path string) (*Store, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrate(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
+	}
 	return &Store{db: sqlDB}, nil
+}
+
+// migrate adds columns to tables that predate them — CREATE TABLE IF NOT
+// EXISTS in schema.sql only shapes fresh databases.
+func migrate(sqlDB *sql.DB) error {
+	added := []struct{ table, column string }{
+		{"deploys", "branch"},
+		{"deploys", "author_name"},
+		{"deploys", "author_email"},
+	}
+	for _, a := range added {
+		var n int
+		err := sqlDB.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`,
+			a.table, a.column).Scan(&n)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := sqlDB.Exec(fmt.Sprintf(
+				`ALTER TABLE %s ADD COLUMN %s TEXT NOT NULL DEFAULT ''`,
+				a.table, a.column)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Close closes the underlying database.

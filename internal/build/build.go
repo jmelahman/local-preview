@@ -66,8 +66,8 @@ type Queue struct {
 	manifestRefs     []ManifestRef
 	localManifestDir string
 	buildTimeout     time.Duration
-	sf           singleflight.Group
-	work         chan int64
+	sf               singleflight.Group
+	work             chan int64
 
 	mu      sync.Mutex
 	rebuild map[int64]bool
@@ -161,10 +161,6 @@ func (q *Queue) RequestDeploy(ctx context.Context, repoName, ref string, rebuild
 	if err != nil {
 		return db.DeployRow{}, err
 	}
-	branch := ""
-	if !looksLikeSHA(ref) {
-		branch = ref
-	}
 
 	d, err := q.db.GetDeployBySHA(repo.ID, sha)
 	switch {
@@ -183,7 +179,7 @@ func (q *Queue) RequestDeploy(ctx context.Context, repoName, ref string, rebuild
 			q.enqueue(d.ID)
 		}
 	case errors.Is(err, db.ErrNotFound):
-		d, err = q.db.CreateDeploy(repo.ID, sha, branch)
+		d, err = q.db.CreateDeploy(repo.ID, sha, commitMeta(ctx, gr, ref, sha))
 		if err != nil {
 			return db.DeployRow{}, err
 		}
@@ -430,6 +426,31 @@ func openLog(path string) (*os.File, error) {
 	}
 	fmt.Fprintf(f, "# build started %s\n", time.Now().UTC().Format(time.RFC3339))
 	return f, nil
+}
+
+// commitMeta gathers the display metadata stored on a new deploy: the
+// requested ref, the branch the commit is attributed to, and the commit
+// author. Branch and author are best-effort — a deploy is never failed over
+// metadata. When the ref itself isn't a branch (a sha or tag), the branch is
+// derived from the branch tips pointing at the commit, so the common
+// deploy-HEAD-by-sha flow still gets one.
+func commitMeta(ctx context.Context, gr gitrepo.Repo, ref, sha string) db.DeployMeta {
+	meta := db.DeployMeta{}
+	if !looksLikeSHA(ref) {
+		meta.Ref = ref
+	}
+	if meta.Ref != "" && gr.IsBranch(ctx, meta.Ref) {
+		meta.Branch = meta.Ref
+	} else if branches, err := gr.BranchesPointingAt(ctx, sha); err == nil && len(branches) > 0 {
+		meta.Branch = branches[0]
+	}
+	if info, err := gr.CommitMeta(ctx, sha); err == nil {
+		meta.AuthorName = info.AuthorName
+		meta.AuthorEmail = info.AuthorEmail
+	} else {
+		log.Printf("build: commit metadata for %s@%s: %v", gr.Name, sha, err)
+	}
+	return meta
 }
 
 // looksLikeSHA reports whether ref is plausibly an (abbreviated) commit sha

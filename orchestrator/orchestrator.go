@@ -124,6 +124,9 @@ type Deploy struct {
 	SHA          string `json:"sha"`
 	ShortSHA     string `json:"short_sha"`
 	Ref          string `json:"ref,omitempty"`
+	Branch       string `json:"branch,omitempty"`
+	AuthorName   string `json:"author_name,omitempty"`
+	AuthorEmail  string `json:"author_email,omitempty"`
 	FeHash       string `json:"fe_hash,omitempty"`
 	BeHash       string `json:"be_hash,omitempty"`
 	Status       string `json:"status"`
@@ -347,7 +350,7 @@ func (o *Orchestrator) Deploy(id int64) (Deploy, error) {
 
 // Deploys lists deploys newest first, optionally filtered by repo name.
 func (o *Orchestrator) Deploys(repo string) ([]Deploy, error) {
-	rows, err := o.database.ListDeploys(repo)
+	rows, err := o.database.ListDeploys(db.DeployFilter{Repo: repo})
 	if err != nil {
 		return nil, err
 	}
@@ -399,6 +402,9 @@ func (o *Orchestrator) toDeploy(row db.DeployRow) Deploy {
 		SHA:          row.SHA,
 		ShortSHA:     row.ShortSHA,
 		Ref:          row.Ref,
+		Branch:       row.Branch,
+		AuthorName:   row.AuthorName,
+		AuthorEmail:  row.AuthorEmail,
 		FeHash:       row.FeHash,
 		BeHash:       row.BeHash,
 		Status:       row.Status,

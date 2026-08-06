@@ -99,6 +99,56 @@ func TestAddResolveFetch(t *testing.T) {
 	}
 }
 
+func TestCommitMetaAndBranches(t *testing.T) {
+	ctx := context.Background()
+	src := newSourceRepo(t)
+	first := runTestGit(t, src, "rev-parse", "HEAD")
+	writeFile(t, src, "a.txt", "a")
+	runTestGit(t, src, "add", "-A")
+	runTestGit(t, src, "commit", "-qm", "second")
+	head := runTestGit(t, src, "rev-parse", "HEAD")
+
+	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
+	repo, err := mgr.Add(ctx, "demo", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	meta, err := repo.CommitMeta(ctx, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.AuthorName != "test" || meta.AuthorEmail != "test@example.com" {
+		t.Fatalf("CommitMeta = %+v", meta)
+	}
+	if _, err := repo.CommitMeta(ctx, strings.Repeat("0", 40)); err == nil {
+		t.Fatal("CommitMeta of unknown sha should fail")
+	}
+
+	if !repo.IsBranch(ctx, "main") {
+		t.Fatal("IsBranch(main) = false")
+	}
+	if repo.IsBranch(ctx, "no-such-branch") {
+		t.Fatal("IsBranch(no-such-branch) = true")
+	}
+
+	branches, err := repo.BranchesPointingAt(ctx, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branches) != 1 || branches[0] != "main" {
+		t.Fatalf("BranchesPointingAt(head) = %v, want [main]", branches)
+	}
+	// The first commit is no branch's tip anymore.
+	branches, err = repo.BranchesPointingAt(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branches) != 0 {
+		t.Fatalf("BranchesPointingAt(first) = %v, want none", branches)
+	}
+}
+
 func TestLsTreeReadFileArchive(t *testing.T) {
 	ctx := context.Background()
 	src := newSourceRepo(t)

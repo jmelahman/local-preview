@@ -92,7 +92,7 @@ func (e *testEnv) readyDeploy(t *testing.T, sha string) db.Deploy {
 	if err := e.files.PublishFrontend("demo", feHash, scratch, false); err != nil {
 		t.Fatal(err)
 	}
-	d, err := e.db.CreateDeploy(e.repoID, sha, "")
+	d, err := e.db.CreateDeploy(e.repoID, sha, db.DeployMeta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestColdStartAndCrash(t *testing.T) {
 
 func TestNonReadyStatuses(t *testing.T) {
 	e := newTestEnv(t)
-	d, err := e.db.CreateDeploy(e.repoID, shaOne, "")
+	d, err := e.db.CreateDeploy(e.repoID, shaOne, db.DeployMeta{})
 	if err != nil {
 		t.Fatal(err)
 	}
