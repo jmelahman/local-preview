@@ -17,13 +17,6 @@ var schema string
 // ErrNotFound is returned when a row does not exist.
 var ErrNotFound = errors.New("not found")
 
-// Item is a row in the items table.
-type Item struct {
-	ID        int64  `json:"id"`
-	Title     string `json:"title"`
-	CreatedAt string `json:"created_at"`
-}
-
 // Store is a handle to the SQLite database.
 type Store struct {
 	db *sql.DB
@@ -45,7 +38,7 @@ func Open(path string) (*Store, error) {
 	}
 	// modernc.org/sqlite serializes writes; a single connection avoids
 	// SQLITE_BUSY under concurrent handlers at the cost of throughput this
-	// template doesn't need.
+	// application doesn't need.
 	sqlDB.SetMaxOpenConns(1)
 	if _, err := sqlDB.Exec(schema); err != nil {
 		sqlDB.Close()
@@ -57,50 +50,4 @@ func Open(path string) (*Store, error) {
 // Close closes the underlying database.
 func (s *Store) Close() error {
 	return s.db.Close()
-}
-
-// ListItems returns all items, newest first.
-func (s *Store) ListItems() ([]Item, error) {
-	rows, err := s.db.Query(`SELECT id, title, created_at FROM items ORDER BY id DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []Item{}
-	for rows.Next() {
-		var it Item
-		if err := rows.Scan(&it.ID, &it.Title, &it.CreatedAt); err != nil {
-			return nil, err
-		}
-		items = append(items, it)
-	}
-	return items, rows.Err()
-}
-
-// CreateItem inserts a new item and returns it.
-func (s *Store) CreateItem(title string) (Item, error) {
-	var it Item
-	err := s.db.QueryRow(
-		`INSERT INTO items (title) VALUES (?) RETURNING id, title, created_at`, title,
-	).Scan(&it.ID, &it.Title, &it.CreatedAt)
-	if err != nil {
-		return Item{}, err
-	}
-	return it, nil
-}
-
-// DeleteItem removes an item by id. Returns ErrNotFound if no row matched.
-func (s *Store) DeleteItem(id int64) error {
-	res, err := s.db.Exec(`DELETE FROM items WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
 }

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jmelahman/fullstack-template/cmd/server"
+	"github.com/jmelahman/local-preview/cmd/server"
 )
 
 func main() {

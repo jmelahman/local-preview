@@ -9,19 +9,19 @@ import (
 
 // appName is the directory name used under the XDG data home. Keep it in
 // sync with the binary name in .goreleaser.yaml and pyproject.toml.
-const appName = "app"
+const appName = "preview"
 
 // Config holds the resolved runtime configuration.
 type Config struct {
 	DataDir string
 }
 
-// Load resolves the data directory (flag override > $APP_DATA_DIR >
-// $XDG_DATA_HOME/app > ~/.local/share/app) and ensures it exists.
+// Load resolves the data directory (flag override > $PREVIEW_DATA_DIR >
+// $XDG_DATA_HOME/preview > ~/.local/share/preview) and ensures it exists.
 func Load(dataDirOverride string) (Config, error) {
 	dir := dataDirOverride
 	if dir == "" {
-		dir = os.Getenv("APP_DATA_DIR")
+		dir = os.Getenv("PREVIEW_DATA_DIR")
 	}
 	if dir == "" {
 		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {

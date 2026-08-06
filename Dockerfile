@@ -22,8 +22,8 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -tags embed -trimpath \
       -ldflags="-s -w \
-        -X github.com/jmelahman/fullstack-template/cmd/server.version=${VERSION}" \
-      -o /out/app .
+        -X github.com/jmelahman/local-preview/cmd/server.version=${VERSION}" \
+      -o /out/preview .
 
 FROM alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
 RUN apk add --no-cache ca-certificates \
@@ -31,11 +31,11 @@ RUN apk add --no-cache ca-certificates \
     && adduser -S -D -u 65532 -G nonroot -h /home/nonroot -s /sbin/nologin nonroot \
     && mkdir -p /home/nonroot /data \
     && chown nonroot:nonroot /home/nonroot /data
-COPY --from=go --chown=nonroot:nonroot /out/app /app
+COPY --from=go --chown=nonroot:nonroot /out/preview /preview
 USER nonroot
 ENV HOME=/home/nonroot \
-    APP_DATA_DIR=/data
+    PREVIEW_DATA_DIR=/data
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD wget -q --spider http://127.0.0.1:8080/api/health || exit 1
-ENTRYPOINT ["/app", "serve"]
+ENTRYPOINT ["/preview", "serve"]

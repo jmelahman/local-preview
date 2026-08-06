@@ -32,7 +32,7 @@ export default defineConfig({
     {
       command: `npm run dev -- --port ${FRONTEND_PORT} --strictPort`,
       cwd: ".",
-      env: { APP_BACKEND: `localhost:${BACKEND_PORT}` },
+      env: { PREVIEW_BACKEND: `localhost:${BACKEND_PORT}` },
       url: `http://localhost:${FRONTEND_PORT}/`,
       reuseExistingServer: !process.env.CI,
       stdout: "pipe",

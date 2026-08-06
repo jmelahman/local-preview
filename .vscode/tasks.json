@@ -51,7 +51,7 @@
       "options": {
         "cwd": "${workspaceFolder}/web",
         "env": {
-          "APP_BACKEND": "localhost:8080"
+          "PREVIEW_BACKEND": "localhost:8080"
         }
       }
     },

@@ -24,7 +24,7 @@ cd web && npm install && npm run dev -- --host 0.0.0.0
 **Frontend against a non-default backend** (`:5174`):
 
 ```bash
-cd web && APP_BACKEND=localhost:8080 npm install && npm run dev -- --host 0.0.0.0 --port 5174
+cd web && PREVIEW_BACKEND=localhost:8080 npm install && npm run dev -- --host 0.0.0.0 --port 5174
 ```
 
 Wait for both to be reachable before navigating:

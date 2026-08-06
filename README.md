@@ -1,101 +1,41 @@
-# Fullstack Template
+# local-preview
 
-[![Test status](https://github.com/jmelahman/fullstack-template/actions/workflows/test.yml/badge.svg)](https://github.com/jmelahman/fullstack-template/actions)
-[![Deploy Status](https://github.com/jmelahman/fullstack-template/actions/workflows/release.yml/badge.svg)](https://github.com/jmelahman/fullstack-template/actions)
-[![Docs](https://github.com/jmelahman/fullstack-template/actions/workflows/docs.yml/badge.svg)](https://jmelahman.github.io/fullstack-template/)
-[![Go Reference](https://pkg.go.dev/badge/github.com/jmelahman/fullstack-template.svg)](https://pkg.go.dev/github.com/jmelahman/fullstack-template)
-[![PyPI](https://img.shields.io/pypi/v/fullstack-template.svg)](https://pypi.org/project/fullstack-template/)
+[![Test status](https://github.com/jmelahman/local-preview/actions/workflows/test.yml/badge.svg)](https://github.com/jmelahman/local-preview/actions)
+[![Deploy Status](https://github.com/jmelahman/local-preview/actions/workflows/release.yml/badge.svg)](https://github.com/jmelahman/local-preview/actions)
+[![Docs](https://github.com/jmelahman/local-preview/actions/workflows/docs.yml/badge.svg)](https://jmelahman.github.io/local-preview/)
+[![Go Reference](https://pkg.go.dev/badge/github.com/jmelahman/local-preview.svg)](https://pkg.go.dev/github.com/jmelahman/local-preview)
+[![PyPI](https://img.shields.io/pypi/v/local-preview.svg)](https://pypi.org/project/local-preview/)
 
-A template repository for fullstack applications: a Go backend with an
-embedded SQLite database serving an embedded React frontend — server, web UI,
-REST API, and CLI in one self-contained binary.
+A local-first preview-deployment orchestrator: every commit of a registered
+git repository becomes a servable preview at its own subdomain
+(`<sha>.<repo>.preview.localhost:8080`), built once, deduplicated by
+content, and served from a single binary.
 
-The sample app is a deliberately tiny "items" CRUD so every layer (schema,
-store, handlers, HTTP client, CLI, React UI, E2E test) has one worked example
-to copy from.
-
-## What's included
-
-**Backend** (`main.go`, `cmd/`, `internal/`)
-
-- Cobra CLI: `app serve` plus noun-verb client subcommands (`app item list`)
-  that talk to a running server over HTTP.
-- `net/http` with Go 1.22+ pattern routing, JSON helpers, panic-recovery and
-  request-logging middleware.
-- SQLite via `modernc.org/sqlite` (pure Go, no CGO) with an idempotent
-  embedded schema and an `--in-memory` mode for tests and demos.
-- Version stamping via ldflags with a `runtime/debug` fallback.
-
-**Frontend** (`web/`)
-
-- Vite + React 19 + Tailwind 4 + TanStack Query, typechecked with TypeScript.
-- Biome for lint + format; theme tokens with dark/light support.
-- Playwright E2E suite that boots the real backend (`--in-memory`) and the
-  Vite dev server.
-- Production build embedded into the Go binary with `-tags embed`
-  (`web/static_embed.go`).
-
-**Docs** (`docs/`)
-
-- VitePress site with guide/reference structure, llms.txt generation, and a
-  GitHub Pages deploy workflow.
-
-**Packaging & ops**
-
-- GoReleaser (linux/darwin/windows × amd64/arm64) publishing GitHub releases.
-- Multi-arch Docker image (distroless-style nonroot Alpine) + `compose.yaml`
-  + `docker-bake.hcl`.
-- PyPI wheels per platform via hatch + `go-bin` + `manygo`
-  (`uv tool install <name>` installs the Go binary).
-- prek (pre-commit) hooks: builtin checks, actionlint, ripsecrets,
-  govulncheck (with a documented allowlist wrapper), npm audit, Biome.
-- GitHub Actions: tests + lint + image smoke test, release pipeline, docs
-  deploy, zizmor, Dependabot.
-- `.devcontainer/` dev sandbox with an opt-in default-deny network firewall.
-- `.kanban.toml` task/port mapping for [agentic-kanban](https://github.com/jmelahman/agentic-kanban) sessions.
-
-## Using this template
-
-1. Create a repo from this template (GitHub → "Use this template").
-2. Find-and-replace the placeholder identifiers:
-   - `github.com/jmelahman/fullstack-template` → your Go module path
-     (`go.mod`, all imports, ldflags in `Dockerfile` / `.goreleaser.yaml` /
-     `hatch_build.py`).
-   - `fullstack-template` → your project name (`pyproject.toml`, docs,
-     workflows, badges).
-   - `lahmanja/fullstack-template` → your Docker Hub repository
-     (`compose.yaml`, `docker-bake.hcl`, `release.yml`).
-   - `app` → your binary name (`.goreleaser.yaml`, `pyproject.toml`,
-     `Dockerfile`, `internal/config`, docs).
-   - `APP_` → your env-var prefix (`internal/config`, `cmd/server/cli.go`,
-     `vite.config.ts`, `playwright.config.ts`).
-3. The CI/devcontainer image is `lahmanja/devcontainer` (rebuilt by
-   `devcontainer.yml`); point it at your own registry or swap the container
-   jobs for setup-go/setup-node.
-4. Configure repo settings: a `release` environment, `DOCKERHUB_USERNAME` /
-   `DOCKERHUB_TOKEN` secrets, PyPI trusted publishing, and GitHub Pages
-   (source: GitHub Actions).
-5. Regenerate lockfiles (`npm install` in `web/` and `docs/`) and run
-   `prek run --all-files`.
-6. Replace this README (and the LICENSE, if GPLv3 doesn't fit) with your
-   project's own.
+`local-preview` resolves each commit into a *(frontend artifact, backend
+artifact)* pair by content-addressing the relevant subtrees. Commits that
+don't touch the frontend (or backend) reuse the existing artifact — and the
+already-running backend process. Backend state follows git lineage: a new
+backend version forks its data from the nearest deployed ancestor, so
+previews feel continuous on a straight line of commits while divergent
+branches can never corrupt each other.
 
 ## Install
 
 ```sh
-uv tool install fullstack-template
+uv tool install local-preview
 ```
 
-This installs the binary to `~/.local/bin/app`.
+This installs the binary to `~/.local/bin/preview`.
 Make sure to have that on your `PATH`.
 
 ## Run
 
 ```sh
-app serve
+preview serve
 ```
 
-The server listens on `:8080`. Open <http://localhost:8080/>.
+The server listens on `:8080`. Open <http://localhost:8080/> for the
+dashboard.
 
 Or with Docker:
 
@@ -124,20 +64,14 @@ branch). Run it locally with:
 cd docs && npm install && npm run docs:dev   # http://localhost:5175
 ```
 
-One-time setup on a new repo: enable Pages with the "GitHub Actions" source
-(Settings → Pages, or `gh api -X POST repos/<owner>/<repo>/pages -f
-build_type=workflow`), keep `base` in `docs/.vitepress/config.ts` in sync
-with the repo name (it's the URL prefix Pages serves the site under), and
-trigger the first deploy with `gh workflow run docs.yml`.
-
 See `CLAUDE.md` for the full development reference (tests, lint, E2E, docs
 conventions).
 
 ## 📖 Documentation
 
-Full documentation lives at **<https://jmelahman.github.io/fullstack-template/>**:
+Full documentation lives at **<https://jmelahman.github.io/local-preview/>**:
 
-- [Quickstart](https://jmelahman.github.io/fullstack-template/guide/quickstart) — serve, add items, script the CLI.
-- [Configuration](https://jmelahman.github.io/fullstack-template/guide/configuration) — flags and env vars.
-- [REST API](https://jmelahman.github.io/fullstack-template/reference/api) — endpoints exposed by the running server.
-- [CLI](https://jmelahman.github.io/fullstack-template/reference/cli) — `serve`, `item list`, `item create`.
+- [Quickstart](https://jmelahman.github.io/local-preview/guide/quickstart) — register a repo, deploy a commit, open the preview.
+- [Configuration](https://jmelahman.github.io/local-preview/guide/configuration) — flags and env vars.
+- [REST API](https://jmelahman.github.io/local-preview/reference/api) — endpoints exposed by the running server.
+- [CLI](https://jmelahman.github.io/local-preview/reference/cli) — `serve`, `repo`, `deploy`, `install-hook`.

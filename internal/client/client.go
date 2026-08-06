@@ -12,14 +12,7 @@ import (
 	"strings"
 )
 
-// Item mirrors the API's item shape.
-type Item struct {
-	ID        int64  `json:"id"`
-	Title     string `json:"title"`
-	CreatedAt string `json:"created_at"`
-}
-
-// Client talks to a running `app serve` over HTTP.
+// Client talks to a running `preview serve` over HTTP.
 type Client struct {
 	base string
 	http *http.Client
@@ -32,34 +25,6 @@ func New(base string, hc *http.Client) *Client {
 		hc = http.DefaultClient
 	}
 	return &Client{base: strings.TrimRight(base, "/"), http: hc}
-}
-
-// ListItems fetches all items.
-func (c *Client) ListItems(ctx context.Context) ([]Item, error) {
-	raw, err := c.do(ctx, http.MethodGet, "/api/items", nil)
-	if err != nil {
-		return nil, err
-	}
-	var items []Item
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil, fmt.Errorf("decode items: %w", err)
-	}
-	return items, nil
-}
-
-// CreateItem creates an item and returns the raw JSON response.
-func (c *Client) CreateItem(ctx context.Context, title string) (json.RawMessage, error) {
-	body, err := json.Marshal(map[string]string{"title": title})
-	if err != nil {
-		return nil, err
-	}
-	return c.do(ctx, http.MethodPost, "/api/items", body)
-}
-
-// DeleteItem deletes an item by id.
-func (c *Client) DeleteItem(ctx context.Context, id int64) error {
-	_, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/api/items/%d", id), nil)
-	return err
 }
 
 // do performs a request and returns the response body, converting non-2xx
