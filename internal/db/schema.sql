@@ -1,5 +1,2 @@
-CREATE TABLE IF NOT EXISTS items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-);
+-- Schema for the local-preview orchestrator. Applied idempotently on every
+-- Open; add new tables as CREATE TABLE IF NOT EXISTS statements.

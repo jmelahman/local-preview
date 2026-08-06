@@ -15,14 +15,14 @@ export default defineConfig({
       }],
     ]
   },
-  title: 'Fullstack Template',
-  description: 'A template for fullstack Go + React applications.',
-  base: '/fullstack-template/',
+  title: 'local-preview',
+  description: 'Local-first preview-deployment orchestrator: a preview per commit.',
+  base: '/local-preview/',
   lastUpdated: true,
   cleanUrls: true,
   ignoreDeadLinks: 'localhostLinks',
   head: [
-    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/fullstack-template/favicon.svg' }],
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/local-preview/favicon.svg' }],
     ['meta', { name: 'theme-color', content: '#3b82f6' }],
   ],
   themeConfig: {
@@ -30,7 +30,7 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/guide/', activeMatch: '/guide/' },
       { text: 'Reference', link: '/reference/api', activeMatch: '/reference/' },
-      { text: 'Releases', link: 'https://github.com/jmelahman/fullstack-template/releases' },
+      { text: 'Releases', link: 'https://github.com/jmelahman/local-preview/releases' },
     ],
     sidebar: {
       '/guide/': [
@@ -55,10 +55,10 @@ export default defineConfig({
       ],
     },
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/jmelahman/fullstack-template' },
+      { icon: 'github', link: 'https://github.com/jmelahman/local-preview' },
     ],
     editLink: {
-      pattern: 'https://github.com/jmelahman/fullstack-template/edit/master/docs/:path',
+      pattern: 'https://github.com/jmelahman/local-preview/edit/master/docs/:path',
       text: 'Edit this page on GitHub',
     },
     search: { provider: 'local' },

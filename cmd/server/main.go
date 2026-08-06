@@ -14,9 +14,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jmelahman/fullstack-template/internal/api"
-	"github.com/jmelahman/fullstack-template/internal/config"
-	"github.com/jmelahman/fullstack-template/internal/db"
+	"github.com/jmelahman/local-preview/internal/api"
+	"github.com/jmelahman/local-preview/internal/config"
+	"github.com/jmelahman/local-preview/internal/db"
 )
 
 // version is populated at build time via -ldflags -X (see Dockerfile /
@@ -67,8 +67,8 @@ func Root() *cobra.Command {
 	var inMemory bool
 
 	cmd := &cobra.Command{
-		Use:     "app",
-		Short:   "Fullstack application template",
+		Use:     "preview",
+		Short:   "Local preview-deployment orchestrator",
 		Version: Build().Version,
 	}
 
@@ -80,7 +80,7 @@ func Root() *cobra.Command {
 		},
 	}
 	serve.Flags().StringVar(&addr, "addr", ":8080", "HTTP listen address")
-	serve.Flags().StringVar(&dataDir, "data-dir", "", "Override data directory (default: $APP_DATA_DIR or XDG)")
+	serve.Flags().StringVar(&dataDir, "data-dir", "", "Override data directory (default: $PREVIEW_DATA_DIR or XDG)")
 	serve.Flags().BoolVar(&inMemory, "in-memory", false, "Use an ephemeral in-memory SQLite database; all data is discarded on shutdown")
 	cmd.AddCommand(serve)
 

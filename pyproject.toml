@@ -3,13 +3,13 @@ requires = ["hatchling", "hatch-vcs", "go-bin~=1.26.3", "manygo"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fullstack-template"
-description = "A template for fullstack Go + React applications"
+name = "local-preview"
+description = "Local-first preview-deployment orchestrator: a preview per commit"
 license = {file = "LICENSE"}
 authors = [{ name = "Jamison Lahman", email = "jamison@lahman.dev" }]
 readme = "README.md"
 requires-python = ">=3.6"
-keywords = ["template", "fullstack", "go", "react", "sqlite"]
+keywords = ["preview", "deployments", "orchestrator", "go", "react", "sqlite"]
 classifiers = [
     "Programming Language :: Go",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
@@ -19,7 +19,7 @@ dynamic = ["version"]
 
 
 [project.urls]
-Repository = "https://github.com/jmelahman/fullstack-template"
+Repository = "https://github.com/jmelahman/local-preview"
 
 [tool.hatch.build]
 include = [
@@ -40,4 +40,4 @@ include = [
 source = "vcs"
 
 [tool.hatch.build.hooks.custom]
-binary_name = "app"
+binary_name = "preview"

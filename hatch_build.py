@@ -34,7 +34,7 @@ class GoBinaryBuildHook(BuildHookInterface):
         if not os.path.exists(binary_name):
             print(f"Building Go binary '{binary_name}'...")
             ldflags = (
-                f"-X github.com/jmelahman/fullstack-template/cmd/server.version={version} "
+                f"-X github.com/jmelahman/local-preview/cmd/server.version={version} "
                 "-s -w"
             )
             subprocess.check_call(  # noqa: S603

@@ -1,4 +1,4 @@
-module github.com/jmelahman/fullstack-template
+module github.com/jmelahman/local-preview
 
 go 1.26.5
 
