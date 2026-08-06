@@ -656,7 +656,7 @@ export default function App() {
               <div className="divide-y divide-border">
                 {[0, 1, 2].map((i) => (
                   <div key={i} className="flex animate-pulse items-center gap-4 px-3 py-3">
-                    <div className="h-5 w-16 rounded-full bg-surface-2" />
+                    <div className="h-5 w-20 rounded-full bg-surface-2" />
                     <div className="h-4 w-40 rounded bg-surface-2" />
                     <div className="ml-auto h-4 w-24 rounded bg-surface-2" />
                   </div>
@@ -694,7 +694,9 @@ export default function App() {
                     key={d.id}
                     className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-3 py-3 transition-colors hover:bg-surface-2/40"
                   >
-                    <StatusBadge state={deployState(d)} />
+                    <span className="w-20 shrink-0">
+                      <StatusBadge state={deployState(d)} />
+                    </span>
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                         <span className="text-sm font-medium">{d.repo}</span>
