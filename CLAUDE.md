@@ -86,7 +86,9 @@ Tripwires for code that's bitten us before. Full write-ups live in
 lore, not user docs). When you fix something new and likely to recur, add the
 full entry to `REGRESSIONS.md` and a one-line title here.
 
-(none yet)
+- Container tests in CI see the runner host's daemon, not their own
+  filesystem — bind mounts silently resolve on the host; probe before
+  asserting on bind-mounted output.
 
 ## Documentation upkeep
 
