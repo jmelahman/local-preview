@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   api,
   type Deploy,
+  type DeployArtifact,
   type DeployStatus,
   type LogSide,
   type ProcessState,
@@ -129,7 +130,7 @@ function StatusBadge({ state }: { state: DeployState }) {
   return (
     <span
       title={s.hint}
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium ${s.pill}`}
+      className={`inline-flex w-22 items-center justify-center gap-1.5 rounded-full border py-0.5 text-xs font-medium ${s.pill}`}
     >
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dot}`} />
       {state}
@@ -523,6 +524,97 @@ function BuildLogPane({ deployId, building }: { deployId: number; building: bool
   );
 }
 
+// ArtifactDownload is one artifact's download affordance: a plain link when
+// the build produced a single file, a dropdown listing every file (e.g. one
+// binary per platform) when it produced several. The menu is fixed-positioned
+// so the list container's overflow-hidden can't clip it.
+function ArtifactDownload({ artifact }: { artifact: DeployArtifact }) {
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!menuPos) return;
+    const close = () => setMenuPos(null);
+    const onPointerDown = (e: PointerEvent) => {
+      if (!buttonRef.current?.parentElement?.contains(e.target as Node)) close();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [menuPos]);
+
+  if (artifact.files.length === 1) {
+    const f = artifact.files[0];
+    return (
+      <a
+        href={f.url}
+        download={f.name}
+        title={`${f.name} (${formatBytes(f.size)})`}
+        className={`${neutralButtonClass} gap-1 font-mono`}
+      >
+        <IconDownload className="h-3 w-3" />
+        {artifact.name}
+      </a>
+    );
+  }
+
+  return (
+    <div className="relative">
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={menuPos != null}
+        title={`Download ${artifact.name} for your platform`}
+        onClick={() => {
+          if (menuPos) {
+            setMenuPos(null);
+            return;
+          }
+          const r = buttonRef.current?.getBoundingClientRect();
+          if (r) setMenuPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
+        }}
+        className={`${neutralButtonClass} gap-1 font-mono`}
+      >
+        <IconDownload className="h-3 w-3" />
+        {artifact.name}
+        <IconChevronDown className="h-3 w-3" />
+      </button>
+      {menuPos && (
+        <div
+          role="menu"
+          style={{ top: menuPos.top, right: menuPos.right }}
+          className="fixed z-10 min-w-48 rounded border border-border bg-bg py-1 shadow-lg"
+        >
+          {artifact.files.map((f) => (
+            <a
+              key={f.name}
+              role="menuitem"
+              href={f.url}
+              download={f.name}
+              onClick={() => setMenuPos(null)}
+              className="flex items-baseline justify-between gap-4 px-3 py-1.5 font-mono text-xs text-fg transition-colors duration-150 hover:bg-surface-2"
+            >
+              {f.name}
+              <span className="text-[10px] text-fg-muted tabular-nums">{formatBytes(f.size)}</span>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type LogTab = LogSide | "build";
 
 // DeployDetailDialog is the observability view of one deployment: live
@@ -656,7 +748,7 @@ export default function App() {
               <div className="divide-y divide-border">
                 {[0, 1, 2].map((i) => (
                   <div key={i} className="flex animate-pulse items-center gap-4 px-3 py-3">
-                    <div className="h-5 w-20 rounded-full bg-surface-2" />
+                    <div className="h-5 w-22 rounded-full bg-surface-2" />
                     <div className="h-4 w-40 rounded bg-surface-2" />
                     <div className="ml-auto h-4 w-24 rounded bg-surface-2" />
                   </div>
@@ -683,43 +775,48 @@ export default function App() {
             )}
             <ul className="divide-y divide-border">
               {deploys.data?.map((d) => {
-                const artifacts = [
-                  d.fe_hash ? `fe:${d.fe_hash.slice(0, 8)}` : null,
-                  d.be_hash ? `be:${d.be_hash.slice(0, 8)}` : null,
+                // Per-service content hashes live in the commit sha's hover
+                // instead of taking up a row of their own.
+                const shaTitle = [
+                  d.sha,
+                  d.fe_hash ? `frontend ${d.fe_hash.slice(0, 12)}` : null,
+                  d.be_hash ? `backend ${d.be_hash.slice(0, 12)}` : null,
+                  ...(d.artifacts?.map((a) => `${a.name} ${a.hash.slice(0, 12)}`) ?? []),
                 ]
                   .filter(Boolean)
-                  .join(" ");
+                  .join("\n");
                 return (
                   <li
                     key={d.id}
                     className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-3 py-3 transition-colors hover:bg-surface-2/40"
                   >
-                    <span className="w-20 shrink-0">
-                      <StatusBadge state={deployState(d)} />
-                    </span>
+                    <StatusBadge state={deployState(d)} />
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                         <span className="text-sm font-medium">{d.repo}</span>
-                        <code className="font-mono text-xs text-fg-muted">{d.short_sha}</code>
-                        {d.branch && (
-                          <span className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-px font-mono text-[11px] text-fg-muted">
-                            <IconGitBranch className="h-3 w-3" />
-                            {d.branch}
-                          </span>
-                        )}
-                        {d.ref && d.ref !== d.branch && (
-                          <span className="rounded-full border border-border bg-surface-2 px-2 py-px font-mono text-[11px] text-fg-muted">
-                            {d.ref}
-                          </span>
-                        )}
+                        <code className="font-mono text-xs text-fg-muted" title={shaTitle}>
+                          {d.short_sha}
+                        </code>
                         {d.author_name && (
                           <span className="text-xs text-fg-muted" title={d.author_email}>
                             by {d.author_name}
                           </span>
                         )}
                       </div>
-                      {artifacts && (
-                        <div className="mt-0.5 font-mono text-xs text-fg-muted/80">{artifacts}</div>
+                      {(d.branch || (d.ref && d.ref !== d.branch)) && (
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                          {d.branch && (
+                            <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-px font-mono text-[11px] text-fg-muted">
+                              <IconGitBranch className="h-3 w-3 shrink-0" />
+                              <span className="truncate">{d.branch}</span>
+                            </span>
+                          )}
+                          {d.ref && d.ref !== d.branch && (
+                            <span className="min-w-0 truncate rounded-full border border-border bg-surface-2 px-2 py-px font-mono text-[11px] text-fg-muted">
+                              {d.ref}
+                            </span>
+                          )}
+                        </div>
                       )}
                       {d.status === "failed" && d.error && (
                         <p
@@ -730,27 +827,9 @@ export default function App() {
                         </p>
                       )}
                     </div>
-                    <time
-                      dateTime={d.created_at}
-                      title={d.created_at}
-                      className="text-xs text-fg-muted tabular-nums"
-                    >
-                      {timeAgo(d.created_at)}
-                    </time>
-                    {d.artifacts?.flatMap((a) =>
-                      a.files.map((f) => (
-                        <a
-                          key={`${a.name}/${f.name}`}
-                          href={f.url}
-                          download={f.name}
-                          title={`${a.name}: ${f.name} (${formatBytes(f.size)})`}
-                          className={`${neutralButtonClass} gap-1 font-mono`}
-                        >
-                          <IconDownload className="h-3 w-3" />
-                          {f.name}
-                        </a>
-                      )),
-                    )}
+                    {d.artifacts?.map((a) => (
+                      <ArtifactDownload key={a.name} artifact={a} />
+                    ))}
                     <button
                       type="button"
                       onClick={() => setDetailId(d.id)}
@@ -773,6 +852,13 @@ export default function App() {
                     ) : (
                       <span className="w-14 text-center text-xs text-fg-muted/50">—</span>
                     )}
+                    <time
+                      dateTime={d.created_at}
+                      title={d.created_at}
+                      className="w-14 shrink-0 text-right text-xs text-fg-muted tabular-nums"
+                    >
+                      {timeAgo(d.created_at)}
+                    </time>
                   </li>
                 );
               })}
@@ -907,6 +993,23 @@ function IconDownload({ className = "" }: { className?: string }) {
     >
       <path d="M12 3v12m0 0 4-4m-4 4-4-4" />
       <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+    </svg>
+  );
+}
+
+function IconChevronDown({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m6 9 6 6 6-6" />
     </svg>
   );
 }

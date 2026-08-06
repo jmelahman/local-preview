@@ -30,6 +30,9 @@ health_path = "/api/health"
 
 # The server binary doubles as the CLI — downloadable per commit from the
 # dashboard. Same partition as the backend, but its own content address.
+# Cross-compiled for every supported platform (windows is out until
+# internal/supervise grows a non-unix implementation); the dashboard offers
+# the set as one download menu.
 [artifacts.cli]
 path    = "."
 exclude = [
@@ -46,5 +49,15 @@ exclude = [
   "Dockerfile",
 ]
 image   = "golang:1.26-alpine"
-build   = [["go", "build", "-ldflags", "-s -w", "-o", "bin/preview", "."]]
-files   = ["bin/preview"]
+build   = [
+  ["env", "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64", "go", "build", "-ldflags", "-s -w", "-o", "bin/preview-linux-amd64", "."],
+  ["env", "CGO_ENABLED=0", "GOOS=linux", "GOARCH=arm64", "go", "build", "-ldflags", "-s -w", "-o", "bin/preview-linux-arm64", "."],
+  ["env", "CGO_ENABLED=0", "GOOS=darwin", "GOARCH=amd64", "go", "build", "-ldflags", "-s -w", "-o", "bin/preview-darwin-amd64", "."],
+  ["env", "CGO_ENABLED=0", "GOOS=darwin", "GOARCH=arm64", "go", "build", "-ldflags", "-s -w", "-o", "bin/preview-darwin-arm64", "."],
+]
+files   = [
+  "bin/preview-linux-amd64",
+  "bin/preview-linux-arm64",
+  "bin/preview-darwin-amd64",
+  "bin/preview-darwin-arm64",
+]

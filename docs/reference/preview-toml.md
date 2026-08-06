@@ -174,9 +174,25 @@ manifest section) reuses the cached build. Nothing is ever run — there is
 no run command, health check, state dir, or env — and a build that doesn't
 produce every declared file fails the deploy.
 
+A build matrix is just more build steps and more files — cross-compile once
+per platform and declare every output:
+
+```toml
+[artifacts.cli]
+path  = "cli"
+build = [
+  ["env", "CGO_ENABLED=0", "GOOS=linux",  "GOARCH=amd64", "go", "build", "-o", "bin/mycli-linux-amd64", "."],
+  ["env", "CGO_ENABLED=0", "GOOS=darwin", "GOARCH=arm64", "go", "build", "-o", "bin/mycli-darwin-arm64", "."],
+]
+files = ["bin/mycli-linux-amd64", "bin/mycli-darwin-arm64"]
+```
+
 Ready deploys carry their artifacts in the [API](/reference/api#deploys)
-with a per-file download URL, the dashboard shows a download button per
-file, and `preview deploy` prints the URLs alongside the preview URL.
+with a per-file download URL (files listed sorted by name), the dashboard
+shows one download button per artifact — a direct download for a
+single-file artifact, a dropdown menu of its files for a matrix like the
+one above — and `preview deploy` prints the URLs alongside the preview
+URL.
 
 ## Runtime images
 
