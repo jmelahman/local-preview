@@ -88,7 +88,7 @@ func newTestMux(t *testing.T) *http.ServeMux {
 	gitMgr := gitrepo.NewManager(filepath.Join(root, "repos"))
 	super := supervise.New(database, files, filepath.Join(root, "logs"))
 	t.Cleanup(super.StopAll)
-	queue := build.NewQueue(database, gitMgr, files, super, filepath.Join(root, "logs"))
+	queue := build.NewQueue(database, gitMgr, files, super, filepath.Join(root, "logs"), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	queue.Start(ctx, 1)

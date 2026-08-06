@@ -17,7 +17,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -47,6 +46,7 @@ type Queue struct {
 	files   *store.Store
 	super   *supervise.Manager
 	logsDir string
+	runner  Runner
 
 	buildTimeout time.Duration
 	sf           singleflight.Group
@@ -56,14 +56,19 @@ type Queue struct {
 	rebuild map[int64]bool
 }
 
-// NewQueue wires the pipeline. Call Start to launch workers.
-func NewQueue(database *db.Store, git *gitrepo.Manager, files *store.Store, super *supervise.Manager, logsDir string) *Queue {
+// NewQueue wires the pipeline. runner may be nil for the default HostRunner.
+// Call Start to launch workers.
+func NewQueue(database *db.Store, git *gitrepo.Manager, files *store.Store, super *supervise.Manager, logsDir string, runner Runner) *Queue {
+	if runner == nil {
+		runner = HostRunner{}
+	}
 	return &Queue{
 		db:           database,
 		git:          git,
 		files:        files,
 		super:        super,
 		logsDir:      logsDir,
+		runner:       runner,
 		buildTimeout: DefaultBuildTimeout,
 		work:         make(chan int64, 256),
 		rebuild:      make(map[int64]bool),
@@ -243,7 +248,7 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 	if needFe {
 		key := row.RepoName + ":fe:" + feHash
 		if _, err, _ := q.sf.Do(key, func() (any, error) {
-			return nil, q.buildFrontend(ctx, row.RepoName, m.Frontend, scratch, feHash, feLog, rebuild)
+			return nil, q.buildFrontend(ctx, row, m.Frontend, scratch, feHash, feLog, rebuild)
 		}); err != nil {
 			return fmt.Errorf("frontend build: %w (log: %s)", err, feLog)
 		}
@@ -251,7 +256,7 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 	if needBe {
 		key := row.RepoName + ":be:" + beHash
 		if _, err, _ := q.sf.Do(key, func() (any, error) {
-			return nil, q.buildBackend(ctx, row.RepoName, m.Backend, scratch, beHash, beLog, rebuild)
+			return nil, q.buildBackend(ctx, row, m.Backend, scratch, beHash, beLog, rebuild)
 		}); err != nil {
 			return fmt.Errorf("backend build: %w (log: %s)", err, beLog)
 		}
@@ -270,52 +275,49 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 	return q.super.ForkOrInitStateDir(ctx, gr, repo.ID, row.RepoName, beHash, row.SHA, string(runCfg))
 }
 
-func (q *Queue) buildFrontend(ctx context.Context, repoName string, fe manifest.Frontend, scratch, hash, logPath string, overwrite bool) error {
+func (q *Queue) buildFrontend(ctx context.Context, row db.DeployRow, fe manifest.Frontend, scratch, hash, logPath string, overwrite bool) error {
 	logF, err := openLog(logPath)
 	if err != nil {
 		return err
 	}
 	defer logF.Close()
-	cwd := filepath.Join(scratch, fe.Path)
 	for _, step := range fe.Build {
-		if err := q.runStep(ctx, cwd, step, logF); err != nil {
+		if err := q.runStep(ctx, row, scratch, fe.Path, step, logF); err != nil {
 			return err
 		}
 	}
-	dist := filepath.Join(cwd, fe.Dist)
+	dist := filepath.Join(scratch, fe.Path, fe.Dist)
 	if st, err := os.Stat(dist); err != nil || !st.IsDir() {
 		return fmt.Errorf("frontend.dist %q was not produced by the build", fe.Dist)
 	}
-	return q.files.PublishFrontend(repoName, hash, dist, overwrite)
+	return q.files.PublishFrontend(row.RepoName, hash, dist, overwrite)
 }
 
-func (q *Queue) buildBackend(ctx context.Context, repoName string, be manifest.Backend, scratch, hash, logPath string, overwrite bool) error {
+func (q *Queue) buildBackend(ctx context.Context, row db.DeployRow, be manifest.Backend, scratch, hash, logPath string, overwrite bool) error {
 	logF, err := openLog(logPath)
 	if err != nil {
 		return err
 	}
 	defer logF.Close()
-	cwd := filepath.Join(scratch, be.Path)
 	for _, step := range be.Build {
-		if err := q.runStep(ctx, cwd, step, logF); err != nil {
+		if err := q.runStep(ctx, row, scratch, be.Path, step, logF); err != nil {
 			return err
 		}
 	}
-	return q.files.PublishBackend(repoName, hash, cwd, overwrite)
+	return q.files.PublishBackend(row.RepoName, hash, filepath.Join(scratch, be.Path), overwrite)
 }
 
-func (q *Queue) runStep(ctx context.Context, dir string, argv []string, logF io.Writer) error {
+func (q *Queue) runStep(ctx context.Context, row db.DeployRow, scratch, dir string, argv []string, logF io.Writer) error {
 	cctx, cancel := context.WithTimeout(ctx, q.buildTimeout)
 	defer cancel()
 	fmt.Fprintf(logF, "$ %s\n", strings.Join(argv, " "))
-	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...)
-	cmd.Dir = dir
-	cmd.Stdout = logF
-	cmd.Stderr = logF
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("build step %q: %w", strings.Join(argv, " "), err)
-	}
-	return nil
+	return q.runner.Run(cctx, RunSpec{
+		RepoName:   row.RepoName,
+		SHA:        row.SHA,
+		ScratchDir: scratch,
+		Dir:        dir,
+		Argv:       argv,
+	}, logF)
 }
 
 func (q *Queue) logPath(repoName, kind, hash string) string {
