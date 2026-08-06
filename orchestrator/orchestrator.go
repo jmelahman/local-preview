@@ -45,13 +45,16 @@ var ErrConflict = errors.New("conflict")
 
 // RunSpec describes one build step handed to a Runner. ScratchDir is the
 // extracted commit tree on the host; Dir is the working directory relative
-// to it.
+// to it. Image is the manifest-declared build image for the step's side
+// ("" = unspecified) — custom runners should honor it when set, since it's
+// the repo's explicit contract.
 type RunSpec struct {
 	RepoName   string
 	SHA        string
 	ScratchDir string
 	Dir        string
 	Argv       []string
+	Image      string
 }
 
 // Runner executes build steps. Omit it for host execution; inject an

@@ -4,6 +4,7 @@
 
 [frontend]
 path  = "web"
+image = "node:24-alpine"
 build = [["npm", "ci"], ["npm", "run", "build"]]
 dist  = "dist"
 
@@ -22,6 +23,7 @@ exclude = [
   "docker-bake.hcl",
   "Dockerfile",
 ]
+image       = "golang:1.26-alpine"
 build       = [["go", "build", "-o", "bin/server", "."]]
 run         = ["./bin/server", "serve", "--addr", "127.0.0.1:{port}", "--data-dir", "{state_dir}"]
 health_path = "/api/health"
