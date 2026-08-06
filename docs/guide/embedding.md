@@ -1,7 +1,7 @@
 # Embedding as a library
 
 Everything the standalone server does is available to other Go applications
-through the `orchestrator` package — the same pipeline behind a small
+through the `orchestrator` package: the same pipeline behind a small
 facade, wired into your own HTTP server. The first consumer is
 [agentic-kanban](https://github.com/jmelahman/agentic-kanban), which serves
 a preview per ticket branch.

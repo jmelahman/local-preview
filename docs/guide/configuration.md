@@ -1,7 +1,7 @@
 # Configuration
 
-Configuration is intentionally small: a few flags on `preview serve`, each
-with an environment-variable fallback.
+There isn't much to configure. `preview serve` takes a few flags, each with
+an environment-variable fallback.
 
 ## Data directory
 

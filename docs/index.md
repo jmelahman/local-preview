@@ -4,7 +4,11 @@ layout: home
 hero:
   name: local-preview
   text: A preview deployment per commit.
-  tagline: A local-first preview orchestrator — every commit of your repos becomes a servable deployment at its own subdomain, built once, deduplicated by content, served from one binary.
+  tagline: Register a git repo and every commit gets its own servable URL, built once and served from a single Go binary on your own machine.
+  image:
+    light: /demo_light.png
+    dark: /demo_dark.png
+    alt: local-preview dashboard screenshot
   actions:
     - theme: brand
       text: Get Started
@@ -18,15 +22,15 @@ hero:
 
 features:
   - title: A URL for every commit
-    details: Previews are served at <sha>.<repo>.preview.localhost — wildcard *.localhost resolves in every modern browser with zero DNS setup, and the same routing maps onto real wildcard domains later.
+    details: Previews are served at <code>&lt;sha&gt;.&lt;repo&gt;.preview.localhost</code>. Browsers resolve <code>*.localhost</code> on their own, so there is no DNS setup, and the same routing works under a real wildcard domain later.
   - title: Content-addressed builds
-    details: Each commit resolves to a (frontend, backend) artifact pair hashed from its git tree. Commits that don't touch a side reuse the existing artifact — a docs-only commit deploys in milliseconds.
+    details: A commit resolves to a frontend and a backend artifact, hashed from the git tree. Commits that don't touch a side reuse the existing artifact, so a docs-only commit deploys in milliseconds.
   - title: Shared backends, on demand
-    details: One supervised process per distinct backend version, started on the first request and reused by every commit that shares it. Hundreds of previews, a handful of processes.
+    details: One supervised process per distinct backend version, started on the first request. Every commit that shares the version shares the process, so hundreds of previews need only a handful of processes.
   - title: State follows git lineage
-    details: A new backend version forks its database from the nearest deployed ancestor. Straight-line commits feel like one persistent database; divergent branches can never corrupt each other.
+    details: A new backend version forks its database from the nearest deployed ancestor. Commits on one branch feel like a single persistent database, and diverged branches can't corrupt each other.
   - title: Triggers are adapters
-    details: One deploy API behind a CLI, a git post-commit hook, and (soon) pollers and webhooks. preview install-hook makes every commit deploy itself.
+    details: Deploying is one API call, wrapped by the CLI and a git post-commit hook. <code>preview install-hook</code> makes every commit deploy itself.
   - title: One small binary
-    details: Reverse proxy, build queue, artifact store, process supervisor, REST API, CLI, and dashboard in a single self-contained Go binary with SQLite.
+    details: Reverse proxy, build queue, artifact store, process supervisor, REST API, CLI, and dashboard ship in one self-contained Go binary with SQLite.
 ---
