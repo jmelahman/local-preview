@@ -75,7 +75,7 @@ type env struct {
 	repoID int64
 }
 
-func newEnv(t *testing.T, srcRepo string) *env {
+func newEnv(t *testing.T, srcRepo string, configure ...func(*Queue)) *env {
 	t.Helper()
 	ctx := context.Background()
 	database, err := db.Open(":memory:")
@@ -102,6 +102,9 @@ func newEnv(t *testing.T, srcRepo string) *env {
 	super := supervise.New(database, files, filepath.Join(root, "logs"))
 	t.Cleanup(super.StopAll)
 	q := NewQueue(database, gitMgr, files, super, filepath.Join(root, "logs"), nil)
+	for _, fn := range configure {
+		fn(q)
+	}
 	qctx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
 	q.Start(qctx, 2)
@@ -308,6 +311,96 @@ func TestFailedBuildSurfacesInLog(t *testing.T) {
 	}
 	if again.AttemptCount != 1 {
 		t.Fatalf("attempt_count = %d, want 1", again.AttemptCount)
+	}
+}
+
+// removeCommittedManifest deletes preview.toml from the fixture repo and
+// returns its content for re-hosting in another source.
+func removeCommittedManifest(t *testing.T, src string) []byte {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(src, "preview.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "rm", "-q", "preview.toml")
+	runTestGit(t, src, "commit", "-qm", "drop preview.toml")
+	return content
+}
+
+func TestKanbanTableManifest(t *testing.T) {
+	src := newFixtureRepo(t)
+	content := removeCommittedManifest(t, src)
+	kanban := strings.NewReplacer(
+		"[frontend]", "[previews.frontend]",
+		"[backend]", "[previews.backend]",
+	).Replace(string(content))
+	if err := os.WriteFile(filepath.Join(src, ".kanban.toml"), []byte(kanban), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "add", ".kanban.toml")
+	runTestGit(t, src, "commit", "-qm", "host manifest in .kanban.toml")
+
+	e := newEnv(t, src, func(q *Queue) {
+		q.SetManifestRefs([]ManifestRef{
+			{Path: ManifestName},
+			{Path: ".kanban.toml", Table: "previews"},
+		})
+	})
+	d := e.deployAndWait(t, "main")
+	if d.FeHash == "" || d.BeHash == "" {
+		t.Fatalf("deploy from .kanban.toml [previews]: %+v", d)
+	}
+}
+
+func TestLocalManifestFallback(t *testing.T) {
+	src := newFixtureRepo(t)
+	content := removeCommittedManifest(t, src)
+	localDir := t.TempDir()
+
+	e := newEnv(t, src, func(q *Queue) {
+		q.SetManifestRefs([]ManifestRef{
+			{Path: ManifestName},
+			{Path: ".kanban.toml", Table: "previews"},
+		})
+		q.SetLocalManifestDir(localDir)
+	})
+
+	// No source anywhere yet: the deploy fails and the error names every
+	// location tried, including the local path.
+	row, err := e.q.RequestDeploy(context.Background(), "demo", "main", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	var got db.DeployRow
+	for {
+		got, err = e.db.GetDeployByID(row.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status == db.DeployFailed {
+			break
+		}
+		if got.Status == db.DeployReady || time.Now().After(deadline) {
+			t.Fatalf("expected failure, status=%s", got.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	localPath := filepath.Join(localDir, "demo.toml")
+	for _, want := range []string{"preview.toml", ".kanban.toml [previews]", localPath} {
+		if !strings.Contains(got.Error, want) {
+			t.Fatalf("error %q does not mention %s", got.Error, want)
+		}
+	}
+
+	// Drop the manifest into the local dir and retry: the failed deploy
+	// resets and builds from the out-of-repo manifest.
+	if err := os.WriteFile(localPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := e.deployAndWait(t, "main")
+	if d.FeHash == "" || d.BeHash == "" {
+		t.Fatalf("deploy from local manifest: %+v", d)
 	}
 }
 

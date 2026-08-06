@@ -63,8 +63,9 @@ type Queue struct {
 	logsDir string
 	runner  Runner
 
-	manifestRefs []ManifestRef
-	buildTimeout time.Duration
+	manifestRefs     []ManifestRef
+	localManifestDir string
+	buildTimeout     time.Duration
 	sf           singleflight.Group
 	work         chan int64
 
@@ -100,6 +101,14 @@ func (q *Queue) SetManifestRefs(refs []ManifestRef) {
 	if len(refs) > 0 {
 		q.manifestRefs = refs
 	}
+}
+
+// SetLocalManifestDir sets a directory searched for out-of-repo manifests
+// (<dir>/<repo>.toml, plain preview.toml schema) when no in-repo source
+// matches — onboarding a repo whose upstream can't carry a manifest. Call
+// before Start.
+func (q *Queue) SetLocalManifestDir(dir string) {
+	q.localManifestDir = dir
 }
 
 // Start launches n build workers and re-enqueues deploys interrupted by a
@@ -299,10 +308,12 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 }
 
 // loadManifest reads the first present manifest source at the deployed
-// commit. A missing file or table means "try the next source"; a present
-// but invalid manifest fails the deploy with its parse error.
+// commit, then falls back to the local manifest dir (<dir>/<repo>.toml,
+// read from the server's disk rather than the committed tree). A missing
+// file or table means "try the next source"; a present but invalid manifest
+// fails the deploy with its parse error.
 func (q *Queue) loadManifest(ctx context.Context, gr gitrepo.Repo, row db.DeployRow) (manifest.Manifest, error) {
-	tried := make([]string, 0, len(q.manifestRefs))
+	tried := make([]string, 0, len(q.manifestRefs)+1)
 	for _, ref := range q.manifestRefs {
 		tried = append(tried, ref.String())
 		raw, err := gr.ReadFile(ctx, row.SHA, ref.Path)
@@ -317,6 +328,17 @@ func (q *Queue) loadManifest(ctx context.Context, gr gitrepo.Repo, row db.Deploy
 			return manifest.Manifest{}, fmt.Errorf("%s: %w", ref, err)
 		}
 		return m, nil
+	}
+	if q.localManifestDir != "" {
+		local := filepath.Join(q.localManifestDir, row.RepoName+".toml")
+		tried = append(tried, local)
+		if raw, err := os.ReadFile(local); err == nil {
+			m, err := manifest.Parse(raw)
+			if err != nil {
+				return manifest.Manifest{}, fmt.Errorf("%s: %w", local, err)
+			}
+			return m, nil
+		}
 	}
 	return manifest.Manifest{}, fmt.Errorf(
 		"no preview manifest at %s (looked for %s) — is the repo onboarded?",

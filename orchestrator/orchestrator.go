@@ -90,6 +90,12 @@ type Options struct {
 	// the parsed manifest, not its location, so moving unchanged config
 	// between sources doesn't invalidate caches.
 	ManifestSources []ManifestSource
+	// LocalManifestDir, when set, is a directory searched for out-of-repo
+	// manifests (`<dir>/<repo>.toml`, plain preview.toml schema) when no
+	// in-repo source matches — onboarding repos whose upstream can't carry a
+	// manifest. The file is read from the server's disk at build time, not
+	// from the deployed commit.
+	LocalManifestDir string
 }
 
 // ManifestSource locates a preview manifest: a TOML file at the target
@@ -205,6 +211,9 @@ func New(opts Options) (*Orchestrator, error) {
 			refs[i] = build.ManifestRef{Path: s.Path, Table: s.Table}
 		}
 		queue.SetManifestRefs(refs)
+	}
+	if opts.LocalManifestDir != "" {
+		queue.SetLocalManifestDir(opts.LocalManifestDir)
 	}
 	queue.Start(ctx, opts.BuildConcurrency)
 

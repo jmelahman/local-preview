@@ -58,6 +58,23 @@ func Load(dataDirOverride, previewDomainOverride string) (Config, error) {
 	return Config{DataDir: abs, PreviewDomain: domain}, nil
 }
 
+// ManifestsDir returns the directory searched for local (out-of-repo)
+// preview manifests, `<config>/manifests/<repo>.toml`, where `<config>` is
+// $PREVIEW_CONFIG_DIR, else the platform config dir plus the app name
+// ($XDG_CONFIG_HOME/preview or ~/.config/preview on Linux). Returns "" when
+// no config dir is resolvable (e.g. no $HOME); the lookup is then disabled.
+func ManifestsDir() string {
+	root := os.Getenv("PREVIEW_CONFIG_DIR")
+	if root == "" {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			return ""
+		}
+		root = filepath.Join(base, appName)
+	}
+	return filepath.Join(root, "manifests")
+}
+
 // DBPath returns the SQLite database path inside the data directory.
 func (c Config) DBPath() string {
 	return filepath.Join(c.DataDir, appName+".db")

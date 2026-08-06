@@ -63,13 +63,20 @@ Two placeholders are substituted into every `run` argv element:
 | `{port}` | The loopback port assigned to this process — bind `127.0.0.1:{port}` |
 | `{state_dir}` | The artifact's mutable state directory (see [state lineage](/guide/concepts#state-follows-git-lineage)) |
 
-## Alternate locations (embedders)
+## Alternate locations
 
-Applications embedding the orchestrator can offer additional manifest
-locations via `Options.ManifestSources` — typically a table inside their own
-config file, so target repos need only one file. agentic-kanban, for
-example, accepts the same schema under a `[previews]` table in
-`.kanban.toml`:
+Sources are tried in order at each deployed commit; the standalone server
+looks for:
+
+1. `preview.toml` at the repo root
+2. a `[previews]` table in `.kanban.toml` (the agentic-kanban convention)
+3. a [local manifest](#local-manifests-repos-you-can-t-change) on the
+   server's machine
+
+Applications embedding the orchestrator can replace the in-repo list via
+`Options.ManifestSources` — typically a table inside their own config file,
+so target repos need only one file. agentic-kanban, for example, accepts the
+same schema under a `[previews]` table in `.kanban.toml`:
 
 ```toml
 [previews.frontend]
@@ -84,10 +91,29 @@ run         = ["./bin/server", "serve", "--addr", "127.0.0.1:{port}", "--data-di
 health_path = "/api/health"
 ```
 
-Sources are tried in order (`preview.toml` first, by convention) and the
-manifest is still always read from the committed tree. Artifact hashes cover
-the parsed manifest, not its location, so moving unchanged config between
-sources doesn't invalidate caches.
+In-repo sources are always read from the committed tree. Artifact hashes
+cover the parsed manifest, not its location, so moving unchanged config
+between sources doesn't invalidate caches.
+
+## Local manifests (repos you can't change)
+
+To onboard a repository without pushing anything upstream, put its manifest
+(plain `preview.toml` schema, no table) on the server's machine at:
+
+```
+~/.config/preview/manifests/<repo>.toml
+```
+
+where `<repo>` is the name the repo was registered under. The directory
+root honors `$PREVIEW_CONFIG_DIR` and `$XDG_CONFIG_HOME` (see
+[configuration](/guide/configuration#local-manifests)).
+
+The local file is the last source tried — a committed manifest always wins.
+Unlike in-repo sources it is read from disk at build time, not from the
+deployed commit, so every commit builds with the current local manifest and
+edits apply to the next build (use rebuild to pick them up for an
+already-ready deploy; artifact hashes cover the parsed manifest, so changes
+rebuild only the sides they touch).
 
 ## Build images
 

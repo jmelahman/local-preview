@@ -63,6 +63,11 @@ orchestrator.Options{
 Hashes cover the parsed manifest rather than its location, so relocating
 unchanged config busts no caches.
 
+`Options.LocalManifestDir` adds a last-resort out-of-repo source: when no
+in-repo source matches, `<dir>/<repo>.toml` (plain `preview.toml` schema) is
+read from the server's disk at build time — onboarding repos whose upstream
+can't carry a manifest.
+
 ## Custom build execution
 
 By default build steps exec on the host. Inject `Options.Runner` to run

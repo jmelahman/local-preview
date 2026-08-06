@@ -24,6 +24,19 @@ Inside it:
 | `logs/<repo>/` | Build logs (per artifact hash) and process run logs |
 | `tmp/` | Build scratch space; swept at startup |
 
+## Local manifests
+
+Repos that can't carry a `preview.toml` upstream can be onboarded with an
+out-of-repo manifest at `<config>/manifests/<repo>.toml`, where `<config>`
+resolves in order:
+
+1. `$PREVIEW_CONFIG_DIR`
+2. `$XDG_CONFIG_HOME/preview`
+3. `~/.config/preview`
+
+See [local manifests](/reference/preview-toml#local-manifests-repos-you-can-t-change)
+for lookup order and caching semantics.
+
 ## Flags
 
 | Flag | Default | Description |
@@ -39,6 +52,7 @@ Inside it:
 | Variable | Used by | Description |
 | --- | --- | --- |
 | `PREVIEW_DATA_DIR` | `preview serve` | Data directory override |
+| `PREVIEW_CONFIG_DIR` | `preview serve` | Config directory override (local manifests live in `manifests/` under it) |
 | `PREVIEW_DOMAIN` | `preview serve` | Preview base domain (an explicit `--preview-domain` flag wins) |
 | `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins) |
 | `PREVIEW_BACKEND` | `web/` dev server | Backend `host:port` the Vite proxy targets |
