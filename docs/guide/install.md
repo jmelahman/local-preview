@@ -52,23 +52,28 @@ The repo's `compose.yaml` gives the composed server what it needs to hand
   own filesystem, so the scratch paths the server passes it must mean the
   same thing on both sides — a named volume can't provide that.
 
-Rootful daemon — run as your host user, with the docker socket's group
-added so the server may use it:
+The service runs as container root so the default invocation just works —
+holding the docker socket is root-equivalent on the daemon anyway:
+
+```sh
+docker compose up -d
+```
+
+To keep the data dir's files owned by your host user instead, run
+non-root and grant the supplementary GID that owns the socket:
 
 ```sh
 mkdir -p ~/.local/share/local-preview
 DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock) \
+PREVIEW_UID=$(id -u) PREVIEW_GID=$(id -g) \
   docker compose up -d
 ```
 
-Rootless daemon — the socket lives in `$XDG_RUNTIME_DIR`, and container
-root maps to the daemon's host user, so run as `0:0` instead:
+Rootless daemon — point at the rootless socket; container root maps to
+your host user, so the default user is already right:
 
 ```sh
-mkdir -p ~/.local/share/local-preview
-DOCKER_SOCK_PATH=$XDG_RUNTIME_DIR/docker.sock \
-PREVIEW_UID=0 PREVIEW_GID=0 \
-  docker compose up -d
+DOCKER_SOCK_PATH=$XDG_RUNTIME_DIR/docker.sock docker compose up -d
 ```
 
 Repos registered by a local path (rather than a clone URL) must also be

@@ -15,19 +15,20 @@ services:
       args:
         VERSION: ${VERSION:-dev}
     restart: unless-stopped
-    # The image entrypoint runs as UID 65532 (nonroot). Override with the
-    # invoking host user so the bind-mounted data dir under $HOME stays
-    # writable, and grant the supplementary GID that owns the docker socket
-    # so build steps can run in manifest-declared images (preview.toml
-    # `image` keys). E.g.:
-    #   DOCKER_SOCK_GID=$(stat -c '%g' "${DOCKER_SOCK_PATH:-/var/run/docker.sock}") \
+    # Runs as container root so `docker compose up -d` works out of the
+    # box: the server needs the docker socket (mounted below) to run build
+    # steps in manifest-declared images (preview.toml `image` keys), and
+    # holding the socket is root-equivalent on the daemon anyway. To keep
+    # the data dir's files owned by your host user instead, run non-root
+    # and grant the supplementary GID that owns the socket:
+    #   mkdir -p ~/.local/share/local-preview
+    #   DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock) \
+    #   PREVIEW_UID=$(id -u) PREVIEW_GID=$(id -g) \
     #   docker compose up -d
-    # Rootless daemon: the socket lives in $XDG_RUNTIME_DIR, and container
-    # root maps to the daemon's host user, so run as 0:0 instead:
-    #   DOCKER_SOCK_PATH=$XDG_RUNTIME_DIR/docker.sock \
-    #   PREVIEW_UID=0 PREVIEW_GID=0 \
-    #   docker compose up -d
-    user: "${PREVIEW_UID:-1000}:${PREVIEW_GID:-1000}"
+    # Rootless daemon: point at the rootless socket — container root maps
+    # to your host user, so the default user is already right:
+    #   DOCKER_SOCK_PATH=$XDG_RUNTIME_DIR/docker.sock docker compose up -d
+    user: "${PREVIEW_UID:-0}:${PREVIEW_GID:-0}"
     group_add:
       - "${DOCKER_SOCK_GID:-0}"
     ports:

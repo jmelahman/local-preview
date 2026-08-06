@@ -41,7 +41,7 @@ Or with [Docker
 Compose](https://jmelahman.github.io/local-preview/guide/install):
 
 ```sh
-DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock) docker compose up -d
+docker compose up -d
 ```
 
 ## 📖 Documentation
