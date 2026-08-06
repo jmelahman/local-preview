@@ -46,5 +46,5 @@ exclude = [
   "Dockerfile",
 ]
 image   = "golang:1.26-alpine"
-build   = [["go", "build", "-o", "bin/preview", "."]]
+build   = [["go", "build", "-ldflags", "-s -w", "-o", "bin/preview", "."]]
 files   = ["bin/preview"]
