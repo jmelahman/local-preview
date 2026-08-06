@@ -58,6 +58,7 @@ func migrate(sqlDB *sql.DB) error {
 		{"deploys", "branch"},
 		{"deploys", "author_name"},
 		{"deploys", "author_email"},
+		{"backend_artifacts", "init_done_at"},
 	}
 	for _, a := range added {
 		var n int

@@ -9,6 +9,9 @@ type BackendArtifact struct {
 	ForkedFrom string
 	StateDir   string
 	RunConfig  string
+	// InitDoneAt is empty until the manifest's init steps have succeeded
+	// against this artifact's state dir (or forever, if none are declared).
+	InitDoneAt string
 	CreatedAt  string
 }
 
@@ -37,11 +40,21 @@ func (s *Store) UpdateBackendArtifactRunConfig(repoID int64, beHash, runConfig s
 func (s *Store) GetBackendArtifact(repoID int64, beHash string) (BackendArtifact, error) {
 	var a BackendArtifact
 	err := s.db.QueryRow(
-		`SELECT repo_id, be_hash, forked_from, state_dir, run_config, created_at
+		`SELECT repo_id, be_hash, forked_from, state_dir, run_config, init_done_at, created_at
 		 FROM backend_artifacts WHERE repo_id = ? AND be_hash = ?`, repoID, beHash,
-	).Scan(&a.RepoID, &a.BeHash, &a.ForkedFrom, &a.StateDir, &a.RunConfig, &a.CreatedAt)
+	).Scan(&a.RepoID, &a.BeHash, &a.ForkedFrom, &a.StateDir, &a.RunConfig, &a.InitDoneAt, &a.CreatedAt)
 	if err != nil {
 		return BackendArtifact{}, mapNoRows(err)
 	}
 	return a, nil
+}
+
+// MarkBackendInitDone records that the artifact's init steps completed
+// successfully; the supervisor skips init on every later start.
+func (s *Store) MarkBackendInitDone(repoID int64, beHash string) error {
+	_, err := s.db.Exec(
+		`UPDATE backend_artifacts
+		 SET init_done_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		 WHERE repo_id = ? AND be_hash = ?`, repoID, beHash)
+	return err
 }

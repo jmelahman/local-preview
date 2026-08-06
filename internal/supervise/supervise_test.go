@@ -34,7 +34,31 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "helper crashing on purpose")
 		os.Exit(3)
 	}
+	if i := slices.Index(os.Args, "--helper-init"); i >= 0 && i+2 < len(os.Args) {
+		os.Exit(runHelperInit(os.Args[i+1], os.Args[i+2]))
+	}
 	os.Exit(m.Run())
+}
+
+// runHelperInit appends one marker per invocation to <stateDir>/init-runs so
+// tests can count executions, then behaves per mode: "ok" succeeds, "fail"
+// always exits nonzero, "fail-once" fails only the first invocation, and
+// "sleep" hangs to trip the init timeout.
+func runHelperInit(stateDir, mode string) int {
+	runsFile := filepath.Join(stateDir, "init-runs")
+	prev, _ := os.ReadFile(runsFile)
+	os.WriteFile(runsFile, append(prev, 'x'), 0o644)
+	switch mode {
+	case "fail":
+		return 3
+	case "fail-once":
+		if len(prev) == 0 {
+			return 3
+		}
+	case "sleep":
+		time.Sleep(30 * time.Second)
+	}
+	return 0
 }
 
 func runHelperServer(portStr, stateDir string) {
@@ -104,6 +128,17 @@ func (f *fixture) provision(t *testing.T, beHash string, argv []string) {
 // provisionIdle is provision with an explicit idle_timeout.
 func (f *fixture) provisionIdle(t *testing.T, beHash string, argv []string, idle time.Duration) {
 	t.Helper()
+	f.provisionCfg(t, beHash, manifest.Backend{
+		Run:          argv,
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+		IdleTimeout:  manifest.Duration(idle),
+	})
+}
+
+// provisionCfg is provision with full control over the run config.
+func (f *fixture) provisionCfg(t *testing.T, beHash string, cfg manifest.Backend) {
+	t.Helper()
 	scratch, _, err := f.files.NewScratchDir("be")
 	if err != nil {
 		t.Fatal(err)
@@ -113,12 +148,6 @@ func (f *fixture) provisionIdle(t *testing.T, beHash string, argv []string, idle
 	}
 	if err := f.files.InitFreshStateDir("demo", beHash); err != nil {
 		t.Fatal(err)
-	}
-	cfg := manifest.Backend{
-		Run:          argv,
-		HealthPath:   "/api/health",
-		StartTimeout: manifest.Duration(10 * time.Second),
-		IdleTimeout:  manifest.Duration(idle),
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
@@ -131,6 +160,23 @@ func (f *fixture) provisionIdle(t *testing.T, beHash string, argv []string, idle
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// initRuns counts how many times the init helper ran against the state dir.
+func (f *fixture) initRuns(t *testing.T, beHash string) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(f.files.StateDirPath("demo", beHash), "init-runs"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatal(err)
+	}
+	return len(b)
+}
+
+func initArgv(t *testing.T, mode string) []string {
+	return []string{testExe(t), "--helper-init", "{state_dir}", mode}
 }
 
 func serverArgv(t *testing.T) []string {
@@ -230,6 +276,92 @@ func TestInstantCrashSurfaces(t *testing.T) {
 	}
 	if got := f.m.Status(BackendKey(f.repoID, "be-crash")); got != "idle" {
 		t.Fatalf("Status = %q", got)
+	}
+}
+
+func TestInitRunsOncePerArtifact(t *testing.T) {
+	f := newFixture(t)
+	f.provisionCfg(t, "be-init", manifest.Backend{
+		Init:         [][]string{initArgv(t, "ok")},
+		Run:          serverArgv(t),
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	})
+	ctx := context.Background()
+	k := BackendKey(f.repoID, "be-init")
+
+	if _, err := f.m.EnsureRunning(ctx, k, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if runs := f.initRuns(t, "be-init"); runs != 1 {
+		t.Fatalf("init runs after first start = %d, want 1", runs)
+	}
+	art, err := f.db.GetBackendArtifact(f.repoID, "be-init")
+	if err != nil || art.InitDoneAt == "" {
+		t.Fatalf("artifact after init = %+v, %v", art, err)
+	}
+
+	// A cold start of the same artifact must skip init.
+	f.m.Stop(k, "test")
+	port, err := f.m.EnsureRunning(ctx, k, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := get(t, port, "/api/health"); code != 200 {
+		t.Fatalf("health after cold start = %d", code)
+	}
+	if runs := f.initRuns(t, "be-init"); runs != 1 {
+		t.Fatalf("init runs after cold start = %d, want still 1", runs)
+	}
+}
+
+func TestInitFailureRetriesNextStart(t *testing.T) {
+	f := newFixture(t)
+	f.provisionCfg(t, "be-init-retry", manifest.Backend{
+		Init:         [][]string{initArgv(t, "fail-once")},
+		Run:          serverArgv(t),
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	})
+	ctx := context.Background()
+	k := BackendKey(f.repoID, "be-init-retry")
+
+	_, err := f.m.EnsureRunning(ctx, k, "demo")
+	if err == nil || !strings.Contains(err.Error(), "init") {
+		t.Fatalf("err = %v, want init failure", err)
+	}
+	if art, err := f.db.GetBackendArtifact(f.repoID, "be-init-retry"); err != nil || art.InitDoneAt != "" {
+		t.Fatalf("failed init must not be recorded done: %+v, %v", art, err)
+	}
+	if got := f.m.Status(k); got != "stopped" {
+		t.Fatalf("Status after init failure = %q", got)
+	}
+
+	// The next start attempt re-runs init, which now succeeds.
+	if _, err := f.m.EnsureRunning(ctx, k, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if runs := f.initRuns(t, "be-init-retry"); runs != 2 {
+		t.Fatalf("init runs = %d, want 2", runs)
+	}
+	if art, _ := f.db.GetBackendArtifact(f.repoID, "be-init-retry"); art.InitDoneAt == "" {
+		t.Fatal("init success was not recorded")
+	}
+}
+
+func TestInitTimeout(t *testing.T) {
+	f := newFixture(t)
+	f.provisionCfg(t, "be-init-slow", manifest.Backend{
+		Init:         [][]string{initArgv(t, "sleep")},
+		InitTimeout:  manifest.Duration(200 * time.Millisecond),
+		Run:          serverArgv(t),
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	})
+
+	_, err := f.m.EnsureRunning(context.Background(), BackendKey(f.repoID, "be-init-slow"), "demo")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want init timeout", err)
 	}
 }
 

@@ -113,14 +113,16 @@ func (c *Client) EnsureImage(ctx context.Context, image string, out io.Writer) e
 	}
 }
 
-// Step is one command run in a fresh container to completion.
+// Step is one command run in a fresh container to completion. Networks
+// names existing external networks the container joins before starting.
 type Step struct {
-	Image   string
-	Cmd     []string
-	WorkDir string
-	Env     []string
-	User    string
-	Binds   []string
+	Image    string
+	Cmd      []string
+	WorkDir  string
+	Env      []string
+	User     string
+	Binds    []string
+	Networks []string
 }
 
 // RunStep creates, runs, and removes a container for the step, streaming
@@ -159,6 +161,19 @@ func (c *Client) RunStep(ctx context.Context, step Step, out io.Writer) error {
 		defer cancel()
 		c.raw(rmCtx, "DELETE", "/containers/"+container.ID+"?force=1", nil) //nolint:errcheck
 	}()
+
+	for _, name := range step.Networks {
+		netID, ok, err := c.FindNetworkByName(ctx, name)
+		if err == nil && !ok {
+			err = fmt.Errorf("network %q not found — is the dependency stack running?", name)
+		}
+		if err != nil {
+			return fmt.Errorf("join network %q: %w", name, err)
+		}
+		if err := c.ConnectNetwork(ctx, netID, container.ID, nil); err != nil {
+			return fmt.Errorf("join network %q: %w", name, err)
+		}
+	}
 
 	if _, err := c.raw(ctx, "POST", "/containers/"+container.ID+"/start", nil); err != nil {
 		return fmt.Errorf("start build container: %w", err)

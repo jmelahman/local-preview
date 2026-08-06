@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS backend_artifacts (
     forked_from TEXT NOT NULL DEFAULT '',
     state_dir TEXT NOT NULL,
     run_config TEXT NOT NULL,
+    -- Set once the manifest's init steps have succeeded against this
+    -- artifact's state dir; empty means init is still owed (or none declared).
+    init_done_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     PRIMARY KEY (repo_id, be_hash)
 );

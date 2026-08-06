@@ -151,6 +151,39 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, argv, env []st
 	return nil
 }
 
+// runInitContainer runs one init step to completion inside the backend's
+// run_image — the same mounts, user, and external dependency networks as
+// the server container, so migrations reach whatever the server will. The
+// image pull gets its own timeout; ctx carries the init budget.
+func (m *Manager) runInitContainer(ctx context.Context, spec runSpec, argv, env []string, logFile *os.File) error {
+	pullCtx, cancel := context.WithTimeout(context.Background(), imagePullTimeout)
+	defer cancel()
+	cli, err := m.docker(pullCtx)
+	if err != nil {
+		return fmt.Errorf("run_image %q requires a docker daemon: %w", spec.runImage, err)
+	}
+	if err := cli.EnsureImage(pullCtx, spec.runImage, logFile); err != nil {
+		return err
+	}
+	user := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	if cli.Rootless() {
+		user = "0:0"
+	}
+	binds := []string{spec.dir + ":" + spec.dir}
+	if spec.stateDir != "" {
+		binds = append(binds, spec.stateDir+":"+spec.stateDir)
+	}
+	return cli.RunStep(ctx, dockerapi.Step{
+		Image:    spec.runImage,
+		Cmd:      argv,
+		WorkDir:  spec.dir,
+		Env:      append(env, "HOME=/tmp"),
+		User:     user,
+		Binds:    binds,
+		Networks: spec.networks,
+	}, logFile)
+}
+
 // networkName is the per-backend deploy network shared by a backend and
 // its process-mode frontend.
 func networkName(repo, beHash string) string {

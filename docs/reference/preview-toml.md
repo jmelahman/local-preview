@@ -62,10 +62,12 @@ must bind `{port}` — on all interfaces (`0.0.0.0`) when `run_image` is set.
 | `path` | yes | Subtree that defines the backend hash (minus `frontend.path` and `exclude`); build cwd; the built subtree becomes the artifact |
 | `exclude` | no | Patterns removed from the backend hash: `dir/` prefixes, or globs matched against the full path and basename (`*.md`) |
 | `build` | yes | Build steps as argv arrays |
+| `init` | no | Steps run once per backend artifact before its first `run` (see [Init commands](#init-commands)) |
 | `run` | yes | Command that starts the server, executed with the artifact directory as cwd |
 | `health_path` | yes | Path polled until it returns 200 after start |
 | `start_timeout` | no | How long the process gets to become healthy (default `20s`) |
 | `idle_timeout` | no | Idle period without proxied requests before the process is stopped (default `30m`) |
+| `init_timeout` | no | Total time budget for all `init` steps (default `2m`) |
 | `image` | no | Container image the build steps (not the server) run in (see [Build images](#build-images)) |
 | `run_image` | no | Container image the server process runs in (see [Runtime images](#runtime-images)) |
 | `env` | no | Environment variables for the process (see [Env placeholders](#env-placeholders)) |
@@ -99,6 +101,44 @@ deploys with the same hash (the same reason state dirs fork per artifact),
 so `POSTGRES_DB = "preview_{hash}"` gives isolation that follows artifact
 identity. `{backend_url}` requires `frontend.run` and both sides on the
 same runtime (both `run_image` or neither).
+
+### Init commands
+
+One-time setup — schema migrations, seed data — that shouldn't re-run on
+every cold start:
+
+```toml
+[backend]
+init = [["alembic", "upgrade", "head"]]
+run  = ["uvicorn", "app:app", "--port", "{port}"]
+```
+
+`init` steps run **once per backend artifact**, sequentially, with the
+artifact directory as cwd, after the artifact's state dir is provisioned and
+before its first `run`. Because artifacts are immutable and each one owns its
+state dir exclusively, a recorded success is final: later cold starts of the
+same artifact skip init entirely. A new backend hash is a new artifact, so
+its init runs again — against state [freshly forked](/guide/concepts#state-follows-git-lineage)
+from its ancestor, which is exactly when migrations have real work to do.
+
+No port is assigned until the server starts, so `{port}` in an init step is
+rejected at parse time and only `{state_dir}` is templated. Init sees the
+backend's `env` with `{state_dir}`, `{repo}`, and `{hash}` expanded;
+variables whose values reference `{port}` are omitted entirely rather than
+given a bogus value. All steps share one `init_timeout` budget (default
+`2m`), separate from `start_timeout` — the health-check window needs no
+padding for worst-case migration time.
+
+With `run_image` set, each init step runs to completion in a one-shot
+container using the same image, mounts, and external `networks` as the
+server container, so migrations reach whatever the server will.
+
+If a step fails or times out, the start attempt fails and the **next** start
+retries init from the first step — nothing is recorded until every step
+exits 0. Steps should therefore tolerate a partially-applied predecessor
+(alembic and most migration tools already do). Init output is written to the
+head of the run log, so the first cold start's log begins with migration
+output.
 
 ## Runtime images
 

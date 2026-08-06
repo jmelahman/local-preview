@@ -19,6 +19,7 @@ import (
 const (
 	DefaultStartTimeout = 20 * time.Second
 	DefaultIdleTimeout  = 30 * time.Minute
+	DefaultInitTimeout  = 2 * time.Minute
 )
 
 // Duration unmarshals from TOML strings like "20s" and round-trips through
@@ -98,13 +99,18 @@ type Frontend struct {
 // Run is templated with {port} and {state_dir} at process start; Env values
 // support {port}, {state_dir}, {repo}, and {hash}.
 type Backend struct {
-	Path         string     `toml:"path" json:"path"`
-	Exclude      []string   `toml:"exclude" json:"exclude,omitempty"`
-	Build        [][]string `toml:"build" json:"build"`
+	Path    string     `toml:"path" json:"path"`
+	Exclude []string   `toml:"exclude" json:"exclude,omitempty"`
+	Build   [][]string `toml:"build" json:"build"`
+	// Init steps run once per backend artifact — after its state dir is
+	// provisioned, before the first Run — with {state_dir} templated. No
+	// port exists yet, so {port} is rejected at parse time.
+	Init         [][]string `toml:"init" json:"init,omitempty"`
 	Run          []string   `toml:"run" json:"run"`
 	HealthPath   string     `toml:"health_path" json:"health_path"`
 	StartTimeout Duration   `toml:"start_timeout" json:"start_timeout,omitempty"`
 	IdleTimeout  Duration   `toml:"idle_timeout" json:"idle_timeout,omitempty"`
+	InitTimeout  Duration   `toml:"init_timeout" json:"init_timeout,omitempty"`
 	// Image, when set, runs the build steps (not the server) inside that
 	// container image instead of on the host.
 	Image string `toml:"image" json:"image,omitempty"`
@@ -216,6 +222,16 @@ func (m *Manifest) normalize() error {
 	if err := validateSteps("backend.build", m.Backend.Build); err != nil {
 		return err
 	}
+	for i, step := range m.Backend.Init {
+		if len(step) == 0 || step[0] == "" {
+			return fmt.Errorf("backend.init[%d] must be a non-empty argv array", i)
+		}
+		for _, arg := range step {
+			if strings.Contains(arg, "{port}") {
+				return fmt.Errorf("backend.init[%d]: {port} is not available during init (no port is assigned until the server starts)", i)
+			}
+		}
+	}
 	if len(m.Backend.Run) == 0 || m.Backend.Run[0] == "" {
 		return fmt.Errorf("backend.run is required")
 	}
@@ -227,6 +243,9 @@ func (m *Manifest) normalize() error {
 	}
 	if m.Backend.IdleTimeout <= 0 {
 		m.Backend.IdleTimeout = Duration(DefaultIdleTimeout)
+	}
+	if m.Backend.InitTimeout <= 0 {
+		m.Backend.InitTimeout = Duration(DefaultInitTimeout)
 	}
 	for _, r := range m.Backend.ExtraRoutes {
 		if !strings.HasPrefix(r, "/") {

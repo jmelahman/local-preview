@@ -62,6 +62,13 @@ Consequences:
 Before copying, the ancestor's process is briefly stopped so the copy is
 consistent; it cold-starts again on its next request.
 
+Apps that migrate at boot can declare
+[`init` commands](/reference/preview-toml#init-commands) instead of wedging
+migrations into `run`: they execute once per backend artifact, right when its
+state dir was forked from an older schema, and every later cold start skips
+them. Exclusive state-dir ownership is what makes the skip safe rather than
+an optimistic guess.
+
 ## Subdomain routing
 
 Every preview host is `<sha-prefix>.<repo>.<domain>`. Labels resolve by sha

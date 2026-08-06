@@ -52,6 +52,32 @@ func TestParseTimeouts(t *testing.T) {
 	}
 }
 
+func TestParseInit(t *testing.T) {
+	src := valid + "\ninit = [[\"alembic\", \"upgrade\", \"head\"], [\"./seed\", \"{state_dir}\"]]\ninit_timeout = \"90s\"\n"
+	m, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Backend.Init) != 2 || m.Backend.Init[0][0] != "alembic" {
+		t.Fatalf("init = %+v", m.Backend.Init)
+	}
+	if time.Duration(m.Backend.InitTimeout) != 90*time.Second {
+		t.Fatalf("init_timeout = %v, want 90s", m.Backend.InitTimeout)
+	}
+
+	// Init is optional, and its timeout defaults when omitted.
+	m, err = Parse([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Backend.Init != nil {
+		t.Fatalf("init = %+v, want none", m.Backend.Init)
+	}
+	if time.Duration(m.Backend.InitTimeout) != DefaultInitTimeout {
+		t.Fatalf("init_timeout default = %v", m.Backend.InitTimeout)
+	}
+}
+
 func TestParseAt(t *testing.T) {
 	// The manifest hosted as [previews.*] tables inside a larger config
 	// file, surrounded by foreign tables.
@@ -230,6 +256,14 @@ func TestParseErrors(t *testing.T) {
 		"bad health path": {
 			func(s string) string { return strings.Replace(s, `health_path = "/api/health"`, `health_path = "api/health"`, 1) },
 			"health_path",
+		},
+		"empty init step": {
+			func(s string) string { return s + "\ninit = [[]]\n" },
+			"backend.init[0] must be a non-empty argv array",
+		},
+		"port in init": {
+			func(s string) string { return s + "\ninit = [[\"./migrate\", \"--port\", \"{port}\"]]\n" },
+			"{port} is not available during init",
 		},
 		"empty build step": {
 			func(s string) string {

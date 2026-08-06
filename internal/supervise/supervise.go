@@ -244,6 +244,11 @@ type runSpec struct {
 	dir          string // artifact dir: host cwd, or container bind + workdir
 	stateDir     string // backend only
 	networks     []string
+
+	// Backend init contract: one-time steps owed before the first run.
+	init        [][]string
+	initTimeout time.Duration
+	initDone    bool
 }
 
 // Stored run_config shapes: the manifest section plus the top-level
@@ -298,6 +303,9 @@ func (m *Manager) loadRunSpec(k Key, repoName string) (runSpec, error) {
 		dir:          m.files.BackendDir(repoName, k.Hash),
 		stateDir:     art.StateDir,
 		networks:     cfg.Networks,
+		init:         cfg.Init,
+		initTimeout:  time.Duration(cfg.InitTimeout),
+		initDone:     art.InitDoneAt != "",
 	}, nil
 }
 
@@ -309,10 +317,10 @@ func idleOrDefault(d time.Duration) time.Duration {
 	return d
 }
 
-// start runs the full start sequence: load run config, probe a port, exec
-// (host or container), health-poll. It owns its own timeout and runs
-// detached from any request context. Exactly one start goroutine exists
-// per tracked process.
+// start runs the full start sequence: load run config, run init steps if
+// the artifact still owes them, probe a port, exec (host or container),
+// health-poll. It owns its own timeouts and runs detached from any request
+// context. Exactly one start goroutine exists per tracked process.
 func (m *Manager) start(k Key, p *process) {
 	lock := m.keyLock(k)
 	lock.Lock()
@@ -358,18 +366,38 @@ func (m *Manager) start(k Key, p *process) {
 		}
 	}
 
-	port, err := probeFreePort()
-	if err != nil {
-		fail("start_attempt", err)
-		return
-	}
-	p.port = port
-
 	logFile, err := m.openRunLog(p.repoName, string(k.Side)+"-"+k.Hash)
 	if err != nil {
 		fail("start_attempt", err)
 		return
 	}
+
+	// Init runs at most once per backend artifact: the artifact's code is
+	// immutable and nothing else writes its state dir, so a recorded success
+	// holds for every later cold start. A failure leaves init_done_at unset
+	// and the next start attempt retries from the first step.
+	if k.Side == SideBackend && len(spec.init) > 0 && !spec.initDone {
+		m.db.AddProcessEvent(k.RepoID, k.Hash, "init_attempt", fmt.Sprintf("%d steps", len(spec.init)))
+		if err := m.runInit(k, p.repoName, spec, logFile); err != nil {
+			logFile.Close()
+			fail("init_failed", err)
+			return
+		}
+		if err := m.db.MarkBackendInitDone(k.RepoID, k.Hash); err != nil {
+			logFile.Close()
+			fail("init_failed", fmt.Errorf("record init success: %w", err))
+			return
+		}
+		m.db.AddProcessEvent(k.RepoID, k.Hash, "init_done", "")
+	}
+
+	port, err := probeFreePort()
+	if err != nil {
+		logFile.Close()
+		fail("start_attempt", err)
+		return
+	}
+	p.port = port
 
 	argv := templateArgv(spec.argv, port, spec.stateDir)
 	envPairs := expandEnv(spec.env, p.repoName, k.Hash, port, spec.stateDir, backendURL)
@@ -542,6 +570,64 @@ func envReferences(env map[string]string, placeholder string) bool {
 		}
 	}
 	return false
+}
+
+// runInit executes the backend's init steps sequentially — on the host, or
+// under run_image in one-shot containers with the same mounts and external
+// networks as the server — streaming output into the run log so init output
+// leads the first cold start's log. Only {state_dir} is templated in argv (no
+// port exists yet), and env vars referencing {port} are omitted for the same
+// reason. The timeout spans all steps together.
+func (m *Manager) runInit(k Key, repoName string, spec runSpec, logFile *os.File) error {
+	timeout := spec.initTimeout
+	if timeout <= 0 {
+		timeout = manifest.DefaultInitTimeout
+	}
+	env := initEnv(spec.env, repoName, k.Hash, spec.stateDir)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for _, step := range spec.init {
+		argv := make([]string, len(step))
+		for i, a := range step {
+			argv[i] = strings.ReplaceAll(a, "{state_dir}", spec.stateDir)
+		}
+		fmt.Fprintf(logFile, "[init] %s\n", strings.Join(argv, " "))
+		var err error
+		if spec.runImage != "" {
+			err = m.runInitContainer(ctx, spec, argv, env, logFile)
+		} else {
+			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+			cmd.Dir = spec.dir
+			cmd.Stdout = logFile
+			cmd.Stderr = logFile
+			cmd.Env = append(os.Environ(), env...)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.Cancel = func() error {
+				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+			err = cmd.Run()
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("init %q: timed out after %s", strings.Join(step, " "), timeout)
+			}
+			return fmt.Errorf("init %q: %w (see run log)", strings.Join(step, " "), err)
+		}
+	}
+	return nil
+}
+
+// initEnv renders the manifest env for init steps. No port is assigned at
+// init time, so variables referencing {port} are omitted entirely rather
+// than given a bogus value.
+func initEnv(env map[string]string, repo, hash, stateDir string) []string {
+	filtered := make(map[string]string, len(env))
+	for k, v := range env {
+		if !strings.Contains(v, "{port}") {
+			filtered[k] = v
+		}
+	}
+	return expandEnv(filtered, repo, hash, 0, stateDir, "")
 }
 
 func isExited(p *process) bool {

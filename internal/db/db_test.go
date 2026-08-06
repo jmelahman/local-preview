@@ -26,6 +26,46 @@ func TestOpenFile(t *testing.T) {
 	defer store.Close()
 }
 
+// TestOpenMigratesOldSchema opens a database whose backend_artifacts table
+// predates the init_done_at column and expects Open's migrations to add it.
+func TestOpenMigratesOldSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`CREATE TABLE backend_artifacts (
+		repo_id INTEGER NOT NULL,
+		be_hash TEXT NOT NULL,
+		forked_from TEXT NOT NULL DEFAULT '',
+		state_dir TEXT NOT NULL,
+		run_config TEXT NOT NULL,
+		created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+		PRIMARY KEY (repo_id, be_hash)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(
+		`INSERT INTO backend_artifacts (repo_id, be_hash, state_dir, run_config) VALUES (1, 'be1', '/state', '{}')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a, err := s.GetBackendArtifact(1, "be1")
+	if err != nil || a.InitDoneAt != "" {
+		t.Fatalf("migrated artifact = %+v, %v", a, err)
+	}
+	if err := s.MarkBackendInitDone(1, "be1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRepoCRUD(t *testing.T) {
 	s := newTestStore(t)
 
@@ -274,6 +314,17 @@ func TestBackendArtifactsAndProcesses(t *testing.T) {
 	}
 	if _, err := s.GetBackendArtifact(r.ID, "nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing artifact err = %v", err)
+	}
+
+	if got.InitDoneAt != "" {
+		t.Fatalf("InitDoneAt before mark = %q, want empty", got.InitDoneAt)
+	}
+	if err := s.MarkBackendInitDone(r.ID, "be1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetBackendArtifact(r.ID, "be1")
+	if err != nil || got.InitDoneAt == "" {
+		t.Fatalf("after MarkBackendInitDone: %+v, %v", got, err)
 	}
 
 	rec := ProcessRecord{RepoID: r.ID, BeHash: "be1", PID: 123, PGID: 123, Port: 40001}
