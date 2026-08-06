@@ -105,7 +105,7 @@ func TestContainerBackendLifecycle(t *testing.T) {
 	}
 
 	f.m.Stop(k, "test")
-	if got := f.m.Status(k); got != "stopped" {
+	if got := f.m.Status(k); got != "idle" {
 		t.Fatalf("status after stop = %q", got)
 	}
 	// The container is removed, not just stopped.

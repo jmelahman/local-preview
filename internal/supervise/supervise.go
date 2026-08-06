@@ -681,13 +681,14 @@ func (m *Manager) StopRepo(repoID int64, reason string) {
 }
 
 // Status reports the runtime state of an artifact's process for API views:
-// "running", "starting", or "stopped".
+// "running", "starting", or "idle" (not running; a start is one request
+// away).
 func (m *Manager) Status(k Key) string {
 	m.mu.Lock()
 	p := m.procs[k]
 	m.mu.Unlock()
 	if p == nil {
-		return "stopped"
+		return "idle"
 	}
 	select {
 	case <-p.ready:

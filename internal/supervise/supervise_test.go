@@ -178,7 +178,7 @@ func TestEnsureRunningReuseAndStop(t *testing.T) {
 	}
 
 	f.m.Stop(BackendKey(f.repoID, "be-run"), "test")
-	if got := f.m.Status(BackendKey(f.repoID, "be-run")); got != "stopped" {
+	if got := f.m.Status(BackendKey(f.repoID, "be-run")); got != "idle" {
 		t.Fatalf("Status after stop = %q", got)
 	}
 	recs, _ = f.db.ListProcessRecords()
@@ -204,7 +204,7 @@ func TestOutOfBandKillRecovers(t *testing.T) {
 
 	// The reaper notices and clears state; a new EnsureRunning restarts.
 	deadline := time.Now().Add(5 * time.Second)
-	for f.m.Status(BackendKey(f.repoID, "be-kill")) != "stopped" {
+	for f.m.Status(BackendKey(f.repoID, "be-kill")) != "idle" {
 		if time.Now().After(deadline) {
 			t.Fatal("kill was not detected")
 		}
@@ -228,7 +228,7 @@ func TestInstantCrashSurfaces(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exited") {
 		t.Fatalf("err = %v, want exit error", err)
 	}
-	if got := f.m.Status(BackendKey(f.repoID, "be-crash")); got != "stopped" {
+	if got := f.m.Status(BackendKey(f.repoID, "be-crash")); got != "idle" {
 		t.Fatalf("Status = %q", got)
 	}
 }
@@ -281,7 +281,7 @@ func TestIdleReap(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Untouched past its idle_timeout → the reaper stops it.
-	f.waitStatus(t, k, "stopped")
+	f.waitStatus(t, k, "idle")
 }
 
 func TestLRUWarmCap(t *testing.T) {
@@ -305,7 +305,7 @@ func TestLRUWarmCap(t *testing.T) {
 	}
 	// Beyond max-warm 1 the least-recently-used backend stops; the newer
 	// one survives.
-	f.waitStatus(t, kOld, "stopped")
+	f.waitStatus(t, kOld, "idle")
 	if got := f.m.Status(kNew); got != "running" {
 		t.Fatalf("newer backend = %q, want running", got)
 	}
@@ -359,8 +359,8 @@ func TestForkOrInitStateDir(t *testing.T) {
 	if err := f.m.ForkOrInitStateDir(ctx, repo, f.repoID, "demo", "be2", c2, string(cfg)); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.m.Status(BackendKey(f.repoID, "be1")); got != "stopped" {
-		t.Fatalf("ancestor status after fork = %q, want stopped (quiesced)", got)
+	if got := f.m.Status(BackendKey(f.repoID, "be1")); got != "idle" {
+		t.Fatalf("ancestor status after fork = %q, want idle (quiesced)", got)
 	}
 	forked, err := os.ReadFile(filepath.Join(f.files.StateDirPath("demo", "be2"), "count"))
 	if err != nil {

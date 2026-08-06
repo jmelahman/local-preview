@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { api, type DeployStatus, type Repo } from "@/api/client";
+import { api, type Deploy, type DeployStatus, type ProcessState, type Repo } from "@/api/client";
 
 const THEME_KEY = "app.themeMode";
 type Theme = "light" | "dark";
@@ -59,22 +59,72 @@ function ThemeToggle() {
   );
 }
 
-const statusStyles: Record<DeployStatus, { dot: string; pill: string }> = {
-  queued: { dot: "bg-fg-muted", pill: "border-border text-fg-muted" },
-  building: { dot: "animate-pulse bg-warning", pill: "border-warning/30 text-warning" },
-  ready: { dot: "bg-success", pill: "border-success/30 text-success" },
-  failed: { dot: "bg-danger", pill: "border-danger/30 text-danger" },
-  evicted: { dot: "bg-fg-muted/50", pill: "border-border text-fg-muted/70 line-through" },
+// A deploy's displayed state: the build status until it's ready, then the
+// merged runtime state of its supervised processes (backend and, for
+// process-mode frontends, the frontend) — starting while any side warms
+// up, running only once every side is warm, idle otherwise.
+type DeployState = DeployStatus | ProcessState;
+
+function deployState(d: Deploy): DeployState {
+  if (d.status !== "ready") return d.status;
+  const procs = [d.process, d.fe_process].filter((p): p is ProcessState => p != null);
+  if (procs.length === 0) return d.status;
+  if (procs.includes("starting")) return "starting";
+  return procs.every((p) => p === "running") ? "running" : "idle";
+}
+
+const stateStyles: Record<DeployState, { dot: string; pill: string; hint: string }> = {
+  queued: {
+    dot: "bg-fg-muted",
+    pill: "border-border text-fg-muted",
+    hint: "Waiting for a build slot",
+  },
+  building: {
+    dot: "animate-pulse bg-warning",
+    pill: "border-warning/30 text-warning",
+    hint: "Build in progress",
+  },
+  ready: {
+    dot: "bg-success",
+    pill: "border-success/30 text-success",
+    hint: "Static preview — served instantly",
+  },
+  idle: {
+    dot: "bg-success/40",
+    pill: "border-success/20 text-success/70",
+    hint: "Built — starts on the first request",
+  },
+  starting: {
+    dot: "animate-pulse bg-success",
+    pill: "border-success/30 text-success",
+    hint: "Starting up",
+  },
+  running: {
+    dot: "bg-success",
+    pill: "border-success/30 text-success",
+    hint: "Warm — served instantly",
+  },
+  failed: {
+    dot: "bg-danger",
+    pill: "border-danger/30 text-danger",
+    hint: "Build failed",
+  },
+  evicted: {
+    dot: "bg-fg-muted/50",
+    pill: "border-border text-fg-muted/70 line-through",
+    hint: "Artifacts were cleaned up — redeploy to rebuild",
+  },
 };
 
-function StatusBadge({ status }: { status: DeployStatus }) {
-  const s = statusStyles[status];
+function StatusBadge({ state }: { state: DeployState }) {
+  const s = stateStyles[state];
   return (
     <span
+      title={s.hint}
       className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium ${s.pill}`}
     >
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dot}`} />
-      {status}
+      {state}
     </span>
   );
 }
@@ -308,9 +358,18 @@ export default function App() {
   const deploys = useQuery({
     queryKey: ["deploys"],
     queryFn: api.listDeploys,
-    // Poll while anything is in flight so status flips surface promptly.
+    // Poll while anything is in flight (builds or cold starts) so state
+    // flips surface promptly.
     refetchInterval: (query) =>
-      query.state.data?.some((d) => d.status === "queued" || d.status === "building") ? 1000 : 5000,
+      query.state.data?.some(
+        (d) =>
+          d.status === "queued" ||
+          d.status === "building" ||
+          d.process === "starting" ||
+          d.fe_process === "starting",
+      )
+        ? 1000
+        : 5000,
   });
 
   const hasRepos = (repos.data?.length ?? 0) > 0;
@@ -385,11 +444,8 @@ export default function App() {
             <ul className="divide-y divide-border">
               {deploys.data?.map((d) => {
                 const artifacts = [
-                  d.fe_hash
-                    ? `fe:${d.fe_hash.slice(0, 8)}${d.fe_process ? ` (${d.fe_process})` : ""}`
-                    : null,
+                  d.fe_hash ? `fe:${d.fe_hash.slice(0, 8)}` : null,
                   d.be_hash ? `be:${d.be_hash.slice(0, 8)}` : null,
-                  d.process ? `(${d.process})` : null,
                 ]
                   .filter(Boolean)
                   .join(" ");
@@ -398,7 +454,7 @@ export default function App() {
                     key={d.id}
                     className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-3 py-3 transition-colors hover:bg-surface-2/40"
                   >
-                    <StatusBadge status={d.status} />
+                    <StatusBadge state={deployState(d)} />
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                         <span className="text-sm font-medium">{d.repo}</span>

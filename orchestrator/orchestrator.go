@@ -135,7 +135,7 @@ type Deploy struct {
 	// PreviewURL is set once the deploy is ready.
 	PreviewURL string `json:"preview_url,omitempty"`
 	// Process is the live backend state when ready: running, starting, or
-	// stopped (backends start on demand). FeProcess is the same for a
+	// idle (backends start on demand). FeProcess is the same for a
 	// process-mode frontend, absent for static frontends.
 	Process   string `json:"process,omitempty"`
 	FeProcess string `json:"fe_process,omitempty"`

@@ -67,8 +67,8 @@ and click **Deploy**.
 <img class="dark-only" src="/quickstart-03-deploy-dark.png" alt="Deploy a commit" />
 
 The deployment appears in the list below and moves from `queued` through
-`building` to `ready`. The dashboard polls while a build is running, so
-there's nothing to refresh.
+`building` to `idle` — built and served on demand. The dashboard polls
+while a build is running, so there's nothing to refresh.
 
 From inside the target repo, the CLI can do the same and waits for the
 result:
@@ -84,7 +84,7 @@ ready: http://d9ebf14.myapp.preview.localhost:8080/
 
 ## 5. Open the preview
 
-Once the deployment is `ready`, the row grows an **open** link:
+Once the build finishes, the row grows an **open** link:
 
 <img class="light-only" src="/quickstart-04-ready-light.png" alt="A ready deployment" />
 <img class="dark-only" src="/quickstart-04-ready-dark.png" alt="A ready deployment" />
@@ -93,12 +93,13 @@ It leads to `http://d9ebf14.myapp.preview.localhost:8080/` — every commit
 gets a subdomain of the form `<sha>.<repo>`, and browsers resolve
 `*.localhost` names without any DNS setup.
 
-The frontend is served statically. The backend process is the `(stopped)`
-in the row above: it isn't started by the build, but by the first request
-that hits the preview's `/api/`. Open the preview, and the row reads
-`(running)`. The row also shows the two artifact hashes the commit resolved
-to — deploy a docs-only commit and you'll see both hashes stay the same and
-the build finish instantly.
+The frontend is served statically. The backend process is why the badge
+reads `idle` rather than `running`: it isn't started by the build, but by
+the first request that hits the preview's `/api/` — expect a brief warm-up
+on that first visit. Open the preview, and the badge flips to `running`;
+from then on requests are served instantly. The row also shows the two
+artifact hashes the commit resolved to — deploy a docs-only commit and
+you'll see both hashes stay the same and the build finish instantly.
 
 ## 6. Deploy every commit
 

@@ -20,6 +20,10 @@ export type Repo = {
 
 export type DeployStatus = "queued" | "building" | "ready" | "failed" | "evicted";
 
+// Live runtime state of a supervised process, present on ready deploys:
+// `process` for the backend, `fe_process` for process-mode frontends.
+export type ProcessState = "idle" | "starting" | "running";
+
 export type Deploy = {
   id: number;
   repo: string;
@@ -35,8 +39,8 @@ export type Deploy = {
   error?: string;
   attempt_count: number;
   preview_url?: string;
-  process?: string;
-  fe_process?: string;
+  process?: ProcessState;
+  fe_process?: ProcessState;
   created_at: string;
   updated_at: string;
 };

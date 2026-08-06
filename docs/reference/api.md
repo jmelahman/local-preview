@@ -84,10 +84,11 @@ for an unresolvable ref.
 
 `status` is one of `queued`, `building`, `ready`, `failed`, `evicted`. Ready
 deploys additionally carry `preview_url` and `process` (the live backend
-state: `running`, `starting`, or `stopped` — backends start on demand), and
-`fe_process` (same states) when the frontend is a
+state: `running` means warm, `starting` means a start is in flight, and
+`idle` means the process will start on the first request — processes start
+on demand), and `fe_process` (same states) when the frontend is a
 [process](/reference/preview-toml#process-mode-frontends) rather than a
-static bundle.
+static bundle. Deploys with no backend never carry `process`.
 
 `ref` is what the deploy request asked for (empty when it was a sha);
 `branch`, `author_name`, and `author_email` are captured from git when the

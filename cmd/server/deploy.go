@@ -206,9 +206,37 @@ func runDeployList(ctx context.Context, url string, out io.Writer, f client.Depl
 			url = "-"
 		}
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			d.ID, d.Repo, d.ShortSHA, orDash(d.Branch), orDash(d.AuthorName), d.Status, url)
+			d.ID, d.Repo, d.ShortSHA, orDash(d.Branch), orDash(d.AuthorName), displayState(d), url)
 	}
 	return tw.Flush()
+}
+
+// displayState is the state a human should see: the build status, or for
+// ready deploys with supervised processes the merged runtime state —
+// starting while any side warms up, running only once every side is warm,
+// idle otherwise (a cold start awaits the first request).
+func displayState(d client.Deploy) string {
+	if d.Status != "ready" {
+		return d.Status
+	}
+	warm := true
+	seen := false
+	for _, p := range []string{d.Process, d.FeProcess} {
+		switch p {
+		case "starting":
+			return "starting"
+		case "idle", "running":
+			seen = true
+			warm = warm && p == "running"
+		}
+	}
+	if !seen {
+		return d.Status
+	}
+	if warm {
+		return "running"
+	}
+	return "idle"
 }
 
 func orDash(s string) string {

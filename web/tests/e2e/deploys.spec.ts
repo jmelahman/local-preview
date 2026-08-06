@@ -73,10 +73,11 @@ test("register, deploy, and open a preview", async ({ page }) => {
 
   // Dashboard lists the deploy with a preview link and the commit's
   // metadata: the branch is derived even for this deploy-by-sha, and the
-  // author comes from the fixture commit.
+  // author comes from the fixture commit. The backend hasn't been hit yet,
+  // so the badge shows the cold state.
   await page.goto("/");
   await expect(page.getByText(latest.short_sha)).toBeVisible();
-  await expect(page.getByText("ready", { exact: true })).toBeVisible();
+  await expect(page.getByText("idle", { exact: true })).toBeVisible();
   await expect(page.getByText("main", { exact: true })).toBeVisible();
   await expect(page.getByText("by e2e")).toBeVisible();
   await expect(page.getByRole("link", { name: /open/ })).toBeVisible();
@@ -91,4 +92,8 @@ test("register, deploy, and open a preview", async ({ page }) => {
   expect(health).toBe("ok");
   const counter = await page.evaluate(() => fetch("/api/counter").then((r) => r.text()));
   expect(counter).toBe("1");
+
+  // Back on the dashboard the deploy now shows as warm.
+  await page.goto("/");
+  await expect(page.getByText("running", { exact: true })).toBeVisible();
 });
