@@ -60,4 +60,4 @@ services:
       - ${XDG_CONFIG_HOME:-${HOME}/.config}/preview:${XDG_CONFIG_HOME:-${HOME}/.config}/preview:ro
       # Repos registered by local path must be visible in-container at the
       # registered path, e.g.:
-      - ${HOME}/code/local-preview:/code/local-preview:ro
+      - ./:/code/local-preview:ro
