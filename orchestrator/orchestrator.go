@@ -561,10 +561,8 @@ func (o *Orchestrator) toDeploy(row db.DeployRow) Deploy {
 		if row.BeHash != "" {
 			d.Process = o.super.Status(supervise.BackendKey(row.RepoID, row.BeHash))
 		}
-		if row.FeHash != "" {
-			if _, err := o.database.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
-				d.FeProcess = o.super.Status(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
-			}
+		if row.FeHash != "" && row.HasFeProcess {
+			d.FeProcess = o.super.Status(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
 		}
 		for _, name := range slices.Sorted(maps.Keys(row.Artifacts)) {
 			art := DeployArtifact{Name: name, Hash: row.Artifacts[name].Hash, Files: []ArtifactFile{}}

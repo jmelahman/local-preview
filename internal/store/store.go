@@ -12,8 +12,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
+
+// artifactListTTL bounds staleness of cached artifact listings. A published
+// artifact directory never changes (content-addressed, landed by rename), so
+// the TTL only bounds how long a listing can outlive eviction of its
+// directory — it exists so deploy list views don't re-walk every artifact
+// directory on every poll.
+const artifactListTTL = 10 * time.Second
 
 // Store manages artifacts under artifactsDir, state under stateDir, and
 // staging under tmpDir. All three must live on the same filesystem so
@@ -22,11 +30,24 @@ type Store struct {
 	artifactsDir string
 	stateDir     string
 	tmpDir       string
+
+	mu       sync.Mutex
+	artLists map[string]artListEntry
+}
+
+type artListEntry struct {
+	files   []ArtifactFile
+	expires time.Time
 }
 
 // New returns a Store over the three roots (created lazily).
 func New(artifactsDir, stateDir, tmpDir string) *Store {
-	return &Store{artifactsDir: artifactsDir, stateDir: stateDir, tmpDir: tmpDir}
+	return &Store{
+		artifactsDir: artifactsDir,
+		stateDir:     stateDir,
+		tmpDir:       tmpDir,
+		artLists:     map[string]artListEntry{},
+	}
 }
 
 // FrontendDir returns the artifact path for a frontend hash.
@@ -131,8 +152,20 @@ type ArtifactFile struct {
 }
 
 // ListArtifactFiles returns a published artifact's files sorted by name; nil
-// when the artifact directory doesn't exist (unbuilt or evicted).
+// when the artifact directory doesn't exist (unbuilt or evicted). Listings
+// are served from a short-TTL cache: published directories are immutable, so
+// a hit is always accurate for a directory that still exists, and a missing
+// directory (never cached) is re-probed every call so files appear as soon
+// as the artifact publishes. Callers must not mutate the returned slice.
 func (s *Store) ListArtifactFiles(repo, hash string) []ArtifactFile {
+	key := repo + "\x00" + hash
+	s.mu.Lock()
+	if e, ok := s.artLists[key]; ok && time.Now().Before(e.expires) {
+		s.mu.Unlock()
+		return e.files
+	}
+	s.mu.Unlock()
+
 	entries, err := os.ReadDir(s.ArtifactDir(repo, hash))
 	if err != nil {
 		return nil
@@ -145,6 +178,9 @@ func (s *Store) ListArtifactFiles(repo, hash string) []ArtifactFile {
 		}
 		out = append(out, ArtifactFile{Name: e.Name(), Size: info.Size()})
 	}
+	s.mu.Lock()
+	s.artLists[key] = artListEntry{files: out, expires: time.Now().Add(artifactListTTL)}
+	s.mu.Unlock()
 	return out
 }
 

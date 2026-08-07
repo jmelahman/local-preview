@@ -838,6 +838,19 @@ func TestRepoWatchEndpoints(t *testing.T) {
 	}
 }
 
+func TestListDeploysLimitParam(t *testing.T) {
+	mux, _ := newTestMux(t)
+	for _, bad := range []string{"abc", "0", "-1", "1.5"} {
+		if rec := doJSON(t, mux, "GET", "/api/deploys?limit="+bad, ""); rec.Code != http.StatusBadRequest {
+			t.Errorf("limit=%s: %d, want 400", bad, rec.Code)
+		}
+	}
+	rec := doJSON(t, mux, "GET", "/api/deploys?limit=5", "")
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("limit=5 on empty instance: %d %s, want 200 []", rec.Code, rec.Body)
+	}
+}
+
 func TestUnknownAPIPathIs404(t *testing.T) {
 	mux, _ := newTestMux(t)
 	rec := doJSON(t, mux, "GET", "/api/nope", "")

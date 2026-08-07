@@ -170,10 +170,12 @@ export type GCResult = {
 
 // Narrows GET /api/deploys; empty fields don't filter. q is a free-text
 // search matching a commit-sha prefix or a substring of the repo, branch,
-// ref, or author (case-insensitive); status matches the build status exactly.
+// ref, or author (case-insensitive); status matches the build status
+// exactly; limit caps the response to the newest n deploys.
 export type DeployFilter = {
   q?: string;
   status?: DeployStatus | "";
+  limit?: number;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -219,6 +221,7 @@ export const api = {
     const params = new URLSearchParams();
     if (filter?.q) params.set("q", filter.q);
     if (filter?.status) params.set("status", filter.status);
+    if (filter?.limit) params.set("limit", String(filter.limit));
     const qs = params.toString();
     return request<Deploy[]>(`/api/deploys${qs ? `?${qs}` : ""}`);
   },
