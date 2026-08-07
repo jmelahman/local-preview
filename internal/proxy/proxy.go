@@ -273,6 +273,14 @@ func matchesRoute(routes []string, path string) bool {
 // serveStatic serves the frontend artifact with SPA fallback, mirroring the
 // embedded-dashboard handler's behavior but rooted at a disk directory.
 func (rt *Router) serveStatic(w http.ResponseWriter, r *http.Request, repoName, feHash string) {
+	// Explicit revalidation instead of heuristic freshness: previews are
+	// content-addressed, but the URL only carries the commit sha — a
+	// --rebuild of the same sha can change file contents under the same
+	// URL, so nothing here may be marked immutable (target repos also
+	// aren't guaranteed to content-hash their asset names). no-cache keeps
+	// every response a cheap 304 via the files' Last-Modified until the
+	// artifact really changes.
+	w.Header().Set("Cache-Control", "no-cache")
 	root := http.Dir(rt.files.FrontendDir(repoName, feHash))
 	fileServer := http.FileServer(root)
 	p := strings.TrimPrefix(r.URL.Path, "/")

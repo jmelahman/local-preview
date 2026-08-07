@@ -178,7 +178,7 @@ func run(opts serveOptions) error {
 
 	srv := &http.Server{
 		Addr:              opts.addr,
-		Handler:           recoverPanics(logRequests(router)),
+		Handler:           recoverPanics(logRequests(compressResponses(router))),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

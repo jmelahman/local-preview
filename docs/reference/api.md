@@ -4,6 +4,15 @@ All endpoints are JSON over HTTP, rooted at `/api/` on the apex host (any
 Host that isn't a preview subdomain). Errors return a JSON body of the form
 `{"error": "message"}`.
 
+Responses larger than 1&nbsp;KiB are gzipped when the client sends
+`Accept-Encoding: gzip`; smaller ones are sent plain (compressing them costs
+more than it saves). Artifact downloads, pre-encoded responses, event
+streams, and range responses are never re-encoded. Dashboard `/assets/`
+files are served with `Cache-Control: immutable` (their names are
+content-hashed); preview responses are served `no-cache` so a `--rebuild`
+of the same commit is picked up on the next request via a `304`
+revalidation.
+
 ## Health
 
 ### `GET /api/health`

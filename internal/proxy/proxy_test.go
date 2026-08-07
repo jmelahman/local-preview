@@ -146,9 +146,15 @@ func TestPreviewStaticAndSPAFallback(t *testing.T) {
 	if code != 200 || !strings.Contains(body, "preview home") {
 		t.Fatalf("index: %d %q", code, body)
 	}
-	code, body, _ = doReq(t, e.router, host, "/assets/app.js", false)
+	code, body, hdr := doReq(t, e.router, host, "/assets/app.js", false)
 	if code != 200 || body != "js-content" {
 		t.Fatalf("asset: %d %q", code, body)
+	}
+	// A --rebuild of the same sha may change files under the same URL, so
+	// preview responses must revalidate rather than cache heuristically —
+	// and never claim immutability.
+	if got := hdr.Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("asset Cache-Control = %q, want no-cache", got)
 	}
 	// SPA fallback for client-side routes.
 	code, body, _ = doReq(t, e.router, host, "/some/client/route", true)
