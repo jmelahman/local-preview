@@ -8,8 +8,12 @@ Host that isn't a preview subdomain). Errors return a JSON body of the form
 
 ### `GET /api/health`
 
+`preview_domain` is the base domain previews are served under, as resolved at
+startup from [`--preview-domain`](/reference/cli#preview-serve) /
+`$PREVIEW_DOMAIN`.
+
 ```json
-{ "status": "ok", "version": "v0.1.0" }
+{ "status": "ok", "version": "v0.1.0", "preview_domain": "preview.localhost" }
 ```
 
 ## Repos

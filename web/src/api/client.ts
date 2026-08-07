@@ -9,6 +9,9 @@ export class ApiError extends Error {
 export type Health = {
   status: string;
   version: string;
+  // Base domain previews are served under, e.g. "preview.localhost". Fixed
+  // at server startup; the dashboard has no other way to learn it.
+  preview_domain: string;
 };
 
 export type Repo = {

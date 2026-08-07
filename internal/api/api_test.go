@@ -134,6 +134,11 @@ func TestHealth(t *testing.T) {
 	if resp["status"] != "ok" || resp["version"] != "test" {
 		t.Fatalf("unexpected body: %v", resp)
 	}
+	// The dashboard reads the preview domain from here; without it the UI
+	// falls back to guessing the default.
+	if resp["preview_domain"] != "preview.localhost" {
+		t.Fatalf("preview_domain = %q, want the configured domain", resp["preview_domain"])
+	}
 }
 
 func TestRepoEndpoints(t *testing.T) {

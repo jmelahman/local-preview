@@ -332,7 +332,17 @@ function RegisterRepoDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function DeployDialog({ repos, onClose }: { repos: Repo[]; onClose: () => void }) {
+function DeployDialog({
+  repos,
+  previewDomain,
+  onClose,
+}: {
+  repos: Repo[];
+  // Absent until /api/health lands; the hint drops the domain until then
+  // rather than guessing the default, which --preview-domain can override.
+  previewDomain?: string;
+  onClose: () => void;
+}) {
   const queryClient = useQueryClient();
   const [repo, setRepo] = useState(repos[0]?.name ?? "");
   const [gitRef, setGitRef] = useState("");
@@ -381,9 +391,11 @@ function DeployDialog({ repos, onClose }: { repos: Repo[]; onClose: () => void }
         <DialogFooter
           error={createDeploy.error}
           hint={
-            repos.length
-              ? "Served at <sha>.<repo>.preview.localhost."
-              : "Register a repository first."
+            !repos.length
+              ? "Register a repository first."
+              : previewDomain
+                ? `Served at <sha>.<repo>.${previewDomain}.`
+                : "Served at <sha>.<repo> on the preview domain."
           }
         >
           <button
@@ -1148,7 +1160,11 @@ export default function App() {
       {dialog === "register" && <RegisterRepoDialog onClose={() => setDialog(null)} />}
       {dialog === "repos" && <ManageReposDialog onClose={() => setDialog(null)} />}
       {dialog === "deploy" && (
-        <DeployDialog repos={repos.data ?? []} onClose={() => setDialog(null)} />
+        <DeployDialog
+          repos={repos.data ?? []}
+          previewDomain={health.data?.preview_domain}
+          onClose={() => setDialog(null)}
+        />
       )}
       {detail && <DeployDetailDialog deploy={detail} onClose={() => setDetailId(null)} />}
     </div>

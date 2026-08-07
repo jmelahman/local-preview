@@ -79,10 +79,14 @@ func NewMux(d Deps) *http.ServeMux {
 	return mux
 }
 
+// handleHealth reports liveness plus the runtime facts the dashboard can't
+// know on its own — notably the preview base domain, which is fixed at
+// startup by --preview-domain/$PREVIEW_DOMAIN.
 func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
-		"status":  "ok",
-		"version": d.Build.Version,
+		"status":         "ok",
+		"version":        d.Build.Version,
+		"preview_domain": d.Config.PreviewDomain,
 	})
 }
 
