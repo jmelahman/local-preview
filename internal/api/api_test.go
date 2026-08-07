@@ -180,6 +180,28 @@ func TestRepoEndpoints(t *testing.T) {
 	}
 }
 
+// A deleted repo must be re-registrable even when its mirror clone survived
+// deletion (cleanup is best-effort and can fail or race an in-flight fetch).
+func TestRepoDeleteThenRecreate(t *testing.T) {
+	mux, root := newTestMux(t)
+	src := newSourceRepo(t)
+
+	create := `{"name":"demo","source":` + jsonQuote(src) + `}`
+	if rec := doJSON(t, mux, "POST", "/api/repos", create); rec.Code != http.StatusCreated {
+		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doJSON(t, mux, "DELETE", "/api/repos/demo", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete repo: %d %s", rec.Code, rec.Body)
+	}
+	// Resurrect an orphaned mirror dir, as a fetch racing the delete would.
+	if err := os.MkdirAll(filepath.Join(root, "repos", "demo.git", "refs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if rec := doJSON(t, mux, "POST", "/api/repos", create); rec.Code != http.StatusCreated {
+		t.Fatalf("re-create repo after delete: %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestDeployEndpoints(t *testing.T) {
 	mux, _ := newTestMux(t)
 	src := newSourceRepo(t)

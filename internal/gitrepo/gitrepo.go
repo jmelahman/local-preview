@@ -133,13 +133,15 @@ func (m *Manager) Open(name string) Repo {
 const mirrorRefSpec = config.RefSpec("+refs/*:refs/*")
 
 // Add registers a repo by mirror-cloning source (a local path or clone URL).
+// Any mirror already on disk at that name is replaced: the repos table is the
+// authority on name ownership (callers check it before Add), so a pre-existing
+// clone here is an orphan — a deletion whose on-disk cleanup failed or raced a
+// fetch — and must not block re-registration. The clone lands in a temp dir
+// and is swapped into place so a failed clone never destroys an existing
+// mirror.
 func (m *Manager) Add(ctx context.Context, name, source string) (Repo, error) {
 	if err := ValidateName(name); err != nil {
 		return Repo{}, err
-	}
-	dest := m.repoPath(name)
-	if _, err := os.Stat(dest); err == nil {
-		return Repo{}, fmt.Errorf("repo %q already exists", name)
 	}
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return Repo{}, fmt.Errorf("create repos dir: %w", err)
@@ -153,7 +155,13 @@ func (m *Manager) Add(ctx context.Context, name, source string) (Repo, error) {
 		}
 		source = abs
 	}
-	_, err := git.PlainCloneContext(ctx, dest, true, &git.CloneOptions{
+	// The dot prefix keeps temp clones out of the `<name>.git` namespace
+	// (names are DNS labels, which can't start with a dot).
+	tmp, err := os.MkdirTemp(m.dir, "."+name+"-*.tmp")
+	if err != nil {
+		return Repo{}, fmt.Errorf("create clone dir: %w", err)
+	}
+	_, err = git.PlainCloneContext(ctx, tmp, true, &git.CloneOptions{
 		URL:    source,
 		Mirror: true,
 	})
@@ -161,11 +169,20 @@ func (m *Manager) Add(ctx context.Context, name, source string) (Repo, error) {
 		// A source with no commits yet: set up the empty mirror by hand
 		// (clone cleans up after itself on error) so refs arrive on a later
 		// Fetch, matching `git clone --mirror` of an empty repo.
-		err = initEmptyMirror(dest, source)
+		err = initEmptyMirror(tmp, source)
 	}
 	if err != nil {
-		os.RemoveAll(dest)
+		os.RemoveAll(tmp)
 		return Repo{}, fmt.Errorf("clone %s: %w", source, err)
+	}
+	dest := m.repoPath(name)
+	if err := os.RemoveAll(dest); err != nil {
+		os.RemoveAll(tmp)
+		return Repo{}, fmt.Errorf("remove stale mirror: %w", err)
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		os.RemoveAll(tmp)
+		return Repo{}, fmt.Errorf("move clone into place: %w", err)
 	}
 	return Repo{Name: name, Path: dest}, nil
 }

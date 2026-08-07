@@ -89,3 +89,28 @@ control inside a `<dialog>` that opens via `showModal()` — it will lose the
 focus race every time. Mark the target with `data-autofocus` instead. Same
 trap applies to focusing in a child effect: child effects run before the
 parent's `showModal()`, so that focus is clobbered too.
+
+## On-disk leftovers must never gate DB-owned decisions
+
+**Symptom.** A repo deleted from the "Registered repositories" modal could
+not be re-registered: `POST /api/repos` failed with "already exists" even
+though the repo was gone from the DB and the UI. With the registration gone,
+`DELETE /api/repos/{name}` 404s — a permanent dead end with no UI escape.
+
+**Root cause.** `gitrepo.Add` refused to clone when `repos/<name>.git`
+already existed on disk. Deletion removes the mirror clone best-effort
+*after* the DB rows, and the mirror can survive it: an in-flight fetch
+(watcher poll, deploy ref-resolution) re-creates `refs/`/`objects/` subdirs
+while `RemoveAll` walks the tree, and `--in-memory` sessions register
+mirrors into the persistent data dir but forget the rows on shutdown. Either
+way the name was bricked by state the DB no longer knew about.
+
+**Fix.** The repos table is the sole authority on name ownership. `Add` now
+clones into a temp dir inside the repos dir and swaps it over `<name>.git`,
+replacing any orphaned leftover (temp-then-rename so a failed clone never
+destroys a healthy mirror). The `409` conflict comes only from the DB check.
+
+**What would reintroduce it.** Any new code path that treats presence on
+disk (mirror clones, artifact/state/log dirs) as proof of registration, or
+that errors instead of overwriting when creating a resource whose uniqueness
+the DB already enforces. Disk contents are a cache; rows are the truth.

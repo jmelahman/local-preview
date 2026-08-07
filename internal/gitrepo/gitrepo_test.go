@@ -70,9 +70,6 @@ func TestAddResolveFetch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.Add(ctx, "demo", src); err == nil {
-		t.Fatal("second Add should fail")
-	}
 
 	head := runTestGit(t, src, "rev-parse", "HEAD")
 	sha, err := repo.ResolveRef(ctx, "main")
@@ -97,6 +94,49 @@ func TestAddResolveFetch(t *testing.T) {
 
 	if _, err := repo.ResolveRef(ctx, "no-such-ref"); err == nil {
 		t.Fatal("ResolveRef of unknown ref should fail")
+	}
+}
+
+// Add must replace a mirror left on disk by an earlier registration — a
+// deletion whose cleanup failed, or a delete that raced an in-flight fetch —
+// rather than refuse the name forever.
+func TestAddReplacesLeftoverMirror(t *testing.T) {
+	ctx := context.Background()
+	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
+
+	if _, err := mgr.Add(ctx, "demo", newSourceRepo(t)); err != nil {
+		t.Fatal(err)
+	}
+	src2 := newSourceRepo(t)
+	repo, err := mgr.Add(ctx, "demo", src2)
+	if err != nil {
+		t.Fatalf("Add over leftover mirror: %v", err)
+	}
+	sha, err := repo.ResolveRef(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := runTestGit(t, src2, "rev-parse", "HEAD"); sha != want {
+		t.Fatalf("mirror still tracks old source: main = %s, want %s", sha, want)
+	}
+
+	// A partial leftover (a racing fetch re-created only a subdirectory) is
+	// not even a repository; it too must be replaced.
+	writeFile(t, filepath.Dir(repo.Path), "partial.git/refs/heads/main", "junk")
+	repo, err = mgr.Add(ctx, "partial", src2)
+	if err != nil {
+		t.Fatalf("Add over partial leftover: %v", err)
+	}
+	if _, err := repo.ResolveRef(ctx, "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A failed clone must not destroy the healthy mirror already in place.
+	if _, err := mgr.Add(ctx, "demo", filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Fatal("Add from missing source should fail")
+	}
+	if _, err := mgr.Open("demo").ResolveRef(ctx, "main"); err != nil {
+		t.Fatalf("failed Add clobbered existing mirror: %v", err)
 	}
 }
 

@@ -95,6 +95,8 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - React's `autoFocus` prop loses the focus race against `<dialog>.showModal()`
   — opt a control into initial focus with `data-autofocus` (which `Modal`
   focuses after opening) instead.
+- On-disk leftovers must never gate DB-owned decisions — deletes clean disk
+  best-effort, so creates replace orphaned dirs; only DB rows may conflict.
 
 ## Documentation upkeep
 

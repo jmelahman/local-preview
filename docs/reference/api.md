@@ -32,7 +32,9 @@ Request:
 ```
 
 Response: `201 Created` with the repo. `400` for an invalid name/source or a
-failed clone, `409` if the name is taken.
+failed clone, `409` if the name is taken by a registered repo. Only current
+registrations conflict: a mirror clone left on disk by a deleted registration
+is replaced, so deleting a repo always frees its name.
 
 ```json
 {
