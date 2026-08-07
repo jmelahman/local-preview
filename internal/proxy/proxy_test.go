@@ -60,7 +60,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		filepath.Join(root, "state"),
 		filepath.Join(root, "tmp"),
 	)
-	repo, err := database.CreateRepo("demo", "/src", "/bare")
+	repo, err := database.CreateRepo("demo", "/src", "/bare", db.RepoReady)
 	if err != nil {
 		t.Fatal(err)
 	}

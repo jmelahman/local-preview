@@ -21,7 +21,12 @@ type Repo struct {
 	Source        string `json:"source"`
 	Watch         bool   `json:"watch"`
 	WatchBranches string `json:"watch_branches"`
-	CreatedAt     string `json:"created_at"`
+	// Status is the mirror clone's state (cloning/ready/failed); Error is
+	// set when it failed, Progress while it's still cloning.
+	Status    string `json:"status"`
+	Error     string `json:"error"`
+	Progress  string `json:"progress"`
+	CreatedAt string `json:"created_at"`
 }
 
 // Deploy mirrors the API's deploy shape.
@@ -88,6 +93,19 @@ func (c *Client) CreateRepo(ctx context.Context, name, source string, watch bool
 		return Repo{}, err
 	}
 	raw, err := c.do(ctx, http.MethodPost, "/api/repos", body)
+	if err != nil {
+		return Repo{}, err
+	}
+	var r Repo
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return Repo{}, fmt.Errorf("decode repo: %w", err)
+	}
+	return r, nil
+}
+
+// GetRepo fetches one repo by name.
+func (c *Client) GetRepo(ctx context.Context, name string) (Repo, error) {
+	raw, err := c.do(ctx, http.MethodGet, "/api/repos/"+url.PathEscape(name), nil)
 	if err != nil {
 		return Repo{}, err
 	}

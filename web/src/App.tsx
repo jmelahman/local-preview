@@ -296,13 +296,107 @@ function RegisterRepoDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [source, setSource] = useState("");
+  // Once the POST is accepted the server clones in the background; the
+  // dialog tracks that repo until it turns ready (auto-close) or failed.
+  const [registered, setRegistered] = useState<string | null>(null);
   const createRepo = useMutation({
     mutationFn: () => api.createRepo(name.trim(), source.trim()),
-    onSuccess: () => {
+    onSuccess: (repo) => {
       queryClient.invalidateQueries({ queryKey: ["repos"] });
-      onClose();
+      // Seed the tracking query with the accepted row: a stale "failed"
+      // entry from an earlier attempt at this name would otherwise stick
+      // (its interval callback sees a terminal status and stops polling).
+      queryClient.setQueryData(["repo", repo.name], repo);
+      setRegistered(repo.name);
     },
   });
+  const cloning = useQuery({
+    queryKey: ["repo", registered],
+    queryFn: () => api.getRepo(registered as string),
+    enabled: registered != null,
+    refetchInterval: (query) => (query.state.data?.status === "cloning" ? 750 : false),
+  });
+  // Deletes the failed row so the same name can be resubmitted from the
+  // form, which keeps its values.
+  const discard = useMutation({
+    mutationFn: () => api.deleteRepo(registered as string),
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ["repo", registered] });
+      queryClient.invalidateQueries({ queryKey: ["repos"] });
+      setRegistered(null);
+      createRepo.reset();
+    },
+  });
+
+  const status = cloning.data?.status;
+  useEffect(() => {
+    if (status === "ready") {
+      queryClient.invalidateQueries({ queryKey: ["repos"] });
+      onClose();
+    }
+  }, [status, queryClient, onClose]);
+
+  if (registered != null) {
+    return (
+      <Modal title="Register a repository" onClose={onClose}>
+        <div className="flex flex-col gap-3 p-4 text-sm">
+          {status === "failed" ? (
+            <>
+              <p>
+                Cloning <code className="font-mono text-xs">{source.trim()}</code> failed.
+              </p>
+              {cloning.data?.error && (
+                <p className="break-words font-mono text-xs text-danger">{cloning.data.error}</p>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="flex items-center gap-2.5">
+                <span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-fg-muted border-t-transparent" />
+                <p className="min-w-0">
+                  Cloning <code className="break-all font-mono text-xs">{source.trim()}</code>…
+                </p>
+              </div>
+              {cloning.data?.progress && (
+                <p className="font-mono text-xs text-fg-muted">{cloning.data.progress}</p>
+              )}
+              <p className="text-xs text-fg-muted">
+                Large repositories can take a while. Closing this dialog won't interrupt the clone —
+                the repository becomes deployable once it finishes.
+              </p>
+            </>
+          )}
+        </div>
+        <DialogFooter
+          error={discard.error}
+          hint={
+            status === "failed"
+              ? "Fix the source and try again, or close to keep the failed entry."
+              : ""
+          }
+        >
+          {status === "failed" && (
+            <button
+              type="button"
+              onClick={() => discard.mutate()}
+              disabled={discard.isPending}
+              className={buttonClass}
+            >
+              Edit &amp; retry
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            className={`${neutralButtonClass} px-3 py-1 text-sm`}
+          >
+            Close
+          </button>
+        </DialogFooter>
+      </Modal>
+    );
+  }
+
   return (
     <Modal title="Register a repository" onClose={onClose}>
       <form
@@ -361,8 +455,11 @@ function DeployDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [repo, setRepo] = useState(repos[0]?.name ?? "");
+  // Only ready repos are deployable; ones still cloning stay visible but
+  // disabled so a fresh registration is discoverable here.
+  const [repo, setRepo] = useState(repos.find((r) => r.status === "ready")?.name ?? "");
   const [gitRef, setGitRef] = useState("");
+  const chosen = repos.find((r) => r.name === repo);
   const createDeploy = useMutation({
     mutationFn: () => api.createDeploy(repo, gitRef.trim()),
     onSuccess: () => {
@@ -388,10 +485,16 @@ function DeployDialog({
               onChange={(e) => setRepo(e.target.value)}
               className="w-full cursor-pointer rounded bg-surface px-2 py-1 text-sm"
             >
-              {repos.length === 0 && <option value="">no repositories yet</option>}
+              {!repos.some((r) => r.status === "ready") && (
+                <option value="">
+                  {repos.length === 0 ? "no repositories yet" : "no ready repositories yet"}
+                </option>
+              )}
               {repos.map((r) => (
-                <option key={r.id} value={r.name}>
+                <option key={r.id} value={r.name} disabled={r.status !== "ready"}>
                   {r.name}
+                  {r.status === "cloning" && " (cloning…)"}
+                  {r.status === "failed" && " (clone failed)"}
                 </option>
               ))}
             </select>
@@ -410,14 +513,16 @@ function DeployDialog({
           hint={
             !repos.length
               ? "Register a repository first."
-              : previewDomain
-                ? `Served at <sha>.<repo>.${previewDomain}.`
-                : "Served at <sha>.<repo> on the preview domain."
+              : !repos.some((r) => r.status === "ready")
+                ? "Repositories are still cloning — deploy once one is ready."
+                : previewDomain
+                  ? `Served at <sha>.<repo>.${previewDomain}.`
+                  : "Served at <sha>.<repo> on the preview domain."
           }
         >
           <button
             type="submit"
-            disabled={!gitRef.trim() || !repos.length || createDeploy.isPending}
+            disabled={!gitRef.trim() || chosen?.status !== "ready" || createDeploy.isPending}
             className={buttonClass}
           >
             Deploy
@@ -846,6 +951,34 @@ function DeleteDeployButton({ deploy }: { deploy: Deploy }) {
   );
 }
 
+// RepoCloneBadge marks a repo whose mirror clone hasn't completed: pulsing
+// while it runs (live progress in the hover), red once it failed.
+function RepoCloneBadge({ repo }: { repo: Repo }) {
+  if (repo.status === "cloning") {
+    return (
+      <span
+        title={repo.progress || "Mirror clone in progress"}
+        className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-warning/30 px-2 py-0.5 text-xs font-medium text-warning"
+      >
+        <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-warning" />
+        cloning
+      </span>
+    );
+  }
+  if (repo.status === "failed") {
+    return (
+      <span
+        title={repo.error}
+        className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-danger/30 px-2 py-0.5 text-xs font-medium text-danger"
+      >
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-danger" />
+        clone failed
+      </span>
+    );
+  }
+  return null;
+}
+
 // RepoRow is one registered repository in the management modal: its name and
 // source, an editable watch toggle + branch globs, and an unregister action.
 function RepoRow({ repo }: { repo: Repo }) {
@@ -879,10 +1012,16 @@ function RepoRow({ repo }: { repo: Repo }) {
     <li className="flex flex-col gap-2 px-3 py-2.5">
       <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium">{repo.name}</div>
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-medium">{repo.name}</div>
+            <RepoCloneBadge repo={repo} />
+          </div>
           <div className="truncate font-mono text-[11px] text-fg-muted" title={repo.source}>
             {repo.source}
           </div>
+          {repo.status === "cloning" && repo.progress && (
+            <div className="truncate font-mono text-[11px] text-fg-muted">{repo.progress}</div>
+          )}
         </div>
         <button
           type="button"
@@ -892,6 +1031,11 @@ function RepoRow({ repo }: { repo: Repo }) {
           Unregister
         </button>
       </div>
+      {repo.status === "failed" && repo.error && (
+        <p className="text-xs text-danger" title={repo.error}>
+          {repo.error}
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs text-fg-muted">
           <input
@@ -1227,7 +1371,14 @@ export default function App() {
     // Keep polling so the unreachable banner clears itself on recovery.
     refetchInterval: 5000,
   });
-  const repos = useQuery({ queryKey: ["repos"], queryFn: api.listRepos });
+  const repos = useQuery({
+    queryKey: ["repos"],
+    queryFn: api.listRepos,
+    // Poll while a registration's background clone runs so its badge (and
+    // the deploy dialog) flip to ready on their own.
+    refetchInterval: (query) =>
+      query.state.data?.some((r) => r.status === "cloning") ? 1000 : false,
+  });
   const deploys = useQuery({
     queryKey: ["deploys"],
     queryFn: api.listDeploys,

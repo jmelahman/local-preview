@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/jmelahman/local-preview/internal/build"
 	"github.com/jmelahman/local-preview/internal/db"
 )
 
@@ -88,6 +90,10 @@ func (d Deps) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row, err := d.Queue.RequestDeploy(r.Context(), repo.Name, ev.After, false)
+	if errors.Is(err, build.ErrRepoNotReady) {
+		httpError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return

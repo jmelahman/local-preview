@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -101,9 +102,33 @@ func runRepoDelete(ctx context.Context, url string, out io.Writer, name string) 
 }
 
 func runRepoCreate(ctx context.Context, url string, out io.Writer, name, source string, watch bool, branches string) error {
-	repo, err := client.New(url, nil).CreateRepo(ctx, name, source, watch, branches)
+	c := client.New(url, nil)
+	repo, err := c.CreateRepo(ctx, name, source, watch, branches)
 	if err != nil {
 		return err
+	}
+	// The server clones in the background; wait it out so the command's exit
+	// means the repo is deployable (progress lines are the transport's).
+	if repo.Status == "cloning" {
+		fmt.Fprintf(out, "cloning %s…\n", repo.Source)
+	}
+	var lastProgress string
+	for repo.Status == "cloning" {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+		if repo, err = c.GetRepo(ctx, name); err != nil {
+			return err
+		}
+		if repo.Progress != "" && repo.Progress != lastProgress {
+			fmt.Fprintf(out, "  %s\n", repo.Progress)
+			lastProgress = repo.Progress
+		}
+	}
+	if repo.Status == "failed" {
+		return fmt.Errorf("clone failed: %s", repo.Error)
 	}
 	fmt.Fprintf(out, "registered %s (source %s)\n", repo.Name, repo.Source)
 	if repo.Watch {
@@ -139,7 +164,7 @@ func runRepoList(ctx context.Context, url string, out io.Writer) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSOURCE\tWATCH\tCREATED")
+	fmt.Fprintln(tw, "NAME\tSOURCE\tSTATUS\tWATCH\tCREATED")
 	for _, r := range repos {
 		watch := "-"
 		if r.Watch {
@@ -148,7 +173,7 @@ func runRepoList(ctx context.Context, url string, out io.Writer) error {
 				watch = r.WatchBranches
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", r.Name, r.Source, watch, r.CreatedAt)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.Name, r.Source, r.Status, watch, r.CreatedAt)
 	}
 	return tw.Flush()
 }

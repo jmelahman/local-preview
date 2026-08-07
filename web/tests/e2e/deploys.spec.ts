@@ -3,7 +3,7 @@ import { appendFileSync, cpSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 // Drives the whole vertical slice against the real backend: register the Go
 // fixture repo, deploy a commit, watch the dashboard, then open the real
@@ -52,13 +52,30 @@ files = ["bin/fixture-cli-linux", "bin/fixture-cli-darwin"]
   sha = git(repoDir, "rev-parse", "HEAD");
 });
 
+// Registration clones in the background; wait until the repo is deployable.
+async function waitRepoReady(page: Page, name: string) {
+  await expect
+    .poll(
+      async () => {
+        const r = await page.request.get(`/api/repos/${name}`);
+        const repo = await r.json();
+        if (repo.status === "failed") throw new Error(`clone failed: ${repo.error}`);
+        return repo.status;
+      },
+      { timeout: 60_000, intervals: [250] },
+    )
+    .toBe("ready");
+}
+
 test("register, deploy, and open a preview", async ({ page }) => {
   test.setTimeout(180_000);
 
   const repoRes = await page.request.post("/api/repos", {
     data: { name: "fixture", source: repoDir },
   });
-  expect(repoRes.status()).toBe(201);
+  expect(repoRes.status()).toBe(202);
+  expect((await repoRes.json()).status).toBe("cloning");
+  await waitRepoReady(page, "fixture");
 
   const depRes = await page.request.post("/api/deploys", {
     data: { repo: "fixture", ref: sha },
@@ -186,7 +203,8 @@ test("evict and redeploy from the dashboard", async ({ page }) => {
   const repoRes = await page.request.post("/api/repos", {
     data: { name: "fixture", source: repoDir },
   });
-  expect([201, 409]).toContain(repoRes.status());
+  expect([202, 409]).toContain(repoRes.status());
+  await waitRepoReady(page, "fixture");
   const dep1 = await (
     await page.request.post("/api/deploys", { data: { repo: "fixture", ref: sha } })
   ).json();
@@ -228,4 +246,40 @@ test("evict and redeploy from the dashboard", async ({ page }) => {
   const revived = await waitReady(dep1.id);
   await page.goto((revived as { preview_url?: string }).preview_url ?? "");
   await expect(page.getByText("fixture frontend v1")).toBeVisible();
+});
+
+test("register dialog tracks the background clone and closes itself", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "register repo" }).click();
+  await page.getByRole("textbox", { name: "Name" }).fill("dialogfixture");
+  await page.getByRole("textbox", { name: "Source" }).fill(repoDir);
+  await page.getByRole("button", { name: "Register", exact: true }).click();
+
+  // The form is replaced by the cloning phase, which dismisses the dialog
+  // on its own once the repo turns ready.
+  await expect(page.getByRole("dialog")).toBeHidden({ timeout: 60_000 });
+
+  await page.getByRole("button", { name: "Manage registered repositories" }).click();
+  await expect(page.getByText("dialogfixture")).toBeVisible();
+});
+
+test("register dialog surfaces a failed clone and offers a retry", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "register repo" }).click();
+  await page.getByRole("textbox", { name: "Name" }).fill("badclone");
+  await page.getByRole("textbox", { name: "Source" }).fill(join(tmpdir(), "no-such-repo"));
+  await page.getByRole("button", { name: "Register", exact: true }).click();
+
+  await expect(page.getByRole("button", { name: "Edit & retry" })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(page.getByText(/repository not found/)).toBeVisible();
+
+  // Edit & retry frees the name and returns to the form with its values.
+  await page.getByRole("button", { name: "Edit & retry" }).click();
+  await expect(page.getByRole("textbox", { name: "Name" })).toHaveValue("badclone");
+  await page.getByRole("textbox", { name: "Source" }).fill(repoDir);
+  await page.getByRole("button", { name: "Register", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeHidden({ timeout: 60_000 });
+  await waitRepoReady(page, "badclone");
 });

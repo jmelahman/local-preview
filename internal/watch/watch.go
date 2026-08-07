@@ -88,7 +88,9 @@ func (w *Watcher) PollAll(ctx context.Context) {
 		return
 	}
 	for _, repo := range repos {
-		if !repo.Watch || ctx.Err() != nil {
+		// Repos still cloning (or whose clone failed) have no mirror to
+		// fetch; the cloner kicks a poll when one turns ready.
+		if !repo.Watch || repo.Status != db.RepoReady || ctx.Err() != nil {
 			continue
 		}
 		if err := w.pollRepo(ctx, repo); err != nil && ctx.Err() == nil {

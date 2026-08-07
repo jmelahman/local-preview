@@ -8,6 +8,14 @@ import (
 // ErrConflict is returned when an insert violates a uniqueness constraint.
 var ErrConflict = errors.New("already exists")
 
+// Repo mirror-clone statuses. Registration returns while the clone runs in
+// the background; a repo is deployable only once RepoReady.
+const (
+	RepoCloning = "cloning"
+	RepoReady   = "ready"
+	RepoFailed  = "failed"
+)
+
 // Repo is a row in the repos table.
 type Repo struct {
 	ID       int64  `json:"id"`
@@ -19,23 +27,27 @@ type Repo struct {
 	// globs, empty = all).
 	Watch         bool   `json:"watch"`
 	WatchBranches string `json:"watch_branches"`
-	CreatedAt     string `json:"created_at"`
+	// Status is the mirror clone's outcome; Error carries the failure
+	// message while Status is RepoFailed.
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+	CreatedAt string `json:"created_at"`
 }
 
-const repoCols = `id, name, source, bare_path, watch, watch_branches, created_at`
+const repoCols = `id, name, source, bare_path, watch, watch_branches, status, error, created_at`
 
 func (r *Repo) scanFields() []any {
-	return []any{&r.ID, &r.Name, &r.Source, &r.BarePath, &r.Watch, &r.WatchBranches, &r.CreatedAt}
+	return []any{&r.ID, &r.Name, &r.Source, &r.BarePath, &r.Watch, &r.WatchBranches, &r.Status, &r.Error, &r.CreatedAt}
 }
 
-// CreateRepo inserts a repo and returns it. Returns ErrConflict if the name
-// is taken.
-func (s *Store) CreateRepo(name, source, barePath string) (Repo, error) {
+// CreateRepo inserts a repo with the given clone status and returns it.
+// Returns ErrConflict if the name is taken.
+func (s *Store) CreateRepo(name, source, barePath, status string) (Repo, error) {
 	var r Repo
 	err := s.db.QueryRow(
-		`INSERT INTO repos (name, source, bare_path) VALUES (?, ?, ?)
+		`INSERT INTO repos (name, source, bare_path, status) VALUES (?, ?, ?, ?)
 		 RETURNING `+repoCols,
-		name, source, barePath,
+		name, source, barePath, status,
 	).Scan(r.scanFields()...)
 	if isUniqueErr(err) {
 		return Repo{}, ErrConflict
@@ -44,6 +56,19 @@ func (s *Store) CreateRepo(name, source, barePath string) (Repo, error) {
 		return Repo{}, err
 	}
 	return r, nil
+}
+
+// SetRepoStatus records the mirror clone's outcome (errMsg only meaningful
+// for RepoFailed), or ErrNotFound if the repo was deleted meanwhile.
+func (s *Store) SetRepoStatus(id int64, status, errMsg string) error {
+	res, err := s.db.Exec(`UPDATE repos SET status = ?, error = ? WHERE id = ?`, status, errMsg, id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GetRepoByName returns the repo named name, or ErrNotFound.

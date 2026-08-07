@@ -37,6 +37,10 @@ import (
 // DefaultBuildTimeout bounds a single build step.
 const DefaultBuildTimeout = 10 * time.Minute
 
+// ErrRepoNotReady marks deploy requests against a repo whose mirror clone
+// hasn't finished (or failed); the API maps it to 409.
+var ErrRepoNotReady = errors.New("repo is not ready")
+
 // ManifestName is the default contract file read from the committed tree.
 const ManifestName = "preview.toml"
 
@@ -158,6 +162,13 @@ func (q *Queue) RequestDeploy(ctx context.Context, repoName, ref string, rebuild
 	repo, err := q.db.GetRepoByName(repoName)
 	if err != nil {
 		return db.DeployRow{}, err
+	}
+	switch repo.Status {
+	case db.RepoReady:
+	case db.RepoCloning:
+		return db.DeployRow{}, fmt.Errorf("repo %q is still cloning: %w", repoName, ErrRepoNotReady)
+	default:
+		return db.DeployRow{}, fmt.Errorf("clone of repo %q failed (%s): %w", repoName, repo.Error, ErrRepoNotReady)
 	}
 	gr := q.git.Open(repo.Name)
 

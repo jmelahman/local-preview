@@ -91,11 +91,11 @@ func newEnv(t *testing.T, srcRepo string, configure ...func(*Queue)) *env {
 		filepath.Join(root, "tmp"),
 	)
 	gitMgr := gitrepo.NewManager(filepath.Join(root, "repos"))
-	repo, err := gitMgr.Add(ctx, "demo", srcRepo)
+	repo, err := gitMgr.Add(ctx, "demo", srcRepo, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dbRepo, err := database.CreateRepo("demo", srcRepo, repo.Path)
+	dbRepo, err := database.CreateRepo("demo", srcRepo, repo.Path, db.RepoReady)
 	if err != nil {
 		t.Fatal(err)
 	}

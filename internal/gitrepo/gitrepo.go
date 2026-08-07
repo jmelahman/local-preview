@@ -138,8 +138,9 @@ const mirrorRefSpec = config.RefSpec("+refs/*:refs/*")
 // clone here is an orphan — a deletion whose on-disk cleanup failed or raced a
 // fetch — and must not block re-registration. The clone lands in a temp dir
 // and is swapped into place so a failed clone never destroys an existing
-// mirror.
-func (m *Manager) Add(ctx context.Context, name, source string) (Repo, error) {
+// mirror. progress, when non-nil, receives the transport's human-readable
+// clone progress ("Counting objects: …").
+func (m *Manager) Add(ctx context.Context, name, source string, progress io.Writer) (Repo, error) {
 	if err := ValidateName(name); err != nil {
 		return Repo{}, err
 	}
@@ -162,8 +163,9 @@ func (m *Manager) Add(ctx context.Context, name, source string) (Repo, error) {
 		return Repo{}, fmt.Errorf("create clone dir: %w", err)
 	}
 	_, err = git.PlainCloneContext(ctx, tmp, true, &git.CloneOptions{
-		URL:    source,
-		Mirror: true,
+		URL:      source,
+		Mirror:   true,
+		Progress: progress,
 	})
 	if errors.Is(err, transport.ErrEmptyRemoteRepository) {
 		// A source with no commits yet: set up the empty mirror by hand

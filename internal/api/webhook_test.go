@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testWebhookSecret = "hook-secret"
@@ -44,9 +45,7 @@ func TestWebhookPushDeploys(t *testing.T) {
 	mux, _ := newTestMux(t)
 	src := newSourceRepo(t)
 	sha := runTestGit(t, src, "rev-parse", "HEAD")
-	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != 201 {
-		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 
 	rec := deliver(t, mux, "push", pushPayload(src, "refs/heads/main", sha, false), true)
 	if rec.Code != http.StatusAccepted {
@@ -71,6 +70,25 @@ func TestWebhookPushDeploys(t *testing.T) {
 	var list []json.RawMessage
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list) != 1 {
 		t.Fatalf("deploys after redelivery = %d (%v)", len(list), err)
+	}
+
+	// Drain the triggered build so teardown doesn't race the worker.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var d struct {
+			Status string `json:"status"`
+		}
+		rec := doJSON(t, mux, "GET", "/api/deploys/1", "")
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+			t.Fatal(err)
+		}
+		if d.Status != "queued" && d.Status != "building" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("deploy stuck in %s", d.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

@@ -14,6 +14,10 @@ export type Health = {
   preview_domain: string;
 };
 
+// Mirror-clone state of a registered repo. Registration returns while the
+// clone runs in the background; a repo is deployable only once "ready".
+export type RepoStatus = "cloning" | "ready" | "failed";
+
 export type Repo = {
   id: number;
   name: string;
@@ -22,6 +26,12 @@ export type Repo = {
   // watch_branches narrows which branches (comma-separated globs, "" = all).
   watch: boolean;
   watch_branches: string;
+  status: RepoStatus;
+  // The clone failure message, while status is "failed".
+  error?: string;
+  // The clone's live progress line ("Receiving objects: 42% …"), while
+  // status is "cloning" and the transport reports one.
+  progress?: string;
   created_at: string;
 };
 
@@ -179,6 +189,7 @@ export type RepoUpdate = {
 export const api = {
   health: () => request<Health>("/api/health"),
   listRepos: () => request<Repo[]>("/api/repos"),
+  getRepo: (name: string) => request<Repo>(`/api/repos/${encodeURIComponent(name)}`),
   createRepo: (name: string, source: string) =>
     request<Repo>("/api/repos", { method: "POST", body: JSON.stringify({ name, source }) }),
   updateRepo: (name: string, patch: RepoUpdate) =>

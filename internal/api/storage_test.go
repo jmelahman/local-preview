@@ -46,9 +46,7 @@ func TestRetentionEndpoints(t *testing.T) {
 func TestStorageEndpoint(t *testing.T) {
 	mux, _ := newTestMux(t)
 	src := newSourceRepo(t)
-	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != 201 {
-		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 
 	rec := doJSON(t, mux, "GET", "/api/storage", "")
 	if rec.Code != http.StatusOK {
@@ -110,9 +108,7 @@ func deployRef(t *testing.T, mux *http.ServeMux, ref string) (id int64, beHash, 
 func TestGCEndpointEvictsByPolicy(t *testing.T) {
 	mux, root := newTestMux(t)
 	src := newSourceRepo(t)
-	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != 201 {
-		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 	firstID, firstBe, _ := deployRef(t, mux, "main")
 
 	// A second commit changing both sides produces fresh artifact hashes.

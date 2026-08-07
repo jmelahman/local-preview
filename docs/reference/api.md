@@ -21,8 +21,9 @@ startup from [`--preview-domain`](/reference/cli#preview-serve) /
 ### `POST /api/repos`
 
 Registers a repository: the server mirror-clones `source` (a local path or
-clone URL). `name` must be a lowercase DNS label — it becomes the subdomain
-segment. `watch` and `watch_branches` are optional and enable
+clone URL) **in the background** and responds immediately. `name` must be a
+lowercase DNS label — it becomes the subdomain segment. `watch` and
+`watch_branches` are optional and enable
 [watching](/guide/triggers#watched-repos) from the start.
 
 Request:
@@ -31,8 +32,9 @@ Request:
 { "name": "myapp", "source": "/home/me/code/myapp" }
 ```
 
-Response: `201 Created` with the repo. `400` for an invalid name/source or a
-failed clone, `409` if the name is taken by a registered repo. Only current
+Response: `202 Accepted` with the repo in status `cloning`. `400` for an
+invalid name/source, `409` if the name is taken by a registered repo
+(including one whose clone failed — delete it to retry). Only current
 registrations conflict: a mirror clone left on disk by a deleted registration
 is replaced, so deleting a repo always frees its name.
 
@@ -43,9 +45,19 @@ is replaced, so deleting a repo always frees its name.
   "source": "/home/me/code/myapp",
   "watch": false,
   "watch_branches": "",
+  "status": "cloning",
   "created_at": "2026-01-01T00:00:00Z"
 }
 ```
+
+`status` progresses `cloning → ready` (or `failed`, with `error` carrying
+the clone failure). Poll `GET /api/repos/{name}` to follow it; while
+cloning, the response may also include `progress` — the transport's latest
+human-readable progress line (e.g. `"Receiving objects: 42%"`), when the
+source's server reports one. A repo accepts deploys only once `ready`
+(`POST /api/deploys` answers `409` before that), and a watched repo starts
+polling on its own as soon as the clone lands. Clones interrupted by a
+server restart resume at the next startup.
 
 ### `GET /api/repos`
 
@@ -90,7 +102,8 @@ Request:
 { "repo": "myapp", "ref": "main", "rebuild": false }
 ```
 
-Response: `202 Accepted` with the deploy. `404` for an unknown repo, `400`
+Response: `202 Accepted` with the deploy. `404` for an unknown repo, `409`
+for a repo that isn't `ready` (still cloning, or its clone failed), `400`
 for an unresolvable ref.
 
 ```json

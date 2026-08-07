@@ -303,11 +303,11 @@ func (o *Orchestrator) RegisterRepo(ctx context.Context, name, source string) (R
 		}
 		return Repo{}, fmt.Errorf("repo %q is registered with source %q: %w", name, existing.Source, ErrConflict)
 	}
-	gr, err := o.git.Add(ctx, name, source)
+	gr, err := o.git.Add(ctx, name, source, nil)
 	if err != nil {
 		return Repo{}, err
 	}
-	created, err := o.database.CreateRepo(name, source, gr.Path)
+	created, err := o.database.CreateRepo(name, source, gr.Path, db.RepoReady)
 	if errors.Is(err, db.ErrConflict) {
 		return Repo{}, ErrConflict
 	}

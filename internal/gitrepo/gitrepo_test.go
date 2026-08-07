@@ -66,7 +66,7 @@ func TestAddResolveFetch(t *testing.T) {
 	src := newSourceRepo(t)
 	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
 
-	repo, err := mgr.Add(ctx, "demo", src)
+	repo, err := mgr.Add(ctx, "demo", src, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,11 +104,11 @@ func TestAddReplacesLeftoverMirror(t *testing.T) {
 	ctx := context.Background()
 	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
 
-	if _, err := mgr.Add(ctx, "demo", newSourceRepo(t)); err != nil {
+	if _, err := mgr.Add(ctx, "demo", newSourceRepo(t), nil); err != nil {
 		t.Fatal(err)
 	}
 	src2 := newSourceRepo(t)
-	repo, err := mgr.Add(ctx, "demo", src2)
+	repo, err := mgr.Add(ctx, "demo", src2, nil)
 	if err != nil {
 		t.Fatalf("Add over leftover mirror: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestAddReplacesLeftoverMirror(t *testing.T) {
 	// A partial leftover (a racing fetch re-created only a subdirectory) is
 	// not even a repository; it too must be replaced.
 	writeFile(t, filepath.Dir(repo.Path), "partial.git/refs/heads/main", "junk")
-	repo, err = mgr.Add(ctx, "partial", src2)
+	repo, err = mgr.Add(ctx, "partial", src2, nil)
 	if err != nil {
 		t.Fatalf("Add over partial leftover: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestAddReplacesLeftoverMirror(t *testing.T) {
 	}
 
 	// A failed clone must not destroy the healthy mirror already in place.
-	if _, err := mgr.Add(ctx, "demo", filepath.Join(t.TempDir(), "nope")); err == nil {
+	if _, err := mgr.Add(ctx, "demo", filepath.Join(t.TempDir(), "nope"), nil); err == nil {
 		t.Fatal("Add from missing source should fail")
 	}
 	if _, err := mgr.Open("demo").ResolveRef(ctx, "main"); err != nil {
@@ -150,7 +150,7 @@ func TestCommitMetaAndBranches(t *testing.T) {
 	head := runTestGit(t, src, "rev-parse", "HEAD")
 
 	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
-	repo, err := mgr.Add(ctx, "demo", src)
+	repo, err := mgr.Add(ctx, "demo", src, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestUnreachableSHAs(t *testing.T) {
 	runTestGit(t, src, "checkout", "-q", "main")
 
 	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
-	repo, err := mgr.Add(ctx, "demo", src)
+	repo, err := mgr.Add(ctx, "demo", src, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestLsTreeReadFileArchive(t *testing.T) {
 	ctx := context.Background()
 	src := newSourceRepo(t)
 	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
-	repo, err := mgr.Add(ctx, "demo", src)
+	repo, err := mgr.Add(ctx, "demo", src, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestLsTreeMatchesGit(t *testing.T) {
 	runTestGit(t, src, "commit", "-q", "-m", "tree shapes")
 
 	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
-	repo, err := mgr.Add(ctx, "demo", src)
+	repo, err := mgr.Add(ctx, "demo", src, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestAddFromLinkedWorktree(t *testing.T) {
 	featureHead := runTestGit(t, wt, "rev-parse", "HEAD")
 
 	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
-	repo, err := mgr.Add(ctx, "demo", wt)
+	repo, err := mgr.Add(ctx, "demo", wt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func TestFirstParentAncestry(t *testing.T) {
 	merge := runTestGit(t, src, "rev-parse", "HEAD")
 
 	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
-	repo, err := mgr.Add(ctx, "demo", src)
+	repo, err := mgr.Add(ctx, "demo", src, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

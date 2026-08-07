@@ -39,7 +39,7 @@ func TestBranchAliasDeployIDs(t *testing.T) {
 	if len(ids) != 0 {
 		t.Fatalf("empty table: got %v", ids)
 	}
-	repo, err := s.CreateRepo("web", "/src/web", "/data/web.git")
+	repo, err := s.CreateRepo("web", "/src/web", "/data/web.git", RepoReady)
 	if err != nil {
 		t.Fatal(err)
 	}

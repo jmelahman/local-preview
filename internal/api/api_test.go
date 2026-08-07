@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/build"
+	"github.com/jmelahman/local-preview/internal/clone"
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
@@ -97,6 +98,8 @@ func newTestMux(t *testing.T) (*http.ServeMux, string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	queue.Start(ctx, 1)
+	cloner := clone.New(database, gitMgr, nil)
+	cloner.Start(ctx)
 
 	return NewMux(Deps{
 		Store:               database,
@@ -105,6 +108,7 @@ func newTestMux(t *testing.T) (*http.ServeMux, string) {
 		Git:                 gitMgr,
 		Queue:               queue,
 		Super:               super,
+		Cloner:              cloner,
 		Files:               files,
 		Sweeper:             retain.New(database, super, files),
 		DBPath:              ":memory:",
@@ -125,6 +129,49 @@ func doJSON(t *testing.T, mux *http.ServeMux, method, path, body string) *httpte
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	return rec
+}
+
+// repoResp captures the repo fields the registration tests assert on.
+type repoResp struct {
+	Status   string `json:"status"`
+	Error    string `json:"error"`
+	Progress string `json:"progress"`
+	Watch    bool   `json:"watch"`
+}
+
+// waitRepoStatus polls the repo until its background clone reaches want
+// (ready or failed).
+func waitRepoStatus(t *testing.T, mux *http.ServeMux, name, want string) repoResp {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		rec := doJSON(t, mux, "GET", "/api/repos/"+name, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("get repo %s: %d %s", name, rec.Code, rec.Body)
+		}
+		var repo repoResp
+		if err := json.Unmarshal(rec.Body.Bytes(), &repo); err != nil {
+			t.Fatal(err)
+		}
+		if repo.Status == want {
+			return repo
+		}
+		if repo.Status != "cloning" || time.Now().After(deadline) {
+			t.Fatalf("repo %s status = %q (error %q), want %q", name, repo.Status, repo.Error, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// registerRepo registers a repo and waits out the background clone — the
+// old synchronous flow, for tests that just need a deployable repo.
+func registerRepo(t *testing.T, mux *http.ServeMux, name, src string) {
+	t.Helper()
+	body := `{"name":` + jsonQuote(name) + `,"source":` + jsonQuote(src) + `}`
+	if rec := doJSON(t, mux, "POST", "/api/repos", body); rec.Code != http.StatusAccepted {
+		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
+	}
+	waitRepoStatus(t, mux, name, "ready")
 }
 
 func TestHealth(t *testing.T) {
@@ -151,15 +198,24 @@ func TestRepoEndpoints(t *testing.T) {
 	mux, _ := newTestMux(t)
 	src := newSourceRepo(t)
 
+	// Registration is asynchronous: the response is 202 with the row still
+	// cloning; the repo turns ready in the background.
 	rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`)
-	if rec.Code != http.StatusCreated {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
 	}
+	var created repoResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != "cloning" {
+		t.Fatalf("created status = %q, want cloning", created.Status)
+	}
+	waitRepoStatus(t, mux, "demo", "ready")
 
 	for body, want := range map[string]int{
 		`{"name":"demo","source":` + jsonQuote(src) + `}`: http.StatusConflict,
 		`{"name":"Bad.Name","source":"/x"}`:               http.StatusBadRequest,
-		`{"name":"orphan","source":"/does/not/exist"}`:    http.StatusBadRequest,
 		`{`: http.StatusBadRequest,
 	} {
 		if rec := doJSON(t, mux, "POST", "/api/repos", body); rec.Code != want {
@@ -180,16 +236,43 @@ func TestRepoEndpoints(t *testing.T) {
 	}
 }
 
+// A source that can't be cloned surfaces asynchronously: the repo row turns
+// failed with the clone error, deploys against it are refused, and deleting
+// it frees the name for another attempt.
+func TestRepoCloneFailure(t *testing.T) {
+	mux, _ := newTestMux(t)
+
+	bad := filepath.Join(t.TempDir(), "does-not-exist")
+	rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(bad)+`}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
+	}
+	repo := waitRepoStatus(t, mux, "demo", "failed")
+	if repo.Error == "" {
+		t.Error("failed repo has no error message")
+	}
+
+	// Not ready → deploys are refused with a conflict, and the name stays
+	// taken until the failed row is deleted.
+	if rec := doJSON(t, mux, "POST", "/api/deploys", `{"repo":"demo","ref":"main"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("deploy on failed repo: %d, want 409", rec.Code)
+	}
+	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(bad)+`}`); rec.Code != http.StatusConflict {
+		t.Fatalf("re-create over failed repo: %d, want 409", rec.Code)
+	}
+	if rec := doJSON(t, mux, "DELETE", "/api/repos/demo", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete failed repo: %d %s", rec.Code, rec.Body)
+	}
+	registerRepo(t, mux, "demo", newSourceRepo(t))
+}
+
 // A deleted repo must be re-registrable even when its mirror clone survived
 // deletion (cleanup is best-effort and can fail or race an in-flight fetch).
 func TestRepoDeleteThenRecreate(t *testing.T) {
 	mux, root := newTestMux(t)
 	src := newSourceRepo(t)
 
-	create := `{"name":"demo","source":` + jsonQuote(src) + `}`
-	if rec := doJSON(t, mux, "POST", "/api/repos", create); rec.Code != http.StatusCreated {
-		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 	if rec := doJSON(t, mux, "DELETE", "/api/repos/demo", ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("delete repo: %d %s", rec.Code, rec.Body)
 	}
@@ -197,17 +280,13 @@ func TestRepoDeleteThenRecreate(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "repos", "demo.git", "refs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if rec := doJSON(t, mux, "POST", "/api/repos", create); rec.Code != http.StatusCreated {
-		t.Fatalf("re-create repo after delete: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 }
 
 func TestDeployEndpoints(t *testing.T) {
 	mux, _ := newTestMux(t)
 	src := newSourceRepo(t)
-	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != 201 {
-		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 
 	rec := doJSON(t, mux, "POST", "/api/deploys", `{"repo":"demo","ref":"main"}`)
 	if rec.Code != http.StatusAccepted {
@@ -292,9 +371,7 @@ files = ["mycli"]
 	}
 	runTestGit(t, src, "commit", "-qam", "add artifact")
 
-	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != 201 {
-		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 	if rec := doJSON(t, mux, "POST", "/api/deploys", `{"repo":"demo","ref":"main"}`); rec.Code != http.StatusAccepted {
 		t.Fatalf("create deploy: %d %s", rec.Code, rec.Body)
 	}
@@ -372,9 +449,7 @@ files = ["mycli"]
 func TestObservabilityEndpoints(t *testing.T) {
 	mux, root := newTestMux(t)
 	src := newSourceRepo(t)
-	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != 201 {
-		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 	if rec := doJSON(t, mux, "POST", "/api/deploys", `{"repo":"demo","ref":"main"}`); rec.Code != http.StatusAccepted {
 		t.Fatalf("create deploy: %d %s", rec.Code, rec.Body)
 	}
@@ -506,9 +581,7 @@ func TestObservabilityEndpoints(t *testing.T) {
 func TestDeleteRepo(t *testing.T) {
 	mux, root := newTestMux(t)
 	src := newSourceRepo(t)
-	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != http.StatusCreated {
-		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 	// Build one deploy to ready so there are artifacts, state, and logs to
 	// remove.
 	if rec := doJSON(t, mux, "POST", "/api/deploys", `{"repo":"demo","ref":"main"}`); rec.Code != http.StatusAccepted {
@@ -557,9 +630,7 @@ func TestDeleteRepo(t *testing.T) {
 		t.Fatalf("delete missing repo: %d", rec.Code)
 	}
 	// The name is immediately reusable.
-	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != http.StatusCreated {
-		t.Fatalf("re-create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 }
 
 // testDeploy captures the deploy fields the stop/delete tests assert on.
@@ -600,9 +671,7 @@ func deployAndWait(t *testing.T, mux *http.ServeMux, ref string) testDeploy {
 func TestStopAndDeleteDeploy(t *testing.T) {
 	mux, root := newTestMux(t)
 	src := newSourceRepo(t)
-	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != http.StatusCreated {
-		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 	d := deployAndWait(t, mux, "main")
 
 	beDir := filepath.Join(root, "artifacts", "demo", "be", d.BeHash)
@@ -652,9 +721,7 @@ func TestStopAndDeleteDeploy(t *testing.T) {
 func TestDeleteDeployKeepsSharedArtifacts(t *testing.T) {
 	mux, root := newTestMux(t)
 	src := newSourceRepo(t)
-	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != http.StatusCreated {
-		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
-	}
+	registerRepo(t, mux, "demo", src)
 	first := deployAndWait(t, mux, "main")
 
 	// A frontend-only change keeps the backend partition — and its hash —
@@ -702,7 +769,7 @@ func TestRepoWatchEndpoints(t *testing.T) {
 
 	rec := doJSON(t, mux, "POST", "/api/repos",
 		`{"name":"demo","source":`+jsonQuote(src)+`,"watch":true,"watch_branches":"main"}`)
-	if rec.Code != http.StatusCreated {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("create watched repo: %d %s", rec.Code, rec.Body)
 	}
 	var repo struct {
@@ -715,6 +782,8 @@ func TestRepoWatchEndpoints(t *testing.T) {
 	if !repo.Watch || repo.WatchBranches != "main" {
 		t.Fatalf("created repo watch fields: %s", rec.Body)
 	}
+	// Let the background clone land so teardown doesn't race it.
+	waitRepoStatus(t, mux, "demo", "ready")
 
 	// Disable watching without touching the stored branch filter.
 	rec = doJSON(t, mux, "PATCH", "/api/repos/demo", `{"watch":false}`)

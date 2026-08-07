@@ -69,7 +69,7 @@ func TestOpenMigratesOldSchema(t *testing.T) {
 func TestRepoCRUD(t *testing.T) {
 	s := newTestStore(t)
 
-	r, err := s.CreateRepo("demo", "/src/demo", "/data/repos/demo.git")
+	r, err := s.CreateRepo("demo", "/src/demo", "/data/repos/demo.git", RepoReady)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestRepoCRUD(t *testing.T) {
 		t.Fatalf("unexpected repo: %+v", r)
 	}
 
-	if _, err := s.CreateRepo("demo", "/elsewhere", "/x"); !errors.Is(err, ErrConflict) {
+	if _, err := s.CreateRepo("demo", "/elsewhere", "/x", RepoReady); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate name err = %v, want ErrConflict", err)
 	}
 
@@ -116,7 +116,7 @@ const shaA = "aaaaaaa1111111111111111111111111111111111"
 
 func TestDeployLifecycle(t *testing.T) {
 	s := newTestStore(t)
-	r, err := s.CreateRepo("demo", "/src", "/bare")
+	r, err := s.CreateRepo("demo", "/src", "/bare", RepoReady)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestDeployLifecycle(t *testing.T) {
 
 func TestShortSHAGrowsOnCollision(t *testing.T) {
 	s := newTestStore(t)
-	r, _ := s.CreateRepo("demo", "/src", "/bare")
+	r, _ := s.CreateRepo("demo", "/src", "/bare", RepoReady)
 
 	// Two shas sharing a 7-char prefix force the second to use 8 chars.
 	shaX := "abcdef0" + strings.Repeat("1", 33)
@@ -198,8 +198,8 @@ func TestShortSHAGrowsOnCollision(t *testing.T) {
 
 func TestListDeploysFilter(t *testing.T) {
 	s := newTestStore(t)
-	r1, _ := s.CreateRepo("app", "/src/app", "/bare/app")
-	r2, _ := s.CreateRepo("lib", "/src/lib", "/bare/lib")
+	r1, _ := s.CreateRepo("app", "/src/app", "/bare/app", RepoReady)
+	r2, _ := s.CreateRepo("lib", "/src/lib", "/bare/lib", RepoReady)
 
 	shaB := "bbbbbbb2222222222222222222222222222222222"
 	shaC := "ccccccc3333333333333333333333333333333333"
@@ -288,7 +288,7 @@ func TestMigrateAddsColumnsToExistingDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	r, err := s.CreateRepo("demo", "/src", "/bare")
+	r, err := s.CreateRepo("demo", "/src", "/bare", RepoReady)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestMigrateAddsColumnsToExistingDB(t *testing.T) {
 
 func TestDeployArtifactsRoundTrip(t *testing.T) {
 	s := newTestStore(t)
-	r, err := s.CreateRepo("demo", "/src", "/bare")
+	r, err := s.CreateRepo("demo", "/src", "/bare", RepoReady)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func TestDeployArtifactsRoundTrip(t *testing.T) {
 
 func TestDeploysBySHAPrefix(t *testing.T) {
 	s := newTestStore(t)
-	r, _ := s.CreateRepo("demo", "/src", "/bare")
+	r, _ := s.CreateRepo("demo", "/src", "/bare", RepoReady)
 	if _, err := s.CreateDeploy(r.ID, shaA, DeployMeta{}); err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func TestDeploysBySHAPrefix(t *testing.T) {
 
 func TestBackendArtifactsAndProcesses(t *testing.T) {
 	s := newTestStore(t)
-	r, _ := s.CreateRepo("demo", "/src", "/bare")
+	r, _ := s.CreateRepo("demo", "/src", "/bare", RepoReady)
 
 	a := BackendArtifact{RepoID: r.ID, BeHash: "be1", StateDir: "/state/demo/be1", RunConfig: `{"run":["x"]}`}
 	if err := s.CreateBackendArtifact(a); err != nil {

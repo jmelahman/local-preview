@@ -16,6 +16,7 @@ import (
 
 	"github.com/jmelahman/local-preview/internal/api"
 	"github.com/jmelahman/local-preview/internal/build"
+	"github.com/jmelahman/local-preview/internal/clone"
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
@@ -153,6 +154,8 @@ func run(opts serveOptions) error {
 	queue.Start(workCtx, opts.buildConcurrency)
 	watcher := watch.New(database, gitMgr, queue, opts.pollInterval)
 	watcher.Start(workCtx)
+	cloner := clone.New(database, gitMgr, watcher.Kick)
+	cloner.Start(workCtx)
 	sweeper := retain.New(database, super, files)
 	sweeper.Start(workCtx)
 
@@ -163,6 +166,7 @@ func run(opts serveOptions) error {
 		Git:                 gitMgr,
 		Queue:               queue,
 		Super:               super,
+		Cloner:              cloner,
 		Watcher:             watcher,
 		Files:               files,
 		Sweeper:             sweeper,

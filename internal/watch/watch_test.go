@@ -64,11 +64,11 @@ func newWatchFixture(t *testing.T, branches string) (*Watcher, db.Repo, string) 
 	super := supervise.New(database, files, filepath.Join(root, "logs"))
 	queue := build.NewQueue(database, gitMgr, files, super, filepath.Join(root, "logs"), nil)
 
-	gr, err := gitMgr.Add(context.Background(), "demo", src)
+	gr, err := gitMgr.Add(context.Background(), "demo", src, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo, err := database.CreateRepo("demo", src, gr.Path)
+	repo, err := database.CreateRepo("demo", src, gr.Path, db.RepoReady)
 	if err != nil {
 		t.Fatal(err)
 	}

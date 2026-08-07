@@ -17,6 +17,13 @@ CREATE TABLE IF NOT EXISTS repos (
     -- branch tips deploy (comma-separated globs, empty = all branches).
     watch INTEGER NOT NULL DEFAULT 0,
     watch_branches TEXT NOT NULL DEFAULT '',
+    -- Mirror-clone outcome: registration returns while the clone runs in the
+    -- background, so a repo is deployable only once 'ready'. The default is
+    -- 'ready' so rows migrated from before the column (always fully cloned)
+    -- stay usable; creates insert 'cloning' explicitly.
+    status TEXT NOT NULL DEFAULT 'ready'
+        CHECK (status IN ('cloning', 'ready', 'failed')),
+    error TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 

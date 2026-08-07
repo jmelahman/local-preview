@@ -34,7 +34,7 @@ func newFixture(t *testing.T) *fixture {
 		filepath.Join(root, "state"),
 		filepath.Join(root, "tmp"))
 	super := supervise.New(database, files, filepath.Join(root, "logs"))
-	repo, err := database.CreateRepo("web", "/src/web", "/data/web.git")
+	repo, err := database.CreateRepo("web", "/src/web", "/data/web.git", db.RepoReady)
 	if err != nil {
 		t.Fatal(err)
 	}

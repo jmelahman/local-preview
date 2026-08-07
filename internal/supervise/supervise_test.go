@@ -102,7 +102,7 @@ func newFixture(t *testing.T) *fixture {
 	m := New(database, files, filepath.Join(root, "logs"))
 	m.healthInterval = 25 * time.Millisecond
 	t.Cleanup(m.StopAll)
-	repo, err := database.CreateRepo("demo", "/src", "/bare")
+	repo, err := database.CreateRepo("demo", "/src", "/bare", db.RepoReady)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +535,7 @@ func TestForkOrInitStateDir(t *testing.T) {
 	c2 := commit(t, src, "c2")
 
 	mgr := gitrepo.NewManager(filepath.Join(t.TempDir(), "repos"))
-	repo, err := mgr.Add(ctx, "demo", src)
+	repo, err := mgr.Add(ctx, "demo", src, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

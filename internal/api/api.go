@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/build"
+	"github.com/jmelahman/local-preview/internal/clone"
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
@@ -44,6 +45,9 @@ type Deps struct {
 	Git    *gitrepo.Manager
 	Queue  *build.Queue
 	Super  *supervise.Manager
+	// Cloner runs registrations' mirror clones in the background and holds
+	// their live progress.
+	Cloner *clone.Cloner
 	// Watcher, when set, is kicked after watch settings change so a newly
 	// watched repo polls immediately instead of waiting an interval.
 	Watcher *watch.Watcher
@@ -101,6 +105,24 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// repoJSON augments a repo row with the clone's live progress line, present
+// only while the repo is still cloning.
+type repoJSON struct {
+	db.Repo
+	Progress string `json:"progress,omitempty"`
+}
+
+func (d Deps) repoJSON(r db.Repo) repoJSON {
+	out := repoJSON{Repo: r}
+	if r.Status == db.RepoCloning && d.Cloner != nil {
+		out.Progress = d.Cloner.Progress(r.ID)
+	}
+	return out
+}
+
+// handleCreateRepo registers a repo. The mirror clone runs in the
+// background — the response is 202 with the row in status "cloning"; poll
+// GET /api/repos/{name} until it turns ready (or failed, with error set).
 func (d Deps) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name          string `json:"name"`
@@ -127,16 +149,7 @@ func (d Deps) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := d.Store.GetRepoByName(req.Name); err == nil {
-		httpError(w, http.StatusConflict, fmt.Sprintf("repo %q already exists", req.Name))
-		return
-	}
-	gr, err := d.Git.Add(r.Context(), req.Name, req.Source)
-	if err != nil {
-		httpError(w, http.StatusBadRequest, fmt.Sprintf("clone failed: %v", err))
-		return
-	}
-	repo, err := d.Store.CreateRepo(req.Name, req.Source, gr.Path)
+	repo, err := d.Store.CreateRepo(req.Name, req.Source, d.Git.Open(req.Name).Path, db.RepoCloning)
 	if errors.Is(err, db.ErrConflict) {
 		httpError(w, http.StatusConflict, fmt.Sprintf("repo %q already exists", req.Name))
 		return
@@ -146,15 +159,15 @@ func (d Deps) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Watch || branches != "" {
+		// Stored before the clone starts; the watcher skips non-ready repos
+		// and is kicked by the cloner once this one turns ready.
 		if repo, err = d.Store.SetRepoWatch(repo.ID, req.Watch, branches); err != nil {
 			internalError(w, "set repo watch", err)
 			return
 		}
-		if req.Watch {
-			d.Watcher.Kick()
-		}
 	}
-	writeJSON(w, http.StatusCreated, repo)
+	d.Cloner.Begin(repo)
+	writeJSON(w, http.StatusAccepted, d.repoJSON(repo))
 }
 
 // handleUpdateRepo changes a repo's watch settings. Fields absent from the
@@ -199,7 +212,7 @@ func (d Deps) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 	if watchOn {
 		d.Watcher.Kick()
 	}
-	writeJSON(w, http.StatusOK, repo)
+	writeJSON(w, http.StatusOK, d.repoJSON(repo))
 }
 
 func (d Deps) handleListRepos(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +221,11 @@ func (d Deps) handleListRepos(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "list repos", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, repos)
+	out := make([]repoJSON, len(repos))
+	for i, repo := range repos {
+		out[i] = d.repoJSON(repo)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (d Deps) handleGetRepo(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +238,7 @@ func (d Deps) handleGetRepo(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "get repo", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, repo)
+	writeJSON(w, http.StatusOK, d.repoJSON(repo))
 }
 
 // handleDeleteRepo unregisters a repo: stops its backends, removes its DB
@@ -238,6 +255,7 @@ func (d Deps) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "get repo", err)
 		return
 	}
+	d.Cloner.Cancel(repo.ID)
 	d.Super.StopRepo(repo.ID, "repo deleted")
 	d.Super.PurgeRepoContainers(repo.Name)
 	if err := d.Store.DeleteRepo(repo.ID); err != nil {
@@ -340,6 +358,10 @@ func (d Deps) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 	row, err := d.Queue.RequestDeploy(r.Context(), req.Repo, req.Ref, req.Rebuild)
 	if errors.Is(err, db.ErrNotFound) {
 		httpError(w, http.StatusNotFound, fmt.Sprintf("repo %q is not registered", req.Repo))
+		return
+	}
+	if errors.Is(err, build.ErrRepoNotReady) {
+		httpError(w, http.StatusConflict, err.Error())
 		return
 	}
 	if err != nil {

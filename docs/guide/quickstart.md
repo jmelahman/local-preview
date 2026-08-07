@@ -49,7 +49,10 @@ lowercase DNS label. The source can be a local path or any clone URL.
 <img class="dark-only" src="/quickstart-02-register-dark.png" alt="Register a repository" />
 
 Registering makes the server keep its own mirror clone of the repo. Builds
-read from that mirror, never from your working directory.
+read from that mirror, never from your working directory. The clone runs in
+the background — large repositories show a **cloning** state (with live
+progress when the source reports it) and become deployable once it
+finishes.
 
 The CLI equivalent:
 
