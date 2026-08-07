@@ -23,6 +23,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
+	"github.com/jmelahman/local-preview/internal/retain"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
 	"github.com/jmelahman/local-preview/internal/watch"
@@ -49,6 +50,12 @@ type Deps struct {
 	// Files locates published artifacts on disk (downloadable-artifact
 	// listings and downloads).
 	Files *store.Store
+	// Sweeper runs retention sweeps (POST /api/gc).
+	Sweeper *retain.Sweeper
+	// DBPath is the SQLite location actually opened (":memory:" for
+	// --in-memory), not Config's default — storage reporting sizes the real
+	// database, never a stale file from a previous on-disk run.
+	DBPath string
 	// GitHubWebhookSecret validates X-Hub-Signature-256 on webhook
 	// deliveries; empty disables POST /api/webhooks/github.
 	GitHubWebhookSecret string
@@ -75,6 +82,10 @@ func NewMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("GET /api/deploys/{id}/logs/run", d.handleDeployRunLog)
 	mux.HandleFunc("GET /api/deploys/{id}/stats", d.handleDeployStats)
 	mux.HandleFunc("GET /api/deploys/{id}/artifacts/{name}/{file}", d.handleArtifactDownload)
+	mux.HandleFunc("GET /api/storage", d.handleStorage)
+	mux.HandleFunc("GET /api/retention", d.handleGetRetention)
+	mux.HandleFunc("PUT /api/retention", d.handlePutRetention)
+	mux.HandleFunc("POST /api/gc", d.handleRunGC)
 	mux.Handle("/", web.Handler())
 	return mux
 }

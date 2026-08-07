@@ -819,15 +819,15 @@ func (m *Manager) StopDeploy(row db.DeployRow, reason string) {
 	}
 }
 
-// GCDeploy reclaims the artifacts, backend state, and process bookkeeping
-// backing a deploy that no surviving (non-evicted) deploy of the same repo
-// still references. Call it AFTER the triggering deploy row has been deleted
-// or marked evicted, so the shared-hash checks observe the correct surviving
-// set. Content-addressed artifacts are shared, so a hash still used by
-// another deploy is left untouched. This is the reclaim primitive that both a
-// manual delete and a future retention sweep build on. Cleanup is
-// best-effort: failures only leave unreachable bytes on disk, so they are
-// logged, not returned.
+// GCDeploy reclaims the artifacts, backend state, logs, and process
+// bookkeeping backing a deploy that no surviving (non-evicted) deploy of the
+// same repo still references. Call it AFTER the triggering deploy row has
+// been deleted or marked evicted, so the shared-hash checks observe the
+// correct surviving set. Content-addressed artifacts are shared, so a hash
+// still used by another deploy is left untouched. This is the reclaim
+// primitive that both a manual delete and the retention sweep build on.
+// Cleanup is best-effort: failures only leave unreachable bytes on disk, so
+// they are logged, not returned.
 func (m *Manager) GCDeploy(row db.DeployRow) {
 	remaining, err := m.db.ListDeploys(db.DeployFilter{Repo: row.RepoName})
 	if err != nil {
@@ -861,6 +861,7 @@ func (m *Manager) GCDeploy(row db.DeployRow) {
 		if err := m.files.RemoveBackend(row.RepoName, row.BeHash); err != nil {
 			log.Printf("gc deploy %d: remove backend files: %v", row.ID, err)
 		}
+		m.removeHashLogs(row.RepoName, "be", row.BeHash)
 	}
 	if row.FeHash != "" && !liveFe[row.FeHash] {
 		if _, err := m.db.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
@@ -872,6 +873,7 @@ func (m *Manager) GCDeploy(row db.DeployRow) {
 		if err := m.files.RemoveFrontend(row.RepoName, row.FeHash); err != nil {
 			log.Printf("gc deploy %d: remove frontend files: %v", row.ID, err)
 		}
+		m.removeHashLogs(row.RepoName, "fe", row.FeHash)
 	}
 	for _, ref := range row.Artifacts {
 		if liveDL[ref.Hash] {
@@ -880,7 +882,16 @@ func (m *Manager) GCDeploy(row db.DeployRow) {
 		if err := m.files.RemoveArtifact(row.RepoName, ref.Hash); err != nil {
 			log.Printf("gc deploy %d: remove artifact files: %v", row.ID, err)
 		}
+		m.removeHashLogs(row.RepoName, "dl", ref.Hash)
 	}
+}
+
+// removeHashLogs deletes an orphaned hash's build log and run-log directory.
+// Logs are keyed per hash (build.Queue.logPath, openRunLog), so once no
+// surviving deploy references the hash, nothing can serve them again.
+func (m *Manager) removeHashLogs(repoName, kind, hash string) {
+	os.Remove(filepath.Join(m.logsDir, repoName, kind, hash+".log"))
+	os.RemoveAll(filepath.Join(m.logsDir, repoName, "run", kind+"-"+hash))
 }
 
 // Status reports the runtime state of an artifact's process for API views:

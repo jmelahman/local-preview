@@ -103,6 +103,53 @@ export type RunLogChunk = {
   process?: ProcessState;
 };
 
+// Instance-wide artifact retention policy. 0 disables a limit; with both at
+// 0 the hourly sweep evicts nothing.
+export type RetentionPolicy = {
+  // Keep at most N non-evicted deploys per repo, newest first.
+  max_deploys_per_repo: number;
+  // Evict deploys created more than N days ago.
+  max_age_days: number;
+};
+
+// One repo's slice of the storage report.
+export type RepoUsage = {
+  repo: string;
+  artifacts_bytes: number;
+  state_bytes: number;
+  logs_bytes: number;
+  mirror_bytes: number;
+  total_bytes: number;
+  deploys: number;
+  evicted_deploys: number;
+};
+
+// GET /api/storage: how much disk the instance uses, by category and by repo.
+export type StorageReport = {
+  total_bytes: number;
+  artifacts_bytes: number;
+  state_bytes: number;
+  logs_bytes: number;
+  mirror_bytes: number;
+  tmp_bytes: number;
+  db_bytes: number;
+  repos: RepoUsage[];
+};
+
+export type EvictedDeploy = {
+  id: number;
+  repo: string;
+  short_sha: string;
+  branch?: string;
+};
+
+// POST /api/gc: what one sweep evicted and how much disk it gave back.
+export type GCResult = {
+  policy: RetentionPolicy;
+  evicted: EvictedDeploy[];
+  freed_bytes: number;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -151,6 +198,11 @@ export const api = {
     request<RunLogChunk>(
       `/api/deploys/${id}/logs/run?side=${side}&attempt=${attempt}&offset=${offset}`,
     ),
+  getStorage: () => request<StorageReport>("/api/storage"),
+  getRetention: () => request<RetentionPolicy>("/api/retention"),
+  putRetention: (policy: RetentionPolicy) =>
+    request<RetentionPolicy>("/api/retention", { method: "PUT", body: JSON.stringify(policy) }),
+  runGC: () => request<GCResult>("/api/gc", { method: "POST" }),
   getBuildLogs: async (id: number): Promise<string> => {
     const res = await fetch(`/api/deploys/${id}/logs`);
     if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText}`);

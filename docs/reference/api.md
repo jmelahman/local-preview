@@ -255,6 +255,83 @@ Downloads one file of a ready deploy's named
 the deploy's `artifacts` field lists. `404` for an unknown deploy,
 artifact, or file; `409` while the deploy isn't ready.
 
+## Storage & retention
+
+### `GET /api/storage`
+
+Reports the instance's disk usage, by category and by repo. Sizes are
+measured by walking the data directory on each call.
+
+```json
+{
+  "total_bytes": 123456789,
+  "artifacts_bytes": 100000000,
+  "state_bytes": 2000000,
+  "logs_bytes": 400000,
+  "mirror_bytes": 20000000,
+  "tmp_bytes": 0,
+  "db_bytes": 1056789,
+  "repos": [
+    {
+      "repo": "myapp",
+      "artifacts_bytes": 100000000,
+      "state_bytes": 2000000,
+      "logs_bytes": 400000,
+      "mirror_bytes": 20000000,
+      "total_bytes": 122400000,
+      "deploys": 12,
+      "evicted_deploys": 3
+    }
+  ]
+}
+```
+
+`deploys` counts a repo's non-evicted deploys; `evicted_deploys` the rows
+kept as history after their artifacts were reclaimed. `db_bytes` is `0` for
+`--in-memory` instances.
+
+### `GET /api/retention`
+
+Returns the [retention policy](/guide/configuration#retention-garbage-collection).
+Both limits default to `0` (unlimited — automatic eviction disabled).
+
+```json
+{ "max_deploys_per_repo": 10, "max_age_days": 30 }
+```
+
+### `PUT /api/retention`
+
+Replaces the retention policy. `max_deploys_per_repo` keeps at most N
+non-evicted deploys per repo, newest first; `max_age_days` evicts deploys
+created more than N days ago; `0` disables a limit. The policy takes effect
+on the next sweep — hourly, or immediately via `POST /api/gc` — so saving
+never evicts by itself.
+
+Response: `200 OK` with the saved policy. `400` for a negative limit or
+invalid JSON.
+
+### `POST /api/gc`
+
+Runs one retention sweep immediately and reports what it evicted. Evicting
+marks the deploy `evicted` (the row survives as history; its subdomain
+answers with a "redeploy to rebuild" page) and reclaims the artifacts,
+backend state, and logs that no surviving deploy shares. Stale `tmp/`
+staging leftovers are collected on every run, so the endpoint is useful even
+with retention disabled.
+
+Never evicted: queued/building deploys, each repo's newest ready deploy, and
+deploys a branch alias routes to.
+
+```json
+{
+  "policy": { "max_deploys_per_repo": 10, "max_age_days": 30 },
+  "evicted": [
+    { "id": 7, "repo": "myapp", "short_sha": "a1b2c3d", "branch": "main" }
+  ],
+  "freed_bytes": 52428800
+}
+```
+
 ## Webhooks
 
 ### `POST /api/webhooks/github`

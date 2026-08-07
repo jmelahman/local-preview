@@ -17,6 +17,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
+	"github.com/jmelahman/local-preview/internal/retain"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
 )
@@ -105,6 +106,8 @@ func newTestMux(t *testing.T) (*http.ServeMux, string) {
 		Queue:               queue,
 		Super:               super,
 		Files:               files,
+		Sweeper:             retain.New(database, super, files),
+		DBPath:              ":memory:",
 		GitHubWebhookSecret: testWebhookSecret,
 		Addr:                ":8080",
 	}), root

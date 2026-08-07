@@ -20,6 +20,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/proxy"
+	"github.com/jmelahman/local-preview/internal/retain"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
 	"github.com/jmelahman/local-preview/internal/watch"
@@ -155,6 +156,8 @@ func run(opts serveOptions) error {
 	queue.Start(workCtx, opts.buildConcurrency)
 	watcher := watch.New(database, gitMgr, queue, opts.pollInterval)
 	watcher.Start(workCtx)
+	sweeper := retain.New(database, super, files)
+	sweeper.Start(workCtx)
 
 	apex := api.NewMux(api.Deps{
 		Store:               database,
@@ -165,6 +168,8 @@ func run(opts serveOptions) error {
 		Super:               super,
 		Watcher:             watcher,
 		Files:               files,
+		Sweeper:             sweeper,
+		DBPath:              dbPath,
 		GitHubWebhookSecret: opts.githubSecret,
 		Addr:                opts.addr,
 	})

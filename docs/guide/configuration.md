@@ -93,6 +93,44 @@ A process-mode frontend holds its backend's address for its lifetime, so a
 paired backend inherits the frontend's recency and is never stopped while
 that frontend runs — the frontend goes first, the backend on a later sweep.
 
+## Retention & garbage collection
+
+Build artifacts accumulate: every deployed commit publishes
+content-addressed artifacts, state, and logs that outlive the commit's
+usefulness. A retention policy bounds that growth with two limits, each `0`
+(unlimited) by default:
+
+- **Deploys kept per repo** — keep at most N non-evicted deploys per repo,
+  newest first.
+- **Max age** — evict deploys created more than N days ago.
+
+The policy is stored in the database and edited at runtime — from the
+dashboard's **Storage & retention** dialog (the database icon in the
+header) or via [`PUT /api/retention`](/reference/api#put-api-retention) —
+no server restart involved. A background sweep enforces it hourly (and once
+at startup); **Run GC now** / [`POST /api/gc`](/reference/api#post-api-gc)
+applies it immediately.
+
+Eviction is not deletion: the deploy row survives as history with status
+`evicted`, its preview subdomain answers with a "redeploy to rebuild" page,
+and redeploying the commit revives it with a fresh build. The sweep reclaims
+the artifacts, backend state directories, and build/run logs that no
+surviving deploy shares — content-addressed artifacts shared with a
+surviving deploy are kept.
+
+Some deploys are never evicted automatically:
+
+- queued and building deploys (in flight);
+- each repo's newest ready deploy — a repo always keeps one working preview;
+- deploys a branch alias routes to, so branch URLs keep working.
+
+Use `DELETE /api/deploys/{id}` (or the dashboard's trash button) to remove a
+deploy entirely, history included.
+
+The dashboard's Storage & retention dialog also reports disk usage by
+category (artifacts, state, logs, mirror clones, tmp, database) and per
+repo, backed by [`GET /api/storage`](/reference/api#get-api-storage).
+
 ## The preview domain
 
 Previews are addressed as `http://<sha-prefix>.<repo>.<domain>[:port]/`. The

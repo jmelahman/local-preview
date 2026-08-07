@@ -5,6 +5,7 @@ import {
   type Deploy,
   type DeployArtifact,
   type DeployStatus,
+  type GCResult,
   type LogSide,
   type ProcessState,
   type Repo,
@@ -951,8 +952,242 @@ function ManageReposDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+// UsageCell right-aligns one byte count in the storage table; zero renders
+// muted so the eye lands on the rows that actually cost disk.
+function UsageCell({ bytes }: { bytes: number }) {
+  return (
+    <td className={`px-3 py-1.5 text-right tabular-nums ${bytes === 0 ? "text-fg-muted/50" : ""}`}>
+      {formatBytes(bytes)}
+    </td>
+  );
+}
+
+// RetentionForm edits the instance's retention policy: per-repo deploy cap
+// and max age, 0 = unlimited. Saving never evicts by itself — limits apply
+// on the next sweep (hourly, or via "Run GC now").
+function RetentionForm() {
+  const queryClient = useQueryClient();
+  const policy = useQuery({ queryKey: ["retention"], queryFn: api.getRetention });
+  const [maxDeploys, setMaxDeploys] = useState("0");
+  const [maxAge, setMaxAge] = useState("0");
+
+  // Track the server's value when it changes under us (initial load, save
+  // refetch) so the dirty check stays accurate.
+  useEffect(() => {
+    if (policy.data) {
+      setMaxDeploys(String(policy.data.max_deploys_per_repo));
+      setMaxAge(String(policy.data.max_age_days));
+    }
+  }, [policy.data]);
+
+  const parsed = {
+    max_deploys_per_repo: Math.max(0, Math.floor(Number(maxDeploys) || 0)),
+    max_age_days: Math.max(0, Math.floor(Number(maxAge) || 0)),
+  };
+  const dirty =
+    policy.data != null &&
+    (parsed.max_deploys_per_repo !== policy.data.max_deploys_per_repo ||
+      parsed.max_age_days !== policy.data.max_age_days);
+
+  const save = useMutation({
+    mutationFn: () => api.putRetention(parsed),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["retention"] }),
+  });
+
+  // Not inputClass: its w-full would stretch a small numeric field across
+  // the dialog.
+  const numberInputClass =
+    "w-28 rounded bg-surface px-2 py-1 text-sm text-fg placeholder:text-fg-muted/60";
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-end gap-3">
+        <Field label="Deploys kept per repo">
+          <input
+            type="number"
+            min={0}
+            value={maxDeploys}
+            onChange={(e) => setMaxDeploys(e.target.value)}
+            className={numberInputClass}
+          />
+        </Field>
+        <Field label="Max age (days)">
+          <input
+            type="number"
+            min={0}
+            value={maxAge}
+            onChange={(e) => setMaxAge(e.target.value)}
+            className={numberInputClass}
+          />
+        </Field>
+        {dirty && (
+          <button
+            type="button"
+            onClick={() => save.mutate()}
+            disabled={save.isPending}
+            className={`${neutralButtonClass} px-3 py-1 text-sm`}
+          >
+            Save
+          </button>
+        )}
+      </div>
+      <p className="text-xs text-fg-muted">
+        0 = unlimited. Each repo's newest ready deployment always survives; deployments a branch
+        alias routes to and in-flight builds are never evicted.
+      </p>
+      {save.error != null && (
+        <p className="text-xs text-danger" title={String(save.error)}>
+          {String(save.error)}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// StorageDialog is the instance-management view: how much disk the data
+// directory uses (by category and by repo), the retention policy, and a
+// manual GC trigger.
+function StorageDialog({ onClose }: { onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const storage = useQuery({ queryKey: ["storage"], queryFn: api.getStorage });
+  const [gcResult, setGcResult] = useState<GCResult | null>(null);
+  const gc = useMutation({
+    mutationFn: api.runGC,
+    onSuccess: (res) => {
+      setGcResult(res);
+      queryClient.invalidateQueries({ queryKey: ["storage"] });
+      queryClient.invalidateQueries({ queryKey: ["deploys"] });
+    },
+  });
+
+  const s = storage.data;
+  return (
+    <Modal title="Storage & retention" onClose={onClose} wide>
+      <div className="flex flex-col gap-4 p-4 text-sm">
+        <section className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+              Disk usage
+            </h3>
+            {s ? (
+              <>
+                <Metric label="total" value={formatBytes(s.total_bytes)} />
+                <Metric
+                  label="artifacts"
+                  value={formatBytes(s.artifacts_bytes)}
+                  title="Published builds (frontend, backend, downloadable artifacts)"
+                />
+                <Metric
+                  label="state"
+                  value={formatBytes(s.state_bytes)}
+                  title="Mutable backend state directories"
+                />
+                <Metric label="logs" value={formatBytes(s.logs_bytes)} />
+                <Metric
+                  label="mirrors"
+                  value={formatBytes(s.mirror_bytes)}
+                  title="Bare git clones of registered repos"
+                />
+                <Metric label="tmp" value={formatBytes(s.tmp_bytes)} />
+                <Metric label="db" value={formatBytes(s.db_bytes)} />
+              </>
+            ) : (
+              <span className="text-xs text-fg-muted">measuring…</span>
+            )}
+          </div>
+          {s && s.repos.length > 0 && (
+            <div className="overflow-x-auto rounded border border-border">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border text-left text-fg-muted">
+                    <th className="px-3 py-1.5 font-medium">repo</th>
+                    <th className="px-3 py-1.5 text-right font-medium">deploys</th>
+                    <th className="px-3 py-1.5 text-right font-medium">artifacts</th>
+                    <th className="px-3 py-1.5 text-right font-medium">state</th>
+                    <th className="px-3 py-1.5 text-right font-medium">logs</th>
+                    <th className="px-3 py-1.5 text-right font-medium">mirror</th>
+                    <th className="px-3 py-1.5 text-right font-medium">total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {s.repos.map((r) => (
+                    <tr key={r.repo}>
+                      <td className="px-3 py-1.5 font-medium">{r.repo}</td>
+                      <td
+                        className="px-3 py-1.5 text-right tabular-nums"
+                        title={`${r.deploys} active, ${r.evicted_deploys} evicted`}
+                      >
+                        {r.deploys}
+                        {r.evicted_deploys > 0 && (
+                          <span className="text-fg-muted"> +{r.evicted_deploys} evicted</span>
+                        )}
+                      </td>
+                      <UsageCell bytes={r.artifacts_bytes} />
+                      <UsageCell bytes={r.state_bytes} />
+                      <UsageCell bytes={r.logs_bytes} />
+                      <UsageCell bytes={r.mirror_bytes} />
+                      <UsageCell bytes={r.total_bytes} />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <section className="flex flex-col gap-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+            Retention policy
+          </h3>
+          <RetentionForm />
+        </section>
+
+        <section className="flex flex-col gap-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+            Garbage collection
+          </h3>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => gc.mutate()}
+              disabled={gc.isPending}
+              className={buttonClass}
+            >
+              {gc.isPending ? "Collecting…" : "Run GC now"}
+            </button>
+            {gcResult && !gc.isPending && (
+              <span className="text-xs text-fg-muted">
+                {gcResult.evicted.length > 0
+                  ? `Evicted ${gcResult.evicted.length} deployment${
+                      gcResult.evicted.length === 1 ? "" : "s"
+                    }, freed ${formatBytes(gcResult.freed_bytes)}.`
+                  : "Nothing to collect."}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-fg-muted">
+            Applies the retention policy immediately and clears stale staging files. The sweep also
+            runs hourly on its own.
+          </p>
+        </section>
+      </div>
+      <DialogFooter
+        error={storage.error ?? gc.error}
+        hint="Evicted deployments keep their history — redeploy the commit to rebuild one."
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className={`${neutralButtonClass} px-3 py-1 text-sm`}
+        >
+          Done
+        </button>
+      </DialogFooter>
+    </Modal>
+  );
+}
+
 export default function App() {
-  const [dialog, setDialog] = useState<"register" | "deploy" | "repos" | null>(null);
+  const [dialog, setDialog] = useState<"register" | "deploy" | "repos" | "storage" | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
 
   const health = useQuery({
@@ -1018,6 +1253,15 @@ export default function App() {
             className="inline-flex h-7 w-7 items-center justify-center rounded bg-surface-2 text-fg transition-colors duration-150 hover:bg-surface-3"
           >
             <IconSettings />
+          </button>
+          <button
+            type="button"
+            onClick={() => setDialog("storage")}
+            title="Storage & retention"
+            aria-label="Storage & retention"
+            className="inline-flex h-7 w-7 items-center justify-center rounded bg-surface-2 text-fg transition-colors duration-150 hover:bg-surface-3"
+          >
+            <IconDatabase />
           </button>
           <ThemeToggle />
         </div>
@@ -1179,6 +1423,7 @@ export default function App() {
 
       {dialog === "register" && <RegisterRepoDialog onClose={() => setDialog(null)} />}
       {dialog === "repos" && <ManageReposDialog onClose={() => setDialog(null)} />}
+      {dialog === "storage" && <StorageDialog onClose={() => setDialog(null)} />}
       {dialog === "deploy" && (
         <DeployDialog
           repos={repos.data ?? []}
@@ -1399,6 +1644,25 @@ function IconTrash({ className = "" }: { className?: string }) {
     >
       <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6" />
       <path d="M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
+function IconDatabase() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <ellipse cx="12" cy="5" rx="8" ry="3" />
+      <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+      <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3" />
     </svg>
   );
 }
