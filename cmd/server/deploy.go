@@ -45,15 +45,23 @@ func deployCmd() *cobra.Command {
 
 	var listFilter client.DeployFilter
 	list := &cobra.Command{
-		Use:   "list",
-		Short: "List deploys",
+		Use:   "list [query]",
+		Short: "List deploys, optionally narrowed by a free-text search",
+		Long: "List deploys. The optional query is a free-text search matching a\n" +
+			"commit sha prefix or a substring of the repo, branch, ref, or author\n" +
+			"(case-insensitive); flags narrow by one field exactly.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				listFilter.Query = args[0]
+			}
 			return runDeployList(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(), listFilter)
 		},
 	}
 	list.Flags().StringVar(&listFilter.Repo, "repo", "", "Only deploys of this repo")
 	list.Flags().StringVar(&listFilter.Branch, "branch", "", "Only deploys of this branch")
 	list.Flags().StringVar(&listFilter.Author, "author", "", "Only deploys whose commit author name or email contains this (case-insensitive)")
+	list.Flags().StringVar(&listFilter.Status, "status", "", "Only deploys with this build status (queued, building, ready, failed, evicted)")
 
 	show := &cobra.Command{
 		Use:   "show <id>",

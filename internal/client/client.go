@@ -176,18 +176,25 @@ func (c *Client) CreateDeploy(ctx context.Context, repo, ref string, rebuild boo
 }
 
 // DeployFilter narrows ListDeploys; zero-value fields don't filter. It
-// mirrors the API's query params: repo and branch match exactly, author is a
-// case-insensitive substring of the author name or email.
+// mirrors the API's query params: repo, branch, and status match exactly,
+// author is a case-insensitive substring of the author name or email, and
+// query is a free-text search (sha prefix, or a substring of the repo,
+// branch, ref, or author).
 type DeployFilter struct {
 	Repo   string
 	Branch string
 	Author string
+	Status string
+	Query  string
 }
 
 // ListDeploys fetches deploys narrowed by the filter.
 func (c *Client) ListDeploys(ctx context.Context, f DeployFilter) ([]Deploy, error) {
 	q := url.Values{}
-	for key, val := range map[string]string{"repo": f.Repo, "branch": f.Branch, "author": f.Author} {
+	for key, val := range map[string]string{
+		"repo": f.Repo, "branch": f.Branch, "author": f.Author,
+		"status": f.Status, "q": f.Query,
+	} {
 		if val != "" {
 			q.Set(key, val)
 		}

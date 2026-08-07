@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 // findWorktreeRoot walks up from dir to the first directory containing a
@@ -70,6 +71,35 @@ func localHeadSHA(dir string) (string, error) {
 		return "", err
 	}
 	return head.Hash().String(), nil
+}
+
+// localResolveRevision resolves rev (a branch, tag, sha, HEAD~1, …) to a
+// full commit sha in the working tree containing dir — the equivalent of
+// `git rev-parse <rev>`.
+func localResolveRevision(dir, rev string) (string, error) {
+	repo, err := openLocalRepo(dir)
+	if err != nil {
+		return "", err
+	}
+	h, err := repo.ResolveRevision(plumbing.Revision(rev))
+	if err != nil {
+		return "", err
+	}
+	return h.String(), nil
+}
+
+// localHeadBranch returns the branch HEAD is on for the working tree
+// containing dir, or "" when detached or not a git repo.
+func localHeadBranch(dir string) string {
+	repo, err := openLocalRepo(dir)
+	if err != nil {
+		return ""
+	}
+	head, err := repo.Head()
+	if err != nil || !head.Name().IsBranch() {
+		return ""
+	}
+	return head.Name().Short()
 }
 
 // localOriginURL returns the origin remote's URL for the working tree

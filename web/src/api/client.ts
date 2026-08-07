@@ -160,6 +160,14 @@ export type GCResult = {
   freed_bytes: number;
 };
 
+// Narrows GET /api/deploys; empty fields don't filter. q is a free-text
+// search matching a commit-sha prefix or a substring of the repo, branch,
+// ref, or author (case-insensitive); status matches the build status exactly.
+export type DeployFilter = {
+  q?: string;
+  status?: DeployStatus | "";
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -199,7 +207,13 @@ export const api = {
     }),
   deleteRepo: (name: string) =>
     request<void>(`/api/repos/${encodeURIComponent(name)}`, { method: "DELETE" }),
-  listDeploys: () => request<Deploy[]>("/api/deploys"),
+  listDeploys: (filter?: DeployFilter) => {
+    const params = new URLSearchParams();
+    if (filter?.q) params.set("q", filter.q);
+    if (filter?.status) params.set("status", filter.status);
+    const qs = params.toString();
+    return request<Deploy[]>(`/api/deploys${qs ? `?${qs}` : ""}`);
+  },
   createDeploy: (repo: string, ref: string) =>
     request<Deploy>("/api/deploys", { method: "POST", body: JSON.stringify({ repo, ref }) }),
   stopDeploy: (id: number) => request<Deploy>(`/api/deploys/${id}/stop`, { method: "POST" }),

@@ -33,7 +33,7 @@ Start the orchestrator.
 | Command | Description |
 | --- | --- |
 | `preview deploy [ref]` | Deploy a commit (default: HEAD of the current repo) and print its preview URL, plus a download URL per [artifact](/reference/preview-toml#artifacts-name) file |
-| `preview deploy list` | List deploys (`--repo`, `--branch`, `--author` to filter) |
+| `preview deploy list [query]` | List deploys. The optional query is a free-text search — a commit-sha prefix, or a substring of the repo, branch, ref, or author (case-insensitive); `--repo`, `--branch`, `--author`, `--status` each narrow by one field |
 | `preview deploy show <id>` | Print one deploy as JSON |
 | `preview deploy logs <id>` | Print a deploy's build logs |
 | `preview deploy logs <id> --run` | Print the process run log — the preview server's stdout+stderr, init output included. `--side fe` selects a process-mode frontend; `-f`/`--follow` keeps polling for new output until interrupted |
@@ -51,6 +51,25 @@ Flags on `preview deploy`:
 | `--json` | Print the deploy as JSON |
 
 The command exits non-zero if the deploy fails, so it can gate scripts.
+
+## `preview open`
+
+Jump from a checkout to its preview: `preview open` finds the deploy of the
+current repo's HEAD (falling back to the checked-out branch's newest deploy
+when that exact commit was never deployed) and opens its preview URL in the
+browser. `preview open <ref>` accepts a branch — its newest deploy wins — a
+tag, or a full or abbreviated commit sha; anything else is tried as a
+free-text search of the repo's deploys. The URL is always printed, so the
+command composes with scripts even when no browser is around.
+
+| Flag | Description |
+| --- | --- |
+| `--repo` | Registered repo name; by default the current directory is matched against registered sources |
+| `--print` | Print the preview URL only, without opening a browser |
+
+Exits non-zero when the matched deploy isn't ready — still building, failed,
+or evicted — with a hint at the follow-up command (`preview deploy`,
+`preview deploy logs`).
 
 ## `preview install-hook`
 

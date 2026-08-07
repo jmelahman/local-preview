@@ -209,28 +209,47 @@ func TestListDeploysFilter(t *testing.T) {
 		meta   DeployMeta
 	}{
 		{r1.ID, shaA, DeployMeta{Branch: "main", AuthorName: "Ada Lovelace", AuthorEmail: "ada@example.com"}},
-		{r1.ID, shaB, DeployMeta{Branch: "feature", AuthorName: "Grace Hopper", AuthorEmail: "grace@example.com"}},
+		{r1.ID, shaB, DeployMeta{Ref: "v1.2.3", Branch: "feature", AuthorName: "Grace Hopper", AuthorEmail: "grace@example.com"}},
 		{r2.ID, shaC, DeployMeta{Branch: "main", AuthorName: "Ada Lovelace", AuthorEmail: "ada@example.com"}},
 	}
-	for _, sd := range seed {
-		if _, err := s.CreateDeploy(sd.repoID, sd.sha, sd.meta); err != nil {
+	ids := make([]int64, len(seed))
+	for i, sd := range seed {
+		d, err := s.CreateDeploy(sd.repoID, sd.sha, sd.meta)
+		if err != nil {
 			t.Fatal(err)
 		}
+		ids[i] = d.ID
+	}
+	if err := s.SetDeployReady(ids[1]); err != nil {
+		t.Fatal(err)
 	}
 
 	for name, tc := range map[string]struct {
 		f    DeployFilter
 		want int
 	}{
-		"all":              {DeployFilter{}, 3},
-		"repo":             {DeployFilter{Repo: "app"}, 2},
-		"branch":           {DeployFilter{Branch: "main"}, 2},
-		"repo+branch":      {DeployFilter{Repo: "app", Branch: "main"}, 1},
-		"author name":      {DeployFilter{Author: "grace hopper"}, 1},
-		"author email":     {DeployFilter{Author: "ADA@example"}, 2},
-		"author substring": {DeployFilter{Author: "lovelace"}, 2},
-		"author wildcards": {DeployFilter{Author: "%"}, 0},
-		"no match":         {DeployFilter{Branch: "gone"}, 0},
+		"all":                      {DeployFilter{}, 3},
+		"repo":                     {DeployFilter{Repo: "app"}, 2},
+		"branch":                   {DeployFilter{Branch: "main"}, 2},
+		"repo+branch":              {DeployFilter{Repo: "app", Branch: "main"}, 1},
+		"author name":              {DeployFilter{Author: "grace hopper"}, 1},
+		"author email":             {DeployFilter{Author: "ADA@example"}, 2},
+		"author substring":         {DeployFilter{Author: "lovelace"}, 2},
+		"author wildcards":         {DeployFilter{Author: "%"}, 0},
+		"no match":                 {DeployFilter{Branch: "gone"}, 0},
+		"status ready":             {DeployFilter{Status: DeployReady}, 1},
+		"status queued":            {DeployFilter{Status: DeployQueued}, 2},
+		"query sha prefix":         {DeployFilter{Query: "bbbb"}, 1},
+		"query sha case":           {DeployFilter{Query: "BBBBBBB2"}, 1},
+		"query sha is prefix-only": {DeployFilter{Query: "2222"}, 0},
+		"query branch substring":   {DeployFilter{Query: "feat"}, 1},
+		"query repo substring":     {DeployFilter{Query: "li"}, 1},
+		"query ref":                {DeployFilter{Query: "v1.2"}, 1},
+		"query author":             {DeployFilter{Query: "grace"}, 1},
+		"query wildcards":          {DeployFilter{Query: "%"}, 0},
+		"query+repo":               {DeployFilter{Query: "main", Repo: "app"}, 1},
+		"query+status":             {DeployFilter{Query: "grace", Status: DeployReady}, 1},
+		"query no match":           {DeployFilter{Query: "zzz"}, 0},
 	} {
 		got, err := s.ListDeploys(tc.f)
 		if err != nil {

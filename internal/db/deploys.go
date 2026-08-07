@@ -149,6 +149,21 @@ type DeployFilter struct {
 	Branch string
 	// Author is a case-insensitive substring of the author name or email.
 	Author string
+	// Status matches the build status exactly (queued/building/ready/...).
+	Status string
+	// Query is a free-text search: a case-insensitive prefix of the commit
+	// sha, or a case-insensitive substring of the repo name, branch, ref,
+	// author name, or author email.
+	Query string
+}
+
+// IsDeployStatus reports whether s is one of the deploy build statuses.
+func IsDeployStatus(s string) bool {
+	switch s {
+	case DeployQueued, DeployBuilding, DeployReady, DeployFailed, DeployEvicted:
+		return true
+	}
+	return false
 }
 
 // ListDeploys returns deploys newest first, narrowed by the filter.
@@ -169,6 +184,22 @@ func (s *Store) ListDeploys(f DeployFilter) ([]DeployRow, error) {
 		where = append(where,
 			`(instr(lower(d.author_name), lower(?)) > 0 OR instr(lower(d.author_email), lower(?)) > 0)`)
 		args = append(args, f.Author, f.Author)
+	}
+	if f.Status != "" {
+		where = append(where, `d.status = ?`)
+		args = append(args, f.Status)
+	}
+	if f.Query != "" {
+		// instr = 1 is a wildcard-safe prefix match (shas are stored
+		// lowercase); short_sha needs no clause of its own, being a prefix of
+		// sha itself.
+		where = append(where, `(instr(d.sha, lower(?)) = 1
+			OR instr(lower(d.branch), lower(?)) > 0
+			OR instr(lower(d.ref), lower(?)) > 0
+			OR instr(lower(r.name), lower(?)) > 0
+			OR instr(lower(d.author_name), lower(?)) > 0
+			OR instr(lower(d.author_email), lower(?)) > 0)`)
+		args = append(args, f.Query, f.Query, f.Query, f.Query, f.Query, f.Query)
 	}
 	if len(where) > 0 {
 		q += ` WHERE ` + strings.Join(where, ` AND `)

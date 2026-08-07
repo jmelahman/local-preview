@@ -165,8 +165,11 @@ Returns deploys, newest first. Narrow the list with any combination of:
 | `?repo=<name>` | exact repo name |
 | `?branch=<name>` | exact branch name |
 | `?author=<text>` | case-insensitive substring of the commit author's name or email |
+| `?status=<status>` | exact build status — `queued`, `building`, `ready`, `failed`, or `evicted` (anything else is `400`) |
+| `?q=<text>` | free-text search: a commit-sha prefix, or a case-insensitive substring of the repo, branch, ref, or author |
 
-`?author=ada@example.com` is the "only my deployments" filter.
+`?author=ada@example.com` is the "only my deployments" filter; `?q=` is the
+search box behind the dashboard's deployments list.
 
 ### `GET /api/deploys/{id}`
 

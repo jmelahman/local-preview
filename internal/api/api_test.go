@@ -333,12 +333,23 @@ func TestDeployEndpoints(t *testing.T) {
 		"?repo=demo&branch=main&author=test": 1,
 		"?branch=other":                      0,
 		"?author=someone-else":               0,
+		"?status=ready":                      1,
+		"?status=failed":                     0,
+		"?q=" + d.ShortSHA:                   1,
+		"?q=demo":                            1,
+		"?q=MAIN":                            1,
+		"?q=test%40example":                  1,
+		"?q=" + d.ShortSHA + "&status=ready": 1,
+		"?q=no-such-thing":                   0,
 	} {
 		rec = doJSON(t, mux, "GET", "/api/deploys"+query, "")
 		var list []json.RawMessage
 		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list) != want {
 			t.Fatalf("list deploys %s: got %d (%v), want %d: %s", query, len(list), err, want, rec.Body)
 		}
+	}
+	if rec := doJSON(t, mux, "GET", "/api/deploys?status=bogus", ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("list deploys with unknown status: %d %s", rec.Code, rec.Body)
 	}
 
 	rec = doJSON(t, mux, "GET", "/api/deploys/1/logs", "")

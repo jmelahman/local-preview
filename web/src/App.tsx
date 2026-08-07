@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   api,
@@ -147,6 +147,17 @@ function timeAgo(iso: string): string {
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
+}
+
+// useDebounced trails value by ms, so per-keystroke consumers (the search
+// query) fire once per pause instead of once per key.
+function useDebounced<T>(value: T, ms: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), ms);
+    return () => clearTimeout(id);
+  }, [value, ms]);
+  return debounced;
 }
 
 const inputClass =
@@ -1361,9 +1372,15 @@ function StorageDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+const deployStatuses: DeployStatus[] = ["queued", "building", "ready", "failed", "evicted"];
+
 export default function App() {
   const [dialog, setDialog] = useState<"register" | "deploy" | "repos" | "storage" | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<DeployStatus | "">("");
+  const query = useDebounced(search.trim(), 200);
+  const filtersActive = query !== "" || statusFilter !== "";
 
   const health = useQuery({
     queryKey: ["health"],
@@ -1380,8 +1397,11 @@ export default function App() {
       query.state.data?.some((r) => r.status === "cloning") ? 1000 : false,
   });
   const deploys = useQuery({
-    queryKey: ["deploys"],
-    queryFn: api.listDeploys,
+    queryKey: ["deploys", query, statusFilter],
+    queryFn: () => api.listDeploys({ q: query, status: statusFilter }),
+    // Keep the previous page while a filter change refetches, so the list
+    // doesn't blank out between keystrokes.
+    placeholderData: keepPreviousData,
     // Poll while anything is in flight (builds or cold starts) so state
     // flips surface promptly.
     refetchInterval: (query) =>
@@ -1456,16 +1476,42 @@ export default function App() {
 
       <main className="mx-auto w-full max-w-5xl flex-1 px-3 py-4">
         <section>
-          <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
             <div className="flex items-baseline gap-2">
               <h2 className="text-sm font-semibold uppercase tracking-wide">Deployments</h2>
               {deploys.data && deploys.data.length > 0 && (
                 <span className="text-xs text-fg-muted tabular-nums">{deploys.data.length}</span>
               )}
             </div>
-            <button type="button" onClick={() => setDialog("deploy")} className={buttonClass}>
-              Deploy
-            </button>
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              <div className="relative">
+                <IconSearch className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fg-muted/60" />
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search sha, branch, author…"
+                  aria-label="Search deployments"
+                  className="h-7 w-56 rounded border border-border bg-surface pl-7 pr-2 text-sm text-fg placeholder:text-fg-muted/60"
+                />
+              </div>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as DeployStatus | "")}
+                aria-label="Filter by status"
+                className="h-7 cursor-pointer rounded border border-border bg-surface px-2 text-sm text-fg"
+              >
+                <option value="">all statuses</option>
+                {deployStatuses.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+              <button type="button" onClick={() => setDialog("deploy")} className={buttonClass}>
+                Deploy
+              </button>
+            </div>
           </div>
           <div className="overflow-hidden rounded border border-border bg-surface">
             {deploys.isPending && (
@@ -1479,7 +1525,26 @@ export default function App() {
                 ))}
               </div>
             )}
-            {deploys.data?.length === 0 && (
+            {deploys.data?.length === 0 && filtersActive && (
+              <div className="flex flex-col items-center gap-1 px-6 py-16 text-center">
+                <IconSearch className="mb-2 h-8 w-8 text-fg-muted/50" />
+                <p className="text-sm font-medium">No matching deployments</p>
+                <p className="text-xs text-fg-muted">
+                  Try a different search or clear the filters.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearch("");
+                    setStatusFilter("");
+                  }}
+                  className={`${neutralButtonClass} mt-3`}
+                >
+                  Clear filters
+                </button>
+              </div>
+            )}
+            {deploys.data?.length === 0 && !filtersActive && (
               <div className="flex flex-col items-center gap-1 px-6 py-16 text-center">
                 <IconDeploy className="mb-2 h-8 w-8 text-fg-muted/50" />
                 <p className="text-sm font-medium">No deployments yet</p>
@@ -1731,6 +1796,24 @@ function IconArrowUpRight({ className = "" }: { className?: string }) {
       aria-hidden="true"
     >
       <path d="M7 17 17 7M8 7h9v9" />
+    </svg>
+  );
+}
+
+function IconSearch({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="11" cy="11" r="7" />
+      <path d="m21 21-4.35-4.35" />
     </svg>
   );
 }

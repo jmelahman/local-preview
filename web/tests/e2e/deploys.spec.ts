@@ -248,6 +248,67 @@ test("evict and redeploy from the dashboard", async ({ page }) => {
   await expect(page.getByText("fixture frontend v1")).toBeVisible();
 });
 
+test("search and status filters narrow the deployments list", async ({ page }) => {
+  test.setTimeout(180_000);
+
+  const waitReady = async (id: number) => {
+    await expect
+      .poll(
+        async () => {
+          const r = await page.request.get(`/api/deploys/${id}`);
+          const latest = await r.json();
+          if (latest.status === "failed") throw new Error(`deploy failed: ${latest.error}`);
+          return latest.status;
+        },
+        { timeout: 120_000, intervals: [500] },
+      )
+      .toBe("ready");
+  };
+
+  // Self-contained: ensure the fixture repo and two distinct deploys exist
+  // (a fresh commit guarantees the second even when run alone).
+  const repoRes = await page.request.post("/api/repos", {
+    data: { name: "fixture", source: repoDir },
+  });
+  expect([202, 409]).toContain(repoRes.status());
+  await waitRepoReady(page, "fixture");
+  const dep1 = await (
+    await page.request.post("/api/deploys", { data: { repo: "fixture", ref: sha } })
+  ).json();
+  writeFileSync(join(repoDir, "web", "src", "index.html"), "fixture frontend v3");
+  git(repoDir, "commit", "-qam", "v3");
+  const dep2 = await (
+    await page.request.post("/api/deploys", {
+      data: { repo: "fixture", ref: git(repoDir, "rev-parse", "HEAD") },
+    })
+  ).json();
+  await waitReady(dep1.id);
+  await waitReady(dep2.id);
+
+  // The API narrows by free-text query and rejects unknown statuses.
+  const byQ = await (await page.request.get(`/api/deploys?q=${dep2.short_sha}`)).json();
+  expect(byQ.map((d: { id: number }) => d.id)).toEqual([dep2.id]);
+  expect((await page.request.get("/api/deploys?status=bogus")).status()).toBe(400);
+
+  // Searching for one commit's sha hides the other row.
+  await page.goto("/");
+  const rows = page.locator("main li");
+  await expect(rows.filter({ hasText: dep1.short_sha })).toBeVisible();
+  await expect(rows.filter({ hasText: dep2.short_sha })).toBeVisible();
+  await page.getByRole("searchbox", { name: "Search deployments" }).fill(dep1.short_sha);
+  await expect(rows.filter({ hasText: dep2.short_sha })).toBeHidden();
+  await expect(rows.filter({ hasText: dep1.short_sha })).toBeVisible();
+  await page.getByRole("searchbox", { name: "Search deployments" }).fill("");
+
+  // No deploy in the suite ever ends up failed, so the status filter lands
+  // on the no-match state, and clearing restores the list.
+  await page.getByRole("combobox", { name: "Filter by status" }).selectOption("failed");
+  await expect(page.getByText("No matching deployments")).toBeVisible();
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(rows.filter({ hasText: dep1.short_sha })).toBeVisible();
+  await expect(rows.filter({ hasText: dep2.short_sha })).toBeVisible();
+});
+
 test("register dialog tracks the background clone and closes itself", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "register repo" }).click();

@@ -373,10 +373,17 @@ func (d Deps) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleListDeploys(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if st := q.Get("status"); st != "" && !db.IsDeployStatus(st) {
+		httpError(w, http.StatusBadRequest, fmt.Sprintf(
+			"unknown status %q (one of: queued, building, ready, failed, evicted)", st))
+		return
+	}
 	rows, err := d.Store.ListDeploys(db.DeployFilter{
 		Repo:   q.Get("repo"),
 		Branch: q.Get("branch"),
 		Author: q.Get("author"),
+		Status: q.Get("status"),
+		Query:  q.Get("q"),
 	})
 	if err != nil {
 		internalError(w, "list deploys", err)
