@@ -971,6 +971,16 @@ export default function App() {
           >
             Register repo
           </button>
+          <a
+            href="https://jamison.lahman.dev/local-preview/guide/"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Help"
+            aria-label="Help"
+            className="inline-flex h-7 w-7 items-center justify-center rounded bg-surface-2 text-fg transition-colors duration-150 hover:bg-surface-3"
+          >
+            <IconHelp />
+          </a>
           <button
             type="button"
             onClick={() => setDialog("repos")}
@@ -1336,6 +1346,25 @@ function IconTrash({ className = "" }: { className?: string }) {
     >
       <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6" />
       <path d="M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
+function IconHelp() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
     </svg>
   );
 }
