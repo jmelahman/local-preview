@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, cpSync, mkdtempSync } from "node:fs";
+import { appendFileSync, cpSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -157,4 +157,75 @@ test("register, deploy, and open a preview", async ({ page }) => {
   // Build logs are one tab over.
   await page.getByRole("button", { name: "build log" }).click();
   await expect(page.getByText("--- backend build ---")).toBeVisible();
+});
+
+test("evict and redeploy from the dashboard", async ({ page }) => {
+  test.setTimeout(180_000);
+
+  const waitReady = async (id: number) => {
+    let latest: { status: string; error?: string } = { status: "" };
+    await expect
+      .poll(
+        async () => {
+          const r = await page.request.get(`/api/deploys/${id}`);
+          latest = await r.json();
+          if (latest.status === "failed") {
+            const logs = await page.request.get(`/api/deploys/${id}/logs`);
+            throw new Error(`deploy failed: ${latest.error}\n${await logs.text()}`);
+          }
+          return latest.status;
+        },
+        { timeout: 120_000, intervals: [500] },
+      )
+      .toBe("ready");
+    return latest;
+  };
+
+  // Self-contained when run alone: registering again after the first test
+  // conflicts (409) and re-deploying a ready commit is a no-op.
+  const repoRes = await page.request.post("/api/repos", {
+    data: { name: "fixture", source: repoDir },
+  });
+  expect([201, 409]).toContain(repoRes.status());
+  const dep1 = await (
+    await page.request.post("/api/deploys", { data: { repo: "fixture", ref: sha } })
+  ).json();
+
+  // A newer commit gives the sweep a deploy to keep. Only the frontend
+  // changes, so the shared backend half survives eviction and the later
+  // rebuild stays cheap.
+  writeFileSync(join(repoDir, "web", "src", "index.html"), "fixture frontend v2");
+  git(repoDir, "commit", "-qam", "v2");
+  const dep2 = await (
+    await page.request.post("/api/deploys", {
+      data: { repo: "fixture", ref: git(repoDir, "rev-parse", "HEAD") },
+    })
+  ).json();
+  await waitReady(dep1.id);
+  await waitReady(dep2.id);
+
+  // Tighten retention to one deploy per repo and sweep: the newest ready
+  // deploy is protected, so the older one is evicted. Relax the policy again
+  // right away so it can't surprise any later test.
+  const putRes = await page.request.put("/api/retention", {
+    data: { max_deploys_per_repo: 1, max_age_days: 0 },
+  });
+  expect(putRes.ok()).toBeTruthy();
+  const gc = await (await page.request.post("/api/gc")).json();
+  await page.request.put("/api/retention", { data: { max_deploys_per_repo: 0, max_age_days: 0 } });
+  expect(gc.evicted.map((e: { id: number }) => e.id)).toContain(dep1.id);
+
+  // The evicted row trades its preview link for a redeploy button.
+  await page.goto("/");
+  const row = page.locator("li").filter({ hasText: dep1.short_sha });
+  await expect(row.getByText("evicted", { exact: true })).toBeVisible();
+  await expect(row.getByRole("link", { name: /open/ })).toBeHidden();
+
+  // Redeploying re-queues the build and the revived preview serves the
+  // original commit's content again.
+  await row.getByRole("button", { name: "redeploy" }).click();
+  await expect(row.getByText("evicted", { exact: true })).toBeHidden();
+  const revived = await waitReady(dep1.id);
+  await page.goto((revived as { preview_url?: string }).preview_url ?? "");
+  await expect(page.getByText("fixture frontend v1")).toBeVisible();
 });

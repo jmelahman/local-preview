@@ -768,6 +768,37 @@ function StopButton({ deploy }: { deploy: Deploy }) {
   );
 }
 
+// RedeployButton revives an evicted deploy: POSTing its own commit to
+// /api/deploys re-queues the build, rebuilding the reclaimed artifacts. Kept
+// inline (no confirmation) because it only spends a build. Failure surfaces
+// on the row — a commit pruned from the repo can't be revived.
+function RedeployButton({ deploy }: { deploy: Deploy }) {
+  const queryClient = useQueryClient();
+  const redeploy = useMutation({
+    mutationFn: () => api.createDeploy(deploy.repo, deploy.sha),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["deploys"] }),
+  });
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => redeploy.mutate()}
+        disabled={redeploy.isPending}
+        title="Rebuild this commit and revive its preview"
+        className={`${neutralButtonClass} gap-1 disabled:opacity-50`}
+      >
+        <IconRefresh className="h-3 w-3" />
+        redeploy
+      </button>
+      {redeploy.error != null && (
+        <span className="max-w-40 truncate text-xs text-danger" title={String(redeploy.error)}>
+          {String(redeploy.error)}
+        </span>
+      )}
+    </>
+  );
+}
+
 // DeleteDeployButton hard-deletes a deploy behind a confirmation: the row and
 // its unshared artifacts/state are removed and the subdomain freed.
 function DeleteDeployButton({ deploy }: { deploy: Deploy }) {
@@ -1172,7 +1203,7 @@ function StorageDialog({ onClose }: { onClose: () => void }) {
       </div>
       <DialogFooter
         error={storage.error ?? gc.error}
-        hint="Evicted deployments keep their history — redeploy the commit to rebuild one."
+        hint="Evicted deployments keep their history — the row's redeploy button rebuilds one."
       >
         <button
           type="button"
@@ -1379,6 +1410,7 @@ export default function App() {
                       <ArtifactDownload key={a.name} artifact={a} />
                     ))}
                     {stoppable && <StopButton deploy={d} />}
+                    {d.status === "evicted" && <RedeployButton deploy={d} />}
                     <button
                       type="button"
                       onClick={() => setDetailId(d.id)}
@@ -1583,6 +1615,24 @@ function IconChevronDown({ className = "" }: { className?: string }) {
       aria-hidden="true"
     >
       <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
+function IconRefresh({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
     </svg>
   );
 }

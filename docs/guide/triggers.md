@@ -79,8 +79,8 @@ matched ones, so a commit that still lives on another branch keeps its
 preview — as does one whose branch was merged into `main`'s history with a
 plain merge commit (a squash or rebase merge rewrites the commit, so its
 preview is evicted like any other deleted branch). Eviction is reversible: an
-evicted host serves a *cleaned up* notice, and `preview deploy <sha>` rebuilds
-it on demand.
+evicted host serves a *cleaned up* notice, and `preview deploy <sha>` — or the
+**redeploy** button on the deployment's dashboard row — rebuilds it on demand.
 
 `preview repo unwatch myapp` stops the polling; existing previews stay, and
 eviction stops with it.

@@ -113,7 +113,9 @@ applies it immediately.
 
 Eviction is not deletion: the deploy row survives as history with status
 `evicted`, its preview subdomain answers with a "redeploy to rebuild" page,
-and redeploying the commit revives it with a fresh build. The sweep reclaims
+and redeploying the commit — the **redeploy** button on the deployment's
+dashboard row, or `POST /api/deploys` with its sha — revives it with a
+fresh build. The sweep reclaims
 the artifacts, backend state directories, and build/run logs that no
 surviving deploy shares — content-addressed artifacts shared with a
 surviving deploy are kept.
