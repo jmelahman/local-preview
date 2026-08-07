@@ -109,6 +109,7 @@ func volumeMount(entry json.RawMessage, lookupEnv func(string) (string, bool)) (
 			if !ok {
 				continue
 			}
+			v = strings.TrimSpace(v)
 			switch strings.TrimSpace(k) {
 			case "source", "src":
 				m.Source = v

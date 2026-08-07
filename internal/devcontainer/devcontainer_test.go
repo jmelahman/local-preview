@@ -109,12 +109,13 @@ func TestParseCommentInsideString(t *testing.T) {
 func TestVolumeMountValidation(t *testing.T) {
 	cfg := parseT(t, `{"image": "img", "mounts": [
 	  "source=ok.vol-1,target=/x,type=volume",
+	  "source = sp.vol , target = /sp , type = volume",
 	  "source=bad name,target=/x,type=volume",
 	  "source=rel,target=notabs,type=volume",
 	  "source=tmpfsy,target=/y,type=tmpfs",
 	  42
 	]}`, nil)
-	want := []Mount{{Source: "ok.vol-1", Target: "/x"}}
+	want := []Mount{{Source: "ok.vol-1", Target: "/x"}, {Source: "sp.vol", Target: "/sp"}}
 	if !reflect.DeepEqual(cfg.Mounts, want) {
 		t.Fatalf("mounts = %+v, want %+v", cfg.Mounts, want)
 	}

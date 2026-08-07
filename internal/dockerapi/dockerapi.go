@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -96,19 +97,74 @@ func (c *Client) EnsureImage(ctx context.Context, image string, out io.Writer) e
 		return fmt.Errorf("pull %s: %w", image, err)
 	}
 	defer resp.Body.Close()
-	// The pull streams JSON progress messages; failures arrive in-stream.
-	dec := json.NewDecoder(resp.Body)
+	if err := streamPull(resp.Body, out); err != nil {
+		return fmt.Errorf("pull %s: %w", image, err)
+	}
+	return nil
+}
+
+// pullProgressInterval is how often streamPull writes an aggregate progress
+// line. A var so tests can shrink it.
+var pullProgressInterval = 5 * time.Second
+
+// streamPull consumes a docker pull JSON stream, surfacing in-stream failures
+// and logging aggregate progress at a fixed cadence — first pulls of large
+// images take minutes, and a log that goes silent after "pulling image" reads
+// as a hang. Per-layer byte counters keep their maxima (layer totals arrive
+// out of order and grow as layers are discovered), and layers the daemon
+// reports finished snap to their total, so the printed numbers only climb.
+func streamPull(body io.Reader, out io.Writer) error {
+	type layer struct{ current, total int64 }
+	layers := map[string]*layer{}
+	dec := json.NewDecoder(body)
+	last := time.Now()
 	for {
 		var msg struct {
-			Error string `json:"error"`
+			Status string `json:"status"`
+			ID     string `json:"id"`
+			Error  string `json:"error"`
+			Detail struct {
+				Current int64 `json:"current"`
+				Total   int64 `json:"total"`
+			} `json:"progressDetail"`
 		}
 		if err := dec.Decode(&msg); err == io.EOF {
 			return nil
 		} else if err != nil {
-			return fmt.Errorf("pull %s: %w", image, err)
+			return err
 		}
 		if msg.Error != "" {
-			return fmt.Errorf("pull %s: %s", image, msg.Error)
+			return errors.New(msg.Error)
+		}
+		if msg.ID != "" {
+			l := layers[msg.ID]
+			if l == nil {
+				l = &layer{}
+				layers[msg.ID] = l
+			}
+			if msg.Detail.Total > l.total {
+				l.total = msg.Detail.Total
+			}
+			if msg.Detail.Current > l.current {
+				l.current = msg.Detail.Current
+			}
+			switch msg.Status {
+			case "Pull complete", "Already exists", "Download complete":
+				if l.total > 0 {
+					l.current = l.total
+				}
+			}
+		}
+		if time.Since(last) >= pullProgressInterval {
+			last = time.Now()
+			var cur, tot int64
+			for _, l := range layers {
+				cur += l.current
+				tot += l.total
+			}
+			if tot > 0 {
+				fmt.Fprintf(out, "pulled %d/%d MB\n", cur>>20, tot>>20)
+			}
 		}
 	}
 }
