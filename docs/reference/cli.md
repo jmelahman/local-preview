@@ -75,21 +75,20 @@ or evicted — with a hint at the follow-up command (`preview deploy`,
 
 Run from inside a target repository. Installs a git post-commit hook that
 requests a preview deploy of every new commit (`--dry-run` to preview). If
-the repo uses the pre-commit framework, the equivalent
-`.pre-commit-config.yaml` stanza is printed instead, for use with
+the repo uses the pre-commit framework, no hook file is written; instead the
+command prints a `.pre-commit-config.yaml` stanza subscribing to the hook
+this repository publishes in its `.pre-commit-hooks.yaml`, for use with
 `pre-commit install --hook-type post-commit`:
 
 ```yaml
-  - repo: local
+  - repo: https://github.com/jmelahman/local-preview
+    rev: v0.1.8  # pre-filled with the CLI's own release when it is one
     hooks:
-      - id: local-preview
-        name: local-preview deploy
-        entry: sh -c 'preview deploy "$(git rev-parse HEAD)" --no-wait'
-        language: system
-        stages: [post-commit]
-        always_run: true
-        pass_filenames: false
+      - id: local-preview-deploy
 ```
+
+See [deployment triggers](/guide/triggers#post-commit-hook) for how the
+published hook works and how to keep `rev` current.
 
 Existing hand-written post-commit hooks are never overwritten.
 

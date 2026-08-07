@@ -26,17 +26,15 @@ preview install-hook
 ```
 
 Installs a git post-commit hook that runs `preview deploy --no-wait` on each
-new commit. Repos using the pre-commit framework get the equivalent
-`.pre-commit-config.yaml` stanza printed instead. See
-[`preview install-hook`](/reference/cli#preview-install-hook).
-
-Alternatively, pre-commit-framework repos can subscribe to the hook this
-repository publishes (`.pre-commit-hooks.yaml`). The framework builds the
-CLI itself at the pinned rev — nothing needs to be preinstalled:
+new commit. Repos using the pre-commit framework get no hook file; instead
+the command prints a `.pre-commit-config.yaml` stanza subscribing to the
+hook this repository publishes (`.pre-commit-hooks.yaml`), with `rev`
+pre-filled from the CLI's own release. The framework builds the CLI itself
+at the pinned rev — nothing needs to be preinstalled:
 
 ```yaml
   - repo: https://github.com/jmelahman/local-preview
-    rev: v0.1.5  # pin to your server's release; any commit sha also works
+    rev: v0.1.8  # pin to your server's release; any commit sha also works
     hooks:
       - id: local-preview-deploy
 ```
@@ -44,7 +42,8 @@ CLI itself at the pinned rev — nothing needs to be preinstalled:
 Install the stage with `pre-commit install --hook-type post-commit` (prek:
 `prek install --hook-type post-commit`), and bump `rev` with `pre-commit
 autoupdate` (prek: `prek auto-update`, `--bleeding-edge --freeze` to pin an
-untagged sha).
+untagged sha). Command details in
+[`preview install-hook`](/reference/cli#preview-install-hook).
 
 ## Watched repos
 
