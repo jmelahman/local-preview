@@ -281,6 +281,15 @@ func (s *Store) DeploysBySHAPrefix(repoID int64, prefix string) ([]Deploy, error
 	return out, rows.Err()
 }
 
+// LatestDeployID returns the repo's newest deploy row id, 0 when it has
+// none. The watcher uses it to detect deploy rows created between polls.
+func (s *Store) LatestDeployID(repoID int64) (int64, error) {
+	var id int64
+	err := s.db.QueryRow(
+		`SELECT COALESCE(MAX(id), 0) FROM deploys WHERE repo_id = ?`, repoID).Scan(&id)
+	return id, err
+}
+
 // ListUnfinishedDeployIDs returns deploys with interrupted work to resume at
 // startup: rows stuck in queued/building, plus ready rows whose artifact
 // builds (which run after readiness) a shutdown cut short.

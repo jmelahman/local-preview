@@ -97,6 +97,45 @@ func TestAddResolveFetch(t *testing.T) {
 	}
 }
 
+// Fetch must report whether any ref moved: quiet polls skip graph work on
+// its word, so a false negative would strand new commits and a false
+// positive would defeat the optimization.
+func TestFetchReportsRefChanges(t *testing.T) {
+	ctx := context.Background()
+	src := newSourceRepo(t)
+	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
+	repo, err := mgr.Add(ctx, "demo", src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if changed, err := repo.Fetch(ctx); err != nil || changed {
+		t.Fatalf("fetch right after clone: changed=%v err=%v, want false", changed, err)
+	}
+
+	writeFile(t, src, "web/index.html", "<html>v2</html>")
+	runTestGit(t, src, "commit", "-qam", "v2")
+	if changed, err := repo.Fetch(ctx); err != nil || !changed {
+		t.Fatalf("fetch after new commit: changed=%v err=%v, want true", changed, err)
+	}
+	if changed, err := repo.Fetch(ctx); err != nil || changed {
+		t.Fatalf("fetch after syncing: changed=%v err=%v, want false", changed, err)
+	}
+
+	runTestGit(t, src, "branch", "scrap")
+	if changed, err := repo.Fetch(ctx); err != nil || !changed {
+		t.Fatalf("fetch after new branch: changed=%v err=%v, want true", changed, err)
+	}
+	runTestGit(t, src, "branch", "-D", "scrap")
+	if changed, err := repo.Fetch(ctx); err != nil || !changed {
+		t.Fatalf("fetch after branch deletion: changed=%v err=%v, want true", changed, err)
+	}
+	// The prune must actually have landed for the mirror to read as synced.
+	if changed, err := repo.Fetch(ctx); err != nil || changed {
+		t.Fatalf("fetch after prune: changed=%v err=%v, want false", changed, err)
+	}
+}
+
 // Add must replace a mirror left on disk by an earlier registration — a
 // deletion whose cleanup failed, or a delete that raced an in-flight fetch —
 // rather than refuse the name forever.

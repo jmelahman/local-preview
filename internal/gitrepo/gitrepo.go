@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -221,52 +222,76 @@ func (r Repo) open() (*git.Repository, error) {
 }
 
 // Fetch updates all refs from origin, pruning deleted ones.
-func (r Repo) Fetch(ctx context.Context) error {
+// Fetch mirrors the source's refs into the clone, pruning refs the source
+// no longer advertises. changed reports whether any ref moved: when the
+// advertisement matches the mirror exactly, the fetch and prune are skipped
+// entirely — callers use this to avoid graph work on quiet polls.
+func (r Repo) Fetch(ctx context.Context) (changed bool, err error) {
 	repo, err := r.open()
 	if err != nil {
-		return err
+		return false, err
 	}
 	remote, err := repo.Remote("origin")
 	if err != nil {
-		return fmt.Errorf("fetch %s: %w", r.Name, err)
+		return false, fmt.Errorf("fetch %s: %w", r.Name, err)
 	}
-	// List first: the advertised refs both drive pruning below and let an
-	// unreachable source fail before any ref is touched.
+	// List first: the advertised refs decide whether anything moved, drive
+	// pruning below, and let an unreachable source fail before any ref is
+	// touched.
 	advertised, err := remote.ListContext(ctx, &git.ListOptions{})
 	if err != nil {
 		if errors.Is(err, transport.ErrEmptyRemoteRepository) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("fetch %s: %w", r.Name, err)
+		return false, fmt.Errorf("fetch %s: %w", r.Name, err)
+	}
+	live := make(map[plumbing.ReferenceName]plumbing.Hash, len(advertised))
+	for _, ref := range advertised {
+		if ref.Type() == plumbing.HashReference && strings.HasPrefix(string(ref.Name()), "refs/") {
+			live[ref.Name()] = ref.Hash()
+		}
+	}
+	local, err := r.hashRefs(repo)
+	if err != nil {
+		return false, fmt.Errorf("fetch %s: %w", r.Name, err)
+	}
+	if maps.Equal(local, live) {
+		return false, nil
 	}
 	err = remote.FetchContext(ctx, &git.FetchOptions{Force: true})
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return fmt.Errorf("fetch %s: %w", r.Name, err)
+		return false, fmt.Errorf("fetch %s: %w", r.Name, err)
 	}
 	// Prune: drop local refs the remote no longer advertises (the --prune
-	// half of `fetch --prune` under a +refs/*:refs/* mirror refspec).
-	live := make(map[plumbing.ReferenceName]bool, len(advertised))
-	for _, ref := range advertised {
-		live[ref.Name()] = true
+	// half of `git fetch --prune` under a +refs/*:refs/* mirror refspec).
+	after, err := r.hashRefs(repo)
+	if err != nil {
+		return true, fmt.Errorf("fetch %s: %w", r.Name, err)
 	}
+	for name := range after {
+		if _, ok := live[name]; !ok {
+			if err := repo.Storer.RemoveReference(name); err != nil {
+				return true, fmt.Errorf("fetch %s: prune %s: %w", r.Name, name, err)
+			}
+		}
+	}
+	return true, nil
+}
+
+// hashRefs returns the repo's refs/* hash references by name.
+func (r Repo) hashRefs(repo *git.Repository) (map[plumbing.ReferenceName]plumbing.Hash, error) {
 	iter, err := repo.References()
 	if err != nil {
-		return fmt.Errorf("fetch %s: %w", r.Name, err)
+		return nil, err
 	}
-	var stale []plumbing.ReferenceName
-	iter.ForEach(func(ref *plumbing.Reference) error {
-		name := ref.Name()
-		if ref.Type() == plumbing.HashReference && strings.HasPrefix(string(name), "refs/") && !live[name] {
-			stale = append(stale, name)
+	refs := map[plumbing.ReferenceName]plumbing.Hash{}
+	err = iter.ForEach(func(ref *plumbing.Reference) error {
+		if ref.Type() == plumbing.HashReference && strings.HasPrefix(string(ref.Name()), "refs/") {
+			refs[ref.Name()] = ref.Hash()
 		}
 		return nil
 	})
-	for _, name := range stale {
-		if err := repo.Storer.RemoveReference(name); err != nil {
-			return fmt.Errorf("fetch %s: prune %s: %w", r.Name, name, err)
-		}
-	}
-	return nil
+	return refs, err
 }
 
 // ResolveRef resolves a branch, tag, or (abbreviated) sha to a full commit
@@ -276,7 +301,7 @@ func (r Repo) ResolveRef(ctx context.Context, ref string) (string, error) {
 	if err == nil {
 		return sha, nil
 	}
-	if ferr := r.Fetch(ctx); ferr != nil {
+	if _, ferr := r.Fetch(ctx); ferr != nil {
 		return "", fmt.Errorf("resolve %q: %w (fetch failed: %v)", ref, err, ferr)
 	}
 	sha, err = r.revParse(ctx, ref)

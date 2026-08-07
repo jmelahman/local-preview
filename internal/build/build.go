@@ -184,7 +184,7 @@ func (q *Queue) RequestDeploy(ctx context.Context, repoName, ref string, rebuild
 	// Branch/tag names resolve against local refs, which go stale — fetch
 	// first. Full or abbreviated shas use ResolveRef's fetch-on-miss retry.
 	if !looksLikeSHA(ref) {
-		if err := gr.Fetch(ctx); err != nil {
+		if _, err := gr.Fetch(ctx); err != nil {
 			return db.DeployRow{}, fmt.Errorf("fetch %s: %w", repoName, err)
 		}
 	}

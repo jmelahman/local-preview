@@ -175,6 +175,69 @@ func TestPollEvictsDeletedBranchDeploys(t *testing.T) {
 	}
 }
 
+// Quiet polls (no ref movement) must make the same decisions a full pass
+// would: a deploy deleted between polls is re-requested from the cached
+// tips even though no graph walk runs.
+func TestQuietPollRestoresDeletedDeploy(t *testing.T) {
+	w, repo, _ := newWatchFixture(t, "")
+	ctx := context.Background()
+
+	w.PollAll(ctx)
+	rows, err := w.db.ListDeploys(db.DeployFilter{Repo: repo.Name})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("after first poll: %d deploys (%v), want 1", len(rows), err)
+	}
+	mainSHA := rows[0].SHA
+	if err := w.db.DeleteDeploy(rows[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// No commits since the last poll — this poll takes the quiet path.
+	w.PollAll(ctx)
+	if _, err := w.db.GetDeployBySHA(repo.ID, mainSHA); err != nil {
+		t.Fatalf("deleted tip deploy was not restored by a quiet poll: %v", err)
+	}
+}
+
+// Eviction inputs can change without a ref change only when a deploy row is
+// created between polls; a quiet poll must still evict such a deploy when
+// its commit is unreachable (present in the mirror, on no branch).
+func TestQuietPollEvictsNewUnreachableDeploy(t *testing.T) {
+	w, repo, src := newWatchFixture(t, "")
+	ctx := context.Background()
+
+	// A branch is deployed, then deleted: its commit stays in the mirror's
+	// object store but is unreachable, and its deploy row is evicted.
+	runTestGit(t, src, "checkout", "-qb", "feature")
+	featSHA := commitFile(t, src, "b.txt", "two", "feature work")
+	runTestGit(t, src, "checkout", "-q", "main")
+	w.PollAll(ctx)
+	runTestGit(t, src, "branch", "-D", "feature")
+	w.PollAll(ctx)
+
+	// A fresh deploy row for that dead commit, created with no ref change —
+	// as if a user re-deployed the sha of a deleted branch.
+	old, err := w.db.GetDeployBySHA(repo.ID, featSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.db.DeleteDeploy(old.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.db.CreateDeploy(repo.ID, featSHA, db.DeployMeta{}); err != nil {
+		t.Fatal(err)
+	}
+
+	w.PollAll(ctx)
+	d, err := w.db.GetDeployBySHA(repo.ID, featSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Status != db.DeployEvicted {
+		t.Fatalf("unreachable deploy status = %q after quiet poll, want %q", d.Status, db.DeployEvicted)
+	}
+}
+
 func TestPollHonorsBranchFilter(t *testing.T) {
 	w, _, src := newWatchFixture(t, "main,release/*")
 	runTestGit(t, src, "branch", "release/1.0")
