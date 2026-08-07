@@ -1404,6 +1404,12 @@ function StorageDialog({ onClose }: { onClose: () => void }) {
 
 const deployStatuses: DeployStatus[] = ["queued", "building", "ready", "failed", "evicted"];
 
+// The list fetches only the newest slice — deploys accumulate per commit,
+// and the 5s poll shouldn't grow with a repo's whole history. Older deploys
+// stay reachable through search and the status filter, which query the
+// server.
+const deploysLimit = 100;
+
 export default function App() {
   const [dialog, setDialog] = useState<"register" | "deploy" | "repos" | "storage" | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
@@ -1428,7 +1434,7 @@ export default function App() {
   });
   const deploys = useQuery({
     queryKey: ["deploys", query, statusFilter],
-    queryFn: () => api.listDeploys({ q: query, status: statusFilter }),
+    queryFn: () => api.listDeploys({ q: query, status: statusFilter, limit: deploysLimit }),
     // Keep the previous page while a filter change refetches, so the list
     // doesn't blank out between keystrokes.
     placeholderData: keepPreviousData,
@@ -1692,6 +1698,11 @@ export default function App() {
                 );
               })}
             </ul>
+            {deploys.data?.length === deploysLimit && (
+              <p className="border-t border-border px-3 py-2 text-xs text-fg-muted">
+                Showing the newest {deploysLimit} deploys — search or filter to find older ones.
+              </p>
+            )}
           </div>
         </section>
       </main>

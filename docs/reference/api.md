@@ -174,9 +174,11 @@ Returns deploys, newest first. Narrow the list with any combination of:
 | `?author=<text>` | case-insensitive substring of the commit author's name or email |
 | `?status=<status>` | exact build status — `queued`, `building`, `ready`, `failed`, or `evicted` (anything else is `400`) |
 | `?q=<text>` | free-text search: a commit-sha prefix, or a case-insensitive substring of the repo, branch, ref, or author |
+| `?limit=<n>` | at most the newest `n` deploys, applied after the other filters (a non-positive or non-integer value is `400`) |
 
 `?author=ada@example.com` is the "only my deployments" filter; `?q=` is the
-search box behind the dashboard's deployments list.
+search box behind the dashboard's deployments list, which also passes
+`?limit=` so its poll stays bounded as deploys accumulate.
 
 ### `GET /api/deploys/{id}`
 

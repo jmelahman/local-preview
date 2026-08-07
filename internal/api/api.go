@@ -315,10 +315,8 @@ func (d Deps) deployJSON(row db.DeployRow) deployJSON {
 		if row.BeHash != "" {
 			out.Process = d.Super.Status(supervise.BackendKey(row.RepoID, row.BeHash))
 		}
-		if row.FeHash != "" {
-			if _, err := d.Store.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
-				out.FeProcess = d.Super.Status(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
-			}
+		if row.FeHash != "" && row.HasFeProcess {
+			out.FeProcess = d.Super.Status(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
 		}
 		for _, name := range slices.Sorted(maps.Keys(row.Artifacts)) {
 			ref := row.Artifacts[name]
@@ -389,12 +387,22 @@ func (d Deps) handleListDeploys(w http.ResponseWriter, r *http.Request) {
 			"unknown status %q (one of: queued, building, ready, failed, evicted)", st))
 		return
 	}
+	limit := 0
+	if s := q.Get("limit"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 {
+			httpError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		limit = n
+	}
 	rows, err := d.Store.ListDeploys(db.DeployFilter{
 		Repo:   q.Get("repo"),
 		Branch: q.Get("branch"),
 		Author: q.Get("author"),
 		Status: q.Get("status"),
 		Query:  q.Get("q"),
+		Limit:  limit,
 	})
 	if err != nil {
 		internalError(w, "list deploys", err)
@@ -566,11 +574,9 @@ func (d Deps) sideKey(w http.ResponseWriter, r *http.Request, row db.DeployRow) 
 		side = "be"
 		return side, row.BeHash, supervise.BackendKey(row.RepoID, row.BeHash), true
 	case "fe":
-		if row.FeHash != "" {
-			if _, err := d.Store.GetFrontendArtifact(row.RepoID, row.FeHash); err != nil {
-				httpError(w, http.StatusNotFound, "deploy has no frontend process (static frontend)")
-				return "", "", key, false
-			}
+		if row.FeHash != "" && !row.HasFeProcess {
+			httpError(w, http.StatusNotFound, "deploy has no frontend process (static frontend)")
+			return "", "", key, false
 		}
 		return side, row.FeHash, supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash), true
 	default:
@@ -694,10 +700,8 @@ func (d Deps) handleDeployStats(w http.ResponseWriter, r *http.Request) {
 	if row.BeHash != "" {
 		resp.Backend = sample(supervise.BackendKey(row.RepoID, row.BeHash))
 	}
-	if row.FeHash != "" {
-		if _, err := d.Store.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
-			resp.Frontend = sample(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
-		}
+	if row.FeHash != "" && row.HasFeProcess {
+		resp.Frontend = sample(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

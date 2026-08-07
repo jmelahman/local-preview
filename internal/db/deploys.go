@@ -66,6 +66,11 @@ type Deploy struct {
 type DeployRow struct {
 	Deploy
 	RepoName string `json:"repo"`
+	// HasFeProcess reports whether a frontend_artifacts row exists for the
+	// deploy's fe_hash — a process-mode frontend rather than a static
+	// bundle. Resolved by the same query that loads the row so list views
+	// don't pay a per-row lookup.
+	HasFeProcess bool `json:"-"`
 }
 
 // deployCols is the scan-ordered column list; deployColsD is the same list
@@ -75,6 +80,11 @@ const deployCols = `id, repo_id, sha, short_sha, ref, branch, author_name, ` +
 	`fe_build_log_path, be_build_log_path, created_at, updated_at`
 
 var deployColsD = "d." + strings.ReplaceAll(deployCols, ", ", ", d.")
+
+// hasFeProcessExpr computes DeployRow.HasFeProcess inline (index-backed via
+// frontend_artifacts' primary key), so row loads need no follow-up query.
+const hasFeProcessExpr = `EXISTS(SELECT 1 FROM frontend_artifacts fa
+	WHERE fa.repo_id = d.repo_id AND fa.fe_hash = d.fe_hash)`
 
 func scanDeploy(row interface{ Scan(...any) error }, extra ...any) (Deploy, error) {
 	var d Deploy
@@ -146,13 +156,14 @@ func (s *Store) GetDeployBySHA(repoID int64, sha string) (Deploy, error) {
 // GetDeployByID returns a deploy joined with its repo name, or ErrNotFound.
 func (s *Store) GetDeployByID(id int64) (DeployRow, error) {
 	var name string
+	var feProc bool
 	d, err := scanDeploy(s.db.QueryRow(
-		`SELECT `+deployColsD+`, r.name FROM deploys d
-		 JOIN repos r ON r.id = d.repo_id WHERE d.id = ?`, id), &name)
+		`SELECT `+deployColsD+`, r.name, `+hasFeProcessExpr+` FROM deploys d
+		 JOIN repos r ON r.id = d.repo_id WHERE d.id = ?`, id), &name, &feProc)
 	if err != nil {
 		return DeployRow{}, mapNoRows(err)
 	}
-	return DeployRow{Deploy: d, RepoName: name}, nil
+	return DeployRow{Deploy: d, RepoName: name, HasFeProcess: feProc}, nil
 }
 
 // DeployFilter narrows ListDeploys; zero-value fields don't filter.
@@ -168,6 +179,8 @@ type DeployFilter struct {
 	// sha, or a case-insensitive substring of the repo name, branch, ref,
 	// author name, or author email.
 	Query string
+	// Limit caps how many rows are returned (newest first); 0 means all.
+	Limit int
 }
 
 // IsDeployStatus reports whether s is one of the deploy build statuses.
@@ -181,7 +194,8 @@ func IsDeployStatus(s string) bool {
 
 // ListDeploys returns deploys newest first, narrowed by the filter.
 func (s *Store) ListDeploys(f DeployFilter) ([]DeployRow, error) {
-	q := `SELECT ` + deployColsD + `, r.name FROM deploys d JOIN repos r ON r.id = d.repo_id`
+	q := `SELECT ` + deployColsD + `, r.name, ` + hasFeProcessExpr +
+		` FROM deploys d JOIN repos r ON r.id = d.repo_id`
 	where := []string{}
 	args := []any{}
 	if f.Repo != "" {
@@ -218,6 +232,10 @@ func (s *Store) ListDeploys(f DeployFilter) ([]DeployRow, error) {
 		q += ` WHERE ` + strings.Join(where, ` AND `)
 	}
 	q += ` ORDER BY d.id DESC`
+	if f.Limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, f.Limit)
+	}
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -226,11 +244,12 @@ func (s *Store) ListDeploys(f DeployFilter) ([]DeployRow, error) {
 	out := []DeployRow{}
 	for rows.Next() {
 		var name string
-		d, err := scanDeploy(rows, &name)
+		var feProc bool
+		d, err := scanDeploy(rows, &name, &feProc)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, DeployRow{Deploy: d, RepoName: name})
+		out = append(out, DeployRow{Deploy: d, RepoName: name, HasFeProcess: feProc})
 	}
 	return out, rows.Err()
 }

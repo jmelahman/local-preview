@@ -143,6 +143,44 @@ func TestStateDirForkAndInit(t *testing.T) {
 	}
 }
 
+func TestListArtifactFilesCached(t *testing.T) {
+	s := newTestStore(t)
+	if got := s.ListArtifactFiles("app", "h1"); got != nil {
+		t.Fatalf("unpublished artifact = %v, want nil", got)
+	}
+
+	built := t.TempDir()
+	for name, content := range map[string]string{"a.bin": "aaaa", "b.bin": "bb"} {
+		if err := os.WriteFile(filepath.Join(built, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.PublishArtifactFiles("app", "h1", built, []string{"a.bin", "b.bin"}, false); err != nil {
+		t.Fatal(err)
+	}
+	got := s.ListArtifactFiles("app", "h1")
+	if len(got) != 2 || got[0].Name != "a.bin" || got[0].Size != 4 || got[1].Name != "b.bin" {
+		t.Fatalf("published listing = %v, want a.bin(4), b.bin(2)", got)
+	}
+
+	// A live cache entry outlives removal of the directory (bounded by the
+	// TTL); the miss after expiry re-probes the disk and sees the eviction.
+	if err := s.RemoveArtifact("app", "h1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ListArtifactFiles("app", "h1"); len(got) != 2 {
+		t.Fatalf("cached listing after removal = %v, want 2 files", got)
+	}
+	s.mu.Lock()
+	e := s.artLists["app\x00h1"]
+	e.expires = time.Time{}
+	s.artLists["app\x00h1"] = e
+	s.mu.Unlock()
+	if got := s.ListArtifactFiles("app", "h1"); got != nil {
+		t.Fatalf("expired listing after removal = %v, want nil", got)
+	}
+}
+
 func TestSweepTmp(t *testing.T) {
 	s := newTestStore(t)
 	old, _, err := s.NewScratchDir("old")

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -258,6 +259,66 @@ func TestListDeploysFilter(t *testing.T) {
 		if len(got) != tc.want {
 			t.Errorf("%s: %d deploys, want %d", name, len(got), tc.want)
 		}
+	}
+}
+
+func TestListDeploysLimit(t *testing.T) {
+	s := newTestStore(t)
+	r, err := s.CreateRepo("app", "/src/app", "/bare/app", RepoReady)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, 3)
+	for i := range ids {
+		d, err := s.CreateDeploy(r.ID, strings.Repeat(strconv.Itoa(i+1), 40), DeployMeta{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = d.ID
+	}
+
+	got, err := s.ListDeploys(DeployFilter{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != ids[2] || got[1].ID != ids[1] {
+		t.Fatalf("limit 2 = %+v, want the two newest (%d, %d)", got, ids[2], ids[1])
+	}
+	if got, err = s.ListDeploys(DeployFilter{Limit: 10}); err != nil || len(got) != 3 {
+		t.Fatalf("limit beyond rows = %d deploys (%v), want 3", len(got), err)
+	}
+	if got, err = s.ListDeploys(DeployFilter{}); err != nil || len(got) != 3 {
+		t.Fatalf("no limit = %d deploys (%v), want 3", len(got), err)
+	}
+}
+
+func TestDeployRowHasFeProcess(t *testing.T) {
+	s := newTestStore(t)
+	r, err := s.CreateRepo("app", "/src/app", "/bare/app", RepoReady)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.CreateDeploy(r.ID, shaA, DeployMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDeployHashes(d.ID, "fe1", "be1", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	row, err := s.GetDeployByID(d.ID)
+	if err != nil || row.HasFeProcess {
+		t.Fatalf("before frontend_artifacts row: HasFeProcess = %v (%v), want false", row.HasFeProcess, err)
+	}
+	if err := s.CreateFrontendArtifact(FrontendArtifact{RepoID: r.ID, FeHash: "fe1", RunConfig: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if row, err = s.GetDeployByID(d.ID); err != nil || !row.HasFeProcess {
+		t.Fatalf("after frontend_artifacts row: HasFeProcess = %v (%v), want true", row.HasFeProcess, err)
+	}
+	rows, err := s.ListDeploys(DeployFilter{})
+	if err != nil || len(rows) != 1 || !rows[0].HasFeProcess {
+		t.Fatalf("ListDeploys HasFeProcess = %+v (%v), want true", rows, err)
 	}
 }
 
