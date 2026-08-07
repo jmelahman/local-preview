@@ -189,6 +189,27 @@ func (c *Client) ListDeploys(ctx context.Context, f DeployFilter) ([]Deploy, err
 	return deploys, nil
 }
 
+// StopDeploy stops the deploy's supervised processes without removing it;
+// they cold-start again on the next request.
+func (c *Client) StopDeploy(ctx context.Context, id int64) (Deploy, error) {
+	raw, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/api/deploys/%d/stop", id), nil)
+	if err != nil {
+		return Deploy{}, err
+	}
+	var d Deploy
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return Deploy{}, fmt.Errorf("decode deploy: %w", err)
+	}
+	return d, nil
+}
+
+// DeleteDeploy removes a deploy and garbage-collects any artifacts and state
+// no surviving deploy still references.
+func (c *Client) DeleteDeploy(ctx context.Context, id int64) error {
+	_, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/api/deploys/%d", id), nil)
+	return err
+}
+
 // GetDeploy fetches one deploy by id.
 func (c *Client) GetDeploy(ctx context.Context, id int64) (Deploy, error) {
 	raw, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/api/deploys/%d", id), nil)

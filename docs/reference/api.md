@@ -153,6 +153,29 @@ Returns deploys, newest first. Narrow the list with any combination of:
 
 Returns one deploy (`404` if missing).
 
+### `POST /api/deploys/{id}/stop`
+
+Stops the deploy's supervised processes (backend and, for process-mode
+frontends, frontend) without removing it. Because processes are shared per
+artifact hash, any sibling deploy on the same hash stops too; each cold-starts
+again on its next request. Build artifacts and the deploy row are untouched.
+
+Response: `200 OK` with the deploy (its `process`/`fe_process` now read
+`idle`). `404` if the deploy doesn't exist. A no-op — succeeds — when nothing
+was running.
+
+### `DELETE /api/deploys/{id}`
+
+Hard-deletes a deploy: it removes the row, then stops and garbage-collects any
+build artifacts, backend state, and process bookkeeping that no surviving
+deploy still references. Artifacts and state are content-addressed and shared,
+so a hash another deploy still uses is left intact. The deploy's `short_sha`
+subdomain is freed and re-deploying the commit builds fresh.
+
+Response: `204 No Content`. `404` if the deploy doesn't exist. On-disk cleanup
+is best-effort once the row is gone — leftovers are unreachable and only cost
+disk, so failures are logged rather than surfaced.
+
 ### `GET /api/deploys/{id}/logs`
 
 Returns a plain-text snapshot of the frontend, backend, and artifact build

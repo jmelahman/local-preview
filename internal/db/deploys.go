@@ -289,6 +289,27 @@ func (s *Store) SetDeployEvicted(id int64) error {
 	return s.updateDeploy(id, `status = ?`, DeployEvicted)
 }
 
+// DeleteDeploy removes a single deploy row and any branch alias pointing at
+// it. Artifact and process bookkeeping keyed by hash is shared across
+// deploys, so it is reclaimed separately by the caller once a hash is fully
+// orphaned (see supervise.Manager.GCDeploy).
+func (s *Store) DeleteDeploy(id int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM branch_aliases WHERE deploy_id = ?`,
+		`DELETE FROM deploys WHERE id = ?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) updateDeploy(id int64, set string, args ...any) error {
 	args = append(args, id)
 	res, err := s.db.Exec(

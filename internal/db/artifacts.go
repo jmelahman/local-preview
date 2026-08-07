@@ -58,3 +58,26 @@ func (s *Store) MarkBackendInitDone(repoID int64, beHash string) error {
 		 WHERE repo_id = ? AND be_hash = ?`, repoID, beHash)
 	return err
 }
+
+// DeleteBackendArtifact removes a backend artifact's provisioning row and its
+// process bookkeeping (records + observability events) for one be_hash. Call
+// it when the last deploy referencing the hash is removed — never while
+// another deploy still shares it, since the artifact and its state dir are
+// content-addressed and shared.
+func (s *Store) DeleteBackendArtifact(repoID int64, beHash string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM process_events WHERE repo_id = ? AND be_hash = ?`,
+		`DELETE FROM process_records WHERE repo_id = ? AND be_hash = ?`,
+		`DELETE FROM backend_artifacts WHERE repo_id = ? AND be_hash = ?`,
+	} {
+		if _, err := tx.Exec(q, repoID, beHash); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

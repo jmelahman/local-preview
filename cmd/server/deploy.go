@@ -116,7 +116,48 @@ func deployCmd() *cobra.Command {
 		},
 	}
 
-	parent.AddCommand(list, show, logs, stats)
+	stop := &cobra.Command{
+		Use:   "stop <id>",
+		Short: "Stop a deploy's running processes",
+		Long: "Stop the supervised processes backing a deploy. They cold-start again\n" +
+			"on the next request. Processes are shared per artifact hash, so any\n" +
+			"sibling deploy on the same hash stops too.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := parseInt64(args[0], "deploy id")
+			if err != nil {
+				return err
+			}
+			d, err := client.New(resolveURL(cmd, serverURL), nil).StopDeploy(cmd.Context(), id)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "stopped deploy %d (%s@%s)\n", d.ID, d.Repo, d.ShortSHA)
+			return nil
+		},
+	}
+
+	del := &cobra.Command{
+		Use:   "delete <id>",
+		Short: "Delete a deploy and reclaim its artifacts",
+		Long: "Remove a deploy: stops its processes and garbage-collects any build\n" +
+			"artifacts, backend state, and process history no surviving deploy\n" +
+			"still references. Its short-sha subdomain is freed.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := parseInt64(args[0], "deploy id")
+			if err != nil {
+				return err
+			}
+			if err := client.New(resolveURL(cmd, serverURL), nil).DeleteDeploy(cmd.Context(), id); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "deleted deploy %d\n", id)
+			return nil
+		},
+	}
+
+	parent.AddCommand(list, show, logs, stats, stop, del)
 	return parent
 }
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -525,6 +526,140 @@ func TestDeleteRepo(t *testing.T) {
 	// The name is immediately reusable.
 	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != http.StatusCreated {
 		t.Fatalf("re-create repo: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// testDeploy captures the deploy fields the stop/delete tests assert on.
+type testDeploy struct {
+	ID       int64  `json:"id"`
+	Status   string `json:"status"`
+	FeHash   string `json:"fe_hash"`
+	BeHash   string `json:"be_hash"`
+	ShortSHA string `json:"short_sha"`
+}
+
+// deployAndWait deploys ref in the "demo" repo and blocks until it is ready.
+func deployAndWait(t *testing.T, mux *http.ServeMux, ref string) testDeploy {
+	t.Helper()
+	rec := doJSON(t, mux, "POST", "/api/deploys", `{"repo":"demo","ref":`+jsonQuote(ref)+`}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create deploy %s: %d %s", ref, rec.Code, rec.Body)
+	}
+	var d testDeploy
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for d.Status != "ready" {
+		if d.Status == "failed" || time.Now().After(deadline) {
+			logs := doJSON(t, mux, "GET", fmt.Sprintf("/api/deploys/%d/logs", d.ID), "")
+			t.Fatalf("deploy %d status = %s; logs:\n%s", d.ID, d.Status, logs.Body)
+		}
+		time.Sleep(50 * time.Millisecond)
+		rec := doJSON(t, mux, "GET", fmt.Sprintf("/api/deploys/%d", d.ID), "")
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return d
+}
+
+func TestStopAndDeleteDeploy(t *testing.T) {
+	mux, root := newTestMux(t)
+	src := newSourceRepo(t)
+	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
+	}
+	d := deployAndWait(t, mux, "main")
+
+	beDir := filepath.Join(root, "artifacts", "demo", "be", d.BeHash)
+	feDir := filepath.Join(root, "artifacts", "demo", "fe", d.FeHash)
+	stateDir := filepath.Join(root, "state", "demo", d.BeHash)
+
+	// Stop quiesces processes but keeps the deploy row and its artifacts.
+	if rec := doJSON(t, mux, "POST", fmt.Sprintf("/api/deploys/%d/stop", d.ID), ""); rec.Code != http.StatusOK {
+		t.Fatalf("stop deploy: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doJSON(t, mux, "GET", fmt.Sprintf("/api/deploys/%d", d.ID), ""); rec.Code != http.StatusOK {
+		t.Fatalf("deploy gone after stop: %d", rec.Code)
+	}
+	for _, dir := range []string{beDir, feDir, stateDir} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("%s missing after stop (err=%v)", dir, err)
+		}
+	}
+
+	// Delete removes the row and reclaims its now-orphaned artifacts/state.
+	if rec := doJSON(t, mux, "DELETE", fmt.Sprintf("/api/deploys/%d", d.ID), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete deploy: %d %s", rec.Code, rec.Body)
+	}
+	if rec := doJSON(t, mux, "GET", fmt.Sprintf("/api/deploys/%d", d.ID), ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("deploy still present after delete: %d", rec.Code)
+	}
+	rec := doJSON(t, mux, "GET", "/api/deploys", "")
+	var list []json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list) != 0 {
+		t.Fatalf("deploys after delete: %s (%v)", rec.Body, err)
+	}
+	for _, dir := range []string{beDir, feDir, stateDir} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("%s still exists after delete (err=%v)", dir, err)
+		}
+	}
+
+	// Both verbs 404 on a missing deploy.
+	if rec := doJSON(t, mux, "POST", "/api/deploys/999/stop", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("stop missing deploy: %d", rec.Code)
+	}
+	if rec := doJSON(t, mux, "DELETE", "/api/deploys/999", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("delete missing deploy: %d", rec.Code)
+	}
+}
+
+func TestDeleteDeployKeepsSharedArtifacts(t *testing.T) {
+	mux, root := newTestMux(t)
+	src := newSourceRepo(t)
+	if rec := doJSON(t, mux, "POST", "/api/repos", `{"name":"demo","source":`+jsonQuote(src)+`}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
+	}
+	first := deployAndWait(t, mux, "main")
+
+	// A frontend-only change keeps the backend partition — and its hash —
+	// identical, so the two deploys share a backend artifact and state dir.
+	if err := os.WriteFile(filepath.Join(src, "web", "index.html"), []byte("<html>v2</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "commit", "-qam", "frontend tweak")
+	second := deployAndWait(t, mux, "main")
+
+	if second.BeHash != first.BeHash {
+		t.Fatalf("expected shared be_hash, got %q and %q", first.BeHash, second.BeHash)
+	}
+	if second.FeHash == first.FeHash {
+		t.Fatalf("expected distinct fe_hash, both %q", first.FeHash)
+	}
+
+	// Deleting the second deploy drops its unique frontend artifact, but the
+	// backend artifact and state shared with the first must survive.
+	if rec := doJSON(t, mux, "DELETE", fmt.Sprintf("/api/deploys/%d", second.ID), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete deploy: %d %s", rec.Code, rec.Body)
+	}
+	kept := []string{
+		filepath.Join(root, "artifacts", "demo", "be", first.BeHash),
+		filepath.Join(root, "state", "demo", first.BeHash),
+		filepath.Join(root, "artifacts", "demo", "fe", first.FeHash),
+	}
+	for _, dir := range kept {
+		if _, err := os.Stat(dir); err != nil {
+			t.Errorf("shared/kept %s removed (err=%v)", dir, err)
+		}
+	}
+	orphanedFe := filepath.Join(root, "artifacts", "demo", "fe", second.FeHash)
+	if _, err := os.Stat(orphanedFe); !os.IsNotExist(err) {
+		t.Errorf("orphaned frontend %s still exists (err=%v)", orphanedFe, err)
+	}
+	if rec := doJSON(t, mux, "GET", fmt.Sprintf("/api/deploys/%d", first.ID), ""); rec.Code != http.StatusOK {
+		t.Fatalf("surviving deploy gone: %d", rec.Code)
 	}
 }
 

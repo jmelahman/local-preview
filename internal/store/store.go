@@ -62,6 +62,30 @@ func (s *Store) RemoveRepo(repo string) error {
 	return os.RemoveAll(filepath.Join(s.stateDir, repo))
 }
 
+// RemoveBackend deletes a backend artifact's published build and its mutable
+// state directory. Called when the last deploy referencing be_hash is
+// removed; artifacts are content-addressed and shared, so the caller must
+// confirm no surviving deploy still uses the hash first.
+func (s *Store) RemoveBackend(repo, beHash string) error {
+	if err := os.RemoveAll(s.BackendDir(repo, beHash)); err != nil {
+		return err
+	}
+	return os.RemoveAll(s.StateDirPath(repo, beHash))
+}
+
+// RemoveFrontend deletes a published frontend artifact (static bundle or
+// process-mode build), subject to the same shared-hash caution as
+// RemoveBackend.
+func (s *Store) RemoveFrontend(repo, feHash string) error {
+	return os.RemoveAll(s.FrontendDir(repo, feHash))
+}
+
+// RemoveArtifact deletes a published downloadable artifact, subject to the
+// same shared-hash caution as RemoveBackend.
+func (s *Store) RemoveArtifact(repo, hash string) error {
+	return os.RemoveAll(s.ArtifactDir(repo, hash))
+}
+
 // PublishFrontend moves srcDir into place as the frontend artifact.
 // Idempotent: if the artifact already exists it is kept as-is unless
 // overwrite is set (the --rebuild path).

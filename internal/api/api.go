@@ -69,6 +69,8 @@ func NewMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("POST /api/deploys", d.handleCreateDeploy)
 	mux.HandleFunc("GET /api/deploys", d.handleListDeploys)
 	mux.HandleFunc("GET /api/deploys/{id}", d.handleGetDeploy)
+	mux.HandleFunc("POST /api/deploys/{id}/stop", d.handleStopDeploy)
+	mux.HandleFunc("DELETE /api/deploys/{id}", d.handleDeleteDeploy)
 	mux.HandleFunc("GET /api/deploys/{id}/logs", d.handleDeployLogs)
 	mux.HandleFunc("GET /api/deploys/{id}/logs/run", d.handleDeployRunLog)
 	mux.HandleFunc("GET /api/deploys/{id}/stats", d.handleDeployStats)
@@ -374,6 +376,37 @@ func (d Deps) handleGetDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, d.deployJSON(row))
+}
+
+// handleStopDeploy stops the deploy's supervised processes without removing
+// it; they cold-start again on the next request. Because processes are shared
+// per artifact hash, sibling deploys on the same hash stop too. Returns the
+// updated deploy (its process state now reads idle).
+func (d Deps) handleStopDeploy(w http.ResponseWriter, r *http.Request) {
+	row, ok := d.deployFromPath(w, r)
+	if !ok {
+		return
+	}
+	d.Super.StopDeploy(row, "stopped via API")
+	writeJSON(w, http.StatusOK, d.deployJSON(row))
+}
+
+// handleDeleteDeploy hard-deletes a deploy: it removes the row, then stops and
+// garbage-collects any artifacts, backend state, and process bookkeeping no
+// surviving deploy still references (see supervise.Manager.GCDeploy). On-disk
+// cleanup is best-effort — orphans only cost disk — so it never fails the
+// request once the row is gone.
+func (d Deps) handleDeleteDeploy(w http.ResponseWriter, r *http.Request) {
+	row, ok := d.deployFromPath(w, r)
+	if !ok {
+		return
+	}
+	if err := d.Store.DeleteDeploy(row.ID); err != nil {
+		internalError(w, "delete deploy", err)
+		return
+	}
+	d.Super.GCDeploy(row)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleArtifactDownload serves one file of a named downloadable artifact.

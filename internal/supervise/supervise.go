@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -769,6 +770,86 @@ func (m *Manager) StopRepo(repoID int64, reason string) {
 		wg.Go(func() { m.Stop(k, reason) })
 	}
 	wg.Wait()
+}
+
+// StopDeploy stops the backend and (process-mode) frontend processes backing
+// one deploy, if running. Because processes are shared per artifact hash,
+// this also quiesces any sibling deploy on the same hash; each cold-starts
+// again on its next request. Build artifacts and the deploy row are left
+// intact.
+func (m *Manager) StopDeploy(row db.DeployRow, reason string) {
+	if row.BeHash != "" {
+		m.Stop(BackendKey(row.RepoID, row.BeHash), reason)
+	}
+	if row.FeHash != "" {
+		if _, err := m.db.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
+			m.Stop(FrontendKey(row.RepoID, row.FeHash, row.BeHash), reason)
+		}
+	}
+}
+
+// GCDeploy reclaims the artifacts, backend state, and process bookkeeping
+// backing a deploy that no surviving (non-evicted) deploy of the same repo
+// still references. Call it AFTER the triggering deploy row has been deleted
+// or marked evicted, so the shared-hash checks observe the correct surviving
+// set. Content-addressed artifacts are shared, so a hash still used by
+// another deploy is left untouched. This is the reclaim primitive that both a
+// manual delete and a future retention sweep build on. Cleanup is
+// best-effort: failures only leave unreachable bytes on disk, so they are
+// logged, not returned.
+func (m *Manager) GCDeploy(row db.DeployRow) {
+	remaining, err := m.db.ListDeploys(db.DeployFilter{Repo: row.RepoName})
+	if err != nil {
+		log.Printf("gc deploy %d: list deploys: %v", row.ID, err)
+		return
+	}
+	liveBe := map[string]bool{}
+	liveFe := map[string]bool{}
+	liveDL := map[string]bool{}
+	for _, r := range remaining {
+		// Evicted deploys hold no artifacts, so they pin nothing.
+		if r.Status == db.DeployEvicted {
+			continue
+		}
+		if r.BeHash != "" {
+			liveBe[r.BeHash] = true
+		}
+		if r.FeHash != "" {
+			liveFe[r.FeHash] = true
+		}
+		for _, ref := range r.Artifacts {
+			liveDL[ref.Hash] = true
+		}
+	}
+
+	if row.BeHash != "" && !liveBe[row.BeHash] {
+		m.Stop(BackendKey(row.RepoID, row.BeHash), "deploy deleted")
+		if err := m.db.DeleteBackendArtifact(row.RepoID, row.BeHash); err != nil {
+			log.Printf("gc deploy %d: delete backend artifact: %v", row.ID, err)
+		}
+		if err := m.files.RemoveBackend(row.RepoName, row.BeHash); err != nil {
+			log.Printf("gc deploy %d: remove backend files: %v", row.ID, err)
+		}
+	}
+	if row.FeHash != "" && !liveFe[row.FeHash] {
+		if _, err := m.db.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
+			m.Stop(FrontendKey(row.RepoID, row.FeHash, row.BeHash), "deploy deleted")
+			if err := m.db.DeleteFrontendArtifact(row.RepoID, row.FeHash); err != nil {
+				log.Printf("gc deploy %d: delete frontend artifact: %v", row.ID, err)
+			}
+		}
+		if err := m.files.RemoveFrontend(row.RepoName, row.FeHash); err != nil {
+			log.Printf("gc deploy %d: remove frontend files: %v", row.ID, err)
+		}
+	}
+	for _, ref := range row.Artifacts {
+		if liveDL[ref.Hash] {
+			continue
+		}
+		if err := m.files.RemoveArtifact(row.RepoName, ref.Hash); err != nil {
+			log.Printf("gc deploy %d: remove artifact files: %v", row.ID, err)
+		}
+	}
 }
 
 // Status reports the runtime state of an artifact's process for API views:

@@ -38,6 +38,8 @@ Start the orchestrator.
 | `preview deploy logs <id>` | Print a deploy's build logs |
 | `preview deploy logs <id> --run` | Print the process run log — the preview server's stdout+stderr, init output included. `--side fe` selects a process-mode frontend; `-f`/`--follow` keeps polling for new output until interrupted |
 | `preview deploy stats <id>` | Show live CPU/memory of the deploy's processes (docker-stats-like; samples twice a second apart to compute the CPU percentage) |
+| `preview deploy stop <id>` | Stop the deploy's processes; they cold-start again on the next request. Processes are shared per artifact hash, so any sibling deploy on the same hash stops too |
+| `preview deploy delete <id>` | Delete a deploy and reclaim any build artifacts, backend state, and process history no surviving deploy still references; its short-sha subdomain is freed |
 
 Flags on `preview deploy`:
 

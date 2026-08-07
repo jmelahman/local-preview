@@ -154,6 +154,8 @@ const buttonClass =
   "inline-flex shrink-0 items-center rounded bg-accent-700 px-3 py-1 text-sm text-white transition-colors duration-150 hover:bg-accent-600 disabled:cursor-not-allowed disabled:opacity-50";
 const neutralButtonClass =
   "inline-flex shrink-0 items-center rounded bg-surface-2 px-2 py-1 text-xs text-fg transition-colors duration-150 hover:bg-surface-3";
+const dangerButtonClass =
+  "inline-flex shrink-0 items-center rounded bg-danger px-3 py-1 text-sm text-white transition-colors duration-150 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -229,6 +231,47 @@ function Modal({
       </header>
       {children}
     </dialog>
+  );
+}
+
+// ConfirmDialog is a reusable modal for a destructive action: a body
+// explaining the consequence and a danger-styled confirm button. The confirm
+// button drives the caller's mutation; disable interaction while it's in
+// flight and surface its error inline.
+function ConfirmDialog({
+  title,
+  confirmLabel,
+  onConfirm,
+  onClose,
+  pending,
+  error,
+  children,
+}: {
+  title: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  onClose: () => void;
+  pending: boolean;
+  error?: unknown;
+  children: ReactNode;
+}) {
+  return (
+    <Modal title={title} onClose={() => !pending && onClose()}>
+      <div className="flex flex-col gap-2 p-4 text-sm">{children}</div>
+      <DialogFooter error={error} hint="This can't be undone.">
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={pending}
+          className={`${neutralButtonClass} px-3 py-1 text-sm`}
+        >
+          Cancel
+        </button>
+        <button type="button" onClick={onConfirm} disabled={pending} className={dangerButtonClass}>
+          {confirmLabel}
+        </button>
+      </DialogFooter>
+    </Modal>
   );
 }
 
@@ -673,8 +716,215 @@ function DeployDetailDialog({ deploy, onClose }: { deploy: Deploy; onClose: () =
   );
 }
 
+// StopButton quiesces a deploy's running processes; they cold-start again on
+// the next request, so it needs no confirmation. Rendered only when there's a
+// live process to stop.
+function StopButton({ deploy }: { deploy: Deploy }) {
+  const queryClient = useQueryClient();
+  const stop = useMutation({
+    mutationFn: () => api.stopDeploy(deploy.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["deploys"] }),
+  });
+  return (
+    <button
+      type="button"
+      onClick={() => stop.mutate()}
+      disabled={stop.isPending}
+      title="Stop the running process (restarts on the next request)"
+      className={`${neutralButtonClass} gap-1 disabled:opacity-50`}
+    >
+      <IconStop className="h-3 w-3" />
+      stop
+    </button>
+  );
+}
+
+// DeleteDeployButton hard-deletes a deploy behind a confirmation: the row and
+// its unshared artifacts/state are removed and the subdomain freed.
+function DeleteDeployButton({ deploy }: { deploy: Deploy }) {
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  const del = useMutation({
+    mutationFn: () => api.deleteDeploy(deploy.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["deploys"] });
+      setConfirming(false);
+    },
+  });
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setConfirming(true)}
+        title="Delete this deployment"
+        aria-label="Delete this deployment"
+        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded bg-surface-2 text-fg-muted transition-colors duration-150 hover:bg-danger/15 hover:text-danger"
+      >
+        <IconTrash className="h-3.5 w-3.5" />
+      </button>
+      {confirming && (
+        <ConfirmDialog
+          title="Delete deployment"
+          confirmLabel={del.isPending ? "Deleting…" : "Delete"}
+          onConfirm={() => del.mutate()}
+          onClose={() => setConfirming(false)}
+          pending={del.isPending}
+          error={del.error}
+        >
+          <p>
+            Delete the <span className="font-medium">{deploy.repo}</span> preview at{" "}
+            <code className="font-mono text-fg-muted">{deploy.short_sha}</code>?
+          </p>
+          <p className="text-xs text-fg-muted">
+            Its build artifacts and state are removed and the{" "}
+            <code className="font-mono">{deploy.short_sha}</code> subdomain is freed. Artifacts
+            still shared with another deployment are kept.
+          </p>
+        </ConfirmDialog>
+      )}
+    </>
+  );
+}
+
+// RepoRow is one registered repository in the management modal: its name and
+// source, an editable watch toggle + branch globs, and an unregister action.
+function RepoRow({ repo }: { repo: Repo }) {
+  const queryClient = useQueryClient();
+  const [watch, setWatch] = useState(repo.watch);
+  const [branches, setBranches] = useState(repo.watch_branches);
+  const [confirming, setConfirming] = useState(false);
+
+  // Track the server's value when it changes under us (e.g. after a save
+  // refetch) so the dirty check and inputs stay accurate.
+  useEffect(() => {
+    setWatch(repo.watch);
+    setBranches(repo.watch_branches);
+  }, [repo.watch, repo.watch_branches]);
+
+  const save = useMutation({
+    mutationFn: () => api.updateRepo(repo.name, { watch, watch_branches: branches.trim() }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["repos"] }),
+  });
+  const del = useMutation({
+    mutationFn: () => api.deleteRepo(repo.name),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["repos"] });
+      queryClient.invalidateQueries({ queryKey: ["deploys"] });
+      setConfirming(false);
+    },
+  });
+
+  const dirty = watch !== repo.watch || branches.trim() !== repo.watch_branches;
+  return (
+    <li className="flex flex-col gap-2 px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium">{repo.name}</div>
+          <div className="truncate font-mono text-[11px] text-fg-muted" title={repo.source}>
+            {repo.source}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          className="inline-flex shrink-0 items-center rounded bg-surface-2 px-2 py-1 text-xs text-fg-muted transition-colors duration-150 hover:bg-danger/15 hover:text-danger"
+        >
+          Unregister
+        </button>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs text-fg-muted">
+          <input
+            type="checkbox"
+            checked={watch}
+            onChange={(e) => setWatch(e.target.checked)}
+            className="accent-accent-600"
+          />
+          Watch
+        </label>
+        <input
+          value={branches}
+          disabled={!watch}
+          onChange={(e) => setBranches(e.target.value)}
+          placeholder="all branches (e.g. main,release/*)"
+          className={`${inputClass} min-w-40 flex-1 disabled:opacity-40`}
+        />
+        {dirty && (
+          <button
+            type="button"
+            onClick={() => save.mutate()}
+            disabled={save.isPending}
+            className={`${neutralButtonClass} px-3 py-1 text-sm`}
+          >
+            Save
+          </button>
+        )}
+      </div>
+      {save.error && (
+        <p className="text-xs text-danger" title={String(save.error)}>
+          {String(save.error)}
+        </p>
+      )}
+      {confirming && (
+        <ConfirmDialog
+          title="Unregister repository"
+          confirmLabel={del.isPending ? "Removing…" : "Unregister"}
+          onConfirm={() => del.mutate()}
+          onClose={() => setConfirming(false)}
+          pending={del.isPending}
+          error={del.error}
+        >
+          <p>
+            Unregister <span className="font-medium">{repo.name}</span>?
+          </p>
+          <p className="text-xs text-fg-muted">
+            This stops its preview backends and deletes all of its deployments, artifacts, state,
+            build logs, and mirror clone. The name becomes reusable immediately.
+          </p>
+        </ConfirmDialog>
+      )}
+    </li>
+  );
+}
+
+// ManageReposDialog lists registered repositories and lets you edit their
+// watch settings or unregister them — the repo-side counterpart to the deploy
+// list.
+function ManageReposDialog({ onClose }: { onClose: () => void }) {
+  const repos = useQuery({ queryKey: ["repos"], queryFn: api.listRepos });
+  return (
+    <Modal title="Registered repositories" onClose={onClose} wide>
+      <div className="flex flex-col gap-3 p-4 text-sm">
+        {repos.data && repos.data.length > 0 ? (
+          <ul className="divide-y divide-border rounded border border-border">
+            {repos.data.map((r) => (
+              <RepoRow key={r.id} repo={r} />
+            ))}
+          </ul>
+        ) : (
+          <p className="px-1 py-6 text-center text-xs text-fg-muted">
+            No repositories registered yet.
+          </p>
+        )}
+      </div>
+      <DialogFooter
+        error={repos.error}
+        hint="Watch polls a repo and deploys new branch tips automatically."
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className={`${neutralButtonClass} px-3 py-1 text-sm`}
+        >
+          Done
+        </button>
+      </DialogFooter>
+    </Modal>
+  );
+}
+
 export default function App() {
-  const [dialog, setDialog] = useState<"register" | "deploy" | null>(null);
+  const [dialog, setDialog] = useState<"register" | "deploy" | "repos" | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
 
   const health = useQuery({
@@ -720,6 +970,15 @@ export default function App() {
             className={neutralButtonClass}
           >
             Register repo
+          </button>
+          <button
+            type="button"
+            onClick={() => setDialog("repos")}
+            title="Manage registered repositories"
+            aria-label="Manage registered repositories"
+            className="inline-flex h-7 w-7 items-center justify-center rounded bg-surface-2 text-fg transition-colors duration-150 hover:bg-surface-3"
+          >
+            <IconSettings />
           </button>
           <ThemeToggle />
         </div>
@@ -785,12 +1044,15 @@ export default function App() {
                 ]
                   .filter(Boolean)
                   .join("\n");
+                const state = deployState(d);
+                // A process is worth stopping only once it's warm or warming.
+                const stoppable = state === "running" || state === "starting";
                 return (
                   <li
                     key={d.id}
                     className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-3 py-3 transition-colors hover:bg-surface-2/40"
                   >
-                    <StatusBadge state={deployState(d)} />
+                    <StatusBadge state={state} />
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                         <span className="text-sm font-medium">{d.repo}</span>
@@ -830,6 +1092,7 @@ export default function App() {
                     {d.artifacts?.map((a) => (
                       <ArtifactDownload key={a.name} artifact={a} />
                     ))}
+                    {stoppable && <StopButton deploy={d} />}
                     <button
                       type="button"
                       onClick={() => setDetailId(d.id)}
@@ -859,6 +1122,7 @@ export default function App() {
                     >
                       {timeAgo(d.created_at)}
                     </time>
+                    <DeleteDeployButton deploy={d} />
                   </li>
                 );
               })}
@@ -872,6 +1136,7 @@ export default function App() {
       </footer>
 
       {dialog === "register" && <RegisterRepoDialog onClose={() => setDialog(null)} />}
+      {dialog === "repos" && <ManageReposDialog onClose={() => setDialog(null)} />}
       {dialog === "deploy" && (
         <DeployDialog repos={repos.data ?? []} onClose={() => setDialog(null)} />
       )}
@@ -1045,6 +1310,50 @@ function IconDeploy({ className = "" }: { className?: string }) {
     >
       <path d="m12 3 9 5-9 5-9-5 9-5z" />
       <path d="m3 13 9 5 9-5" opacity="0.5" />
+    </svg>
+  );
+}
+
+function IconStop({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
+      <rect x="6" y="6" width="12" height="12" rx="1.5" />
+    </svg>
+  );
+}
+
+function IconTrash({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6" />
+      <path d="M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
+function IconSettings() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
   );
 }

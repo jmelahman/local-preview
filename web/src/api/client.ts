@@ -15,6 +15,10 @@ export type Repo = {
   id: number;
   name: string;
   source: string;
+  // Watch polls the repo for new commits and deploys matching branch tips.
+  // watch_branches narrows which branches (comma-separated globs, "" = all).
+  watch: boolean;
+  watch_branches: string;
   created_at: string;
 };
 
@@ -115,14 +119,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+// Watch settings a PATCH /api/repos/{name} can update; omitted fields keep
+// their stored value.
+export type RepoUpdate = {
+  watch?: boolean;
+  watch_branches?: string;
+};
+
 export const api = {
   health: () => request<Health>("/api/health"),
   listRepos: () => request<Repo[]>("/api/repos"),
   createRepo: (name: string, source: string) =>
     request<Repo>("/api/repos", { method: "POST", body: JSON.stringify({ name, source }) }),
+  updateRepo: (name: string, patch: RepoUpdate) =>
+    request<Repo>(`/api/repos/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  deleteRepo: (name: string) =>
+    request<void>(`/api/repos/${encodeURIComponent(name)}`, { method: "DELETE" }),
   listDeploys: () => request<Deploy[]>("/api/deploys"),
   createDeploy: (repo: string, ref: string) =>
     request<Deploy>("/api/deploys", { method: "POST", body: JSON.stringify({ repo, ref }) }),
+  stopDeploy: (id: number) => request<Deploy>(`/api/deploys/${id}/stop`, { method: "POST" }),
+  deleteDeploy: (id: number) => request<void>(`/api/deploys/${id}`, { method: "DELETE" }),
   getDeployStats: (id: number) => request<DeployStats>(`/api/deploys/${id}/stats`),
   getRunLog: (id: number, side: LogSide, attempt: number, offset: number) =>
     request<RunLogChunk>(

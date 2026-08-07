@@ -411,6 +411,41 @@ func (o *Orchestrator) Deploy(id int64) (Deploy, error) {
 	return o.toDeploy(row), nil
 }
 
+// StopDeploy stops the supervised processes backing a deploy without removing
+// it; they cold-start again on the next request. Processes are shared per
+// artifact hash, so sibling deploys on the same hash stop too. Returns
+// ErrNotFound if the deploy doesn't exist.
+func (o *Orchestrator) StopDeploy(id int64) error {
+	row, err := o.database.GetDeployByID(id)
+	if errors.Is(err, db.ErrNotFound) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	o.super.StopDeploy(row, "stopped via API")
+	return nil
+}
+
+// DeleteDeploy removes a deploy and reclaims any artifacts, backend state, and
+// process bookkeeping that no surviving deploy still references — the
+// content-addressed halves shared with another deploy are kept. Returns
+// ErrNotFound if the deploy doesn't exist.
+func (o *Orchestrator) DeleteDeploy(id int64) error {
+	row, err := o.database.GetDeployByID(id)
+	if errors.Is(err, db.ErrNotFound) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := o.database.DeleteDeploy(row.ID); err != nil {
+		return err
+	}
+	o.super.GCDeploy(row)
+	return nil
+}
+
 // Deploys lists deploys newest first, optionally filtered by repo name.
 func (o *Orchestrator) Deploys(repo string) ([]Deploy, error) {
 	rows, err := o.database.ListDeploys(db.DeployFilter{Repo: repo})

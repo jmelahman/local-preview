@@ -34,3 +34,12 @@ func (s *Store) GetFrontendArtifact(repoID int64, feHash string) (FrontendArtifa
 	}
 	return a, nil
 }
+
+// DeleteFrontendArtifact removes a process-mode frontend's provisioning row
+// for one fe_hash. Call it when the last deploy referencing the hash is
+// removed; the artifact is shared, so never while another deploy uses it.
+func (s *Store) DeleteFrontendArtifact(repoID int64, feHash string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM frontend_artifacts WHERE repo_id = ? AND fe_hash = ?`, repoID, feHash)
+	return err
+}
