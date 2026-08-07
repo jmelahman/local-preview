@@ -63,11 +63,3 @@ repos:
         language: system
         files: ^web/package(-lock)?\.json$
         pass_filenames: false
-  # Dogfood our own published hook (.pre-commit-hooks.yaml) exactly as a
-  # consumer would. rev is a plain sha, bumped with
-  # `prek auto-update --repo https://github.com/jmelahman/local-preview --bleeding-edge --freeze`;
-  # it must be pushed before prek can build from it.
-  - repo: https://github.com/jmelahman/local-preview
-    rev: fa22eda8ba9691413797d3ea5fb56dd93298f449
-    hooks:
-      - id: local-preview-deploy
