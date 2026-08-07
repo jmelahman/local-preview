@@ -90,6 +90,9 @@ func newTestMux(t *testing.T) (*http.ServeMux, string) {
 	super := supervise.New(database, files, filepath.Join(root, "logs"))
 	t.Cleanup(super.StopAll)
 	queue := build.NewQueue(database, gitMgr, files, super, filepath.Join(root, "logs"), nil)
+	// These tests assert the cold path — never-started backends, empty run
+	// logs, idle stats — so ready builds must not auto-start their processes.
+	queue.SetAutoStart(false)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	queue.Start(ctx, 1)

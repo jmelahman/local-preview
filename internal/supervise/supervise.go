@@ -86,9 +86,10 @@ type Manager struct {
 	reapInterval   time.Duration
 	maxWarm        int // LRU cap on running processes; 0 = unlimited
 
-	mu    sync.Mutex
-	procs map[Key]*process
-	locks map[Key]*sync.Mutex
+	mu       sync.Mutex
+	procs    map[Key]*process
+	locks    map[Key]*sync.Mutex
+	stopping bool // set by StopAll; refuses new starts during shutdown
 
 	dockerMu     sync.Mutex
 	dockerProbed bool
@@ -186,6 +187,10 @@ func (m *Manager) keyLock(k Key) *sync.Mutex {
 func (m *Manager) EnsureRunning(ctx context.Context, k Key, repoName string) (int, error) {
 	for range 2 {
 		m.mu.Lock()
+		if m.stopping {
+			m.mu.Unlock()
+			return 0, fmt.Errorf("supervisor is shutting down")
+		}
 		p := m.procs[k]
 		if p == nil {
 			p = &process{
@@ -739,9 +744,13 @@ func (m *Manager) killProcess(p *process) {
 }
 
 // StopAll gracefully stops every supervised process (orchestrator
-// shutdown). Children never outlive the orchestrator by design.
+// shutdown). Children never outlive the orchestrator by design: the manager
+// is marked stopping first, so a start racing in from a background trigger
+// (auto-start, an in-flight request) is either refused or lands in the
+// table before the snapshot below and is stopped with the rest.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
+	m.stopping = true
 	keys := make([]Key, 0, len(m.procs))
 	for k := range m.procs {
 		keys = append(keys, k)
@@ -770,6 +779,28 @@ func (m *Manager) StopRepo(repoID int64, reason string) {
 		wg.Go(func() { m.Stop(k, reason) })
 	}
 	wg.Wait()
+}
+
+// StartDeploy warm-starts the processes backing one deploy — the backend
+// and, in process mode, the frontend — so a fresh deploy serves its first
+// request without a cold start. Processes are shared per artifact hash, so a
+// side already running (or mid-start) is joined, not duplicated. Blocks
+// until the processes are healthy or failed; ctx bounds only this wait, not
+// the starts themselves.
+func (m *Manager) StartDeploy(ctx context.Context, row db.DeployRow) error {
+	if row.BeHash != "" {
+		if _, err := m.EnsureRunning(ctx, BackendKey(row.RepoID, row.BeHash), row.RepoName); err != nil {
+			return fmt.Errorf("start backend: %w", err)
+		}
+	}
+	if row.FeHash != "" {
+		if _, err := m.db.GetFrontendArtifact(row.RepoID, row.FeHash); err == nil {
+			if _, err := m.EnsureRunning(ctx, FrontendKey(row.RepoID, row.FeHash, row.BeHash), row.RepoName); err != nil {
+				return fmt.Errorf("start frontend: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // StopDeploy stops the backend and (process-mode) frontend processes backing

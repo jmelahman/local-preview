@@ -79,7 +79,8 @@ needs nothing extra.
 
 ## Warm previews
 
-Processes start on demand and then stay warm. Two mechanisms bound the
+A freshly built deploy starts its processes immediately; after that they
+start on demand and stay warm either way. Two mechanisms bound the
 footprint:
 
 - **Idle timeout** — each side's `idle_timeout` (default `30m`) stops its

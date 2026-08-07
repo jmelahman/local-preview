@@ -67,6 +67,7 @@ type Queue struct {
 
 	manifestRefs     []ManifestRef
 	localManifestDir string
+	autoStart        bool
 	buildTimeout     time.Duration
 	sf               singleflight.Group
 	work             chan int64
@@ -91,6 +92,7 @@ func NewQueue(database *db.Store, git *gitrepo.Manager, files *store.Store, supe
 		logsDir:      logsDir,
 		runner:       runner,
 		manifestRefs: []ManifestRef{{Path: ManifestName}},
+		autoStart:    true,
 		buildTimeout: DefaultBuildTimeout,
 		work:         make(chan int64, 256),
 		rebuild:      make(map[int64]bool),
@@ -111,6 +113,13 @@ func (q *Queue) SetManifestRefs(refs []ManifestRef) {
 // before Start.
 func (q *Queue) SetLocalManifestDir(dir string) {
 	q.localManifestDir = dir
+}
+
+// SetAutoStart controls whether a deploy's processes start as soon as its
+// build turns ready (the default), rather than waiting for the first
+// request. Call before Start.
+func (q *Queue) SetAutoStart(v bool) {
+	q.autoStart = v
 }
 
 // Start launches n build workers and re-enqueues deploys interrupted by a
@@ -282,6 +291,26 @@ func (q *Queue) process(ctx context.Context, id int64) {
 	}
 	q.db.SetDeployReady(id)
 	log.Printf("build: deploy %d (%s@%s) ready", id, row.RepoName, row.ShortSHA)
+	if q.autoStart {
+		q.autoStartDeploy(ctx, id)
+	}
+}
+
+// autoStartDeploy warm-starts a freshly built deploy's processes in the
+// background so its first visit skips the cold start. Failures are logged
+// only: the deploy is ready and start-on-request still applies; the idle
+// reaper and warm cap govern the processes from here.
+func (q *Queue) autoStartDeploy(ctx context.Context, id int64) {
+	row, err := q.db.GetDeployByID(id) // re-read: the hashes landed during the build
+	if err != nil {
+		log.Printf("build: auto-start deploy %d: %v", id, err)
+		return
+	}
+	go func() {
+		if err := q.super.StartDeploy(ctx, row); err != nil && ctx.Err() == nil {
+			log.Printf("build: auto-start deploy %d (%s@%s): %v", id, row.RepoName, row.ShortSHA, err)
+		}
+	}()
 }
 
 func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool) error {

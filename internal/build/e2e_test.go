@@ -322,8 +322,8 @@ func TestFailedBuildSurfacesInLog(t *testing.T) {
 
 // TestProcessModeFrontendBuild covers the build half of frontend.run: the
 // artifact is the whole built tree (not a dist), and a frontend_artifacts
-// row records the run contract. Nothing is started — processes cold-start
-// at request time, after "ready".
+// row records the run contract. Auto-start is off so the bogus run command
+// is never attempted — the run half lives in the supervise tests.
 func TestProcessModeFrontendBuild(t *testing.T) {
 	src := newFixtureRepo(t)
 	toml, err := os.ReadFile(filepath.Join(src, "preview.toml"))
@@ -337,7 +337,7 @@ func TestProcessModeFrontendBuild(t *testing.T) {
 	}
 	runTestGit(t, src, "commit", "-qam", "frontend as process")
 
-	e := newEnv(t, src)
+	e := newEnv(t, src, func(q *Queue) { q.SetAutoStart(false) })
 	d := e.deployAndWait(t, "main")
 
 	// Whole tree published: sources present, not just a dist.
@@ -556,6 +556,23 @@ func TestLocalManifestFallback(t *testing.T) {
 	d := e.deployAndWait(t, "main")
 	if d.FeHash == "" || d.BeHash == "" {
 		t.Fatalf("deploy from local manifest: %+v", d)
+	}
+}
+
+// TestReadyDeployStartsAutomatically: a new deploy's backend comes up on
+// its own right after the build turns ready — no request triggers it.
+func TestReadyDeployStartsAutomatically(t *testing.T) {
+	src := newFixtureRepo(t)
+	e := newEnv(t, src)
+	d := e.deployAndWait(t, "main")
+
+	key := supervise.BackendKey(e.repoID, d.BeHash)
+	deadline := time.Now().Add(30 * time.Second)
+	for e.super.Status(key) != "running" {
+		if time.Now().After(deadline) {
+			t.Fatalf("backend did not auto-start; status=%q", e.super.Status(key))
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

@@ -162,6 +162,32 @@ func (f *fixture) provisionCfg(t *testing.T, beHash string, cfg manifest.Backend
 	}
 }
 
+// provisionFrontend publishes an (empty) process-mode frontend artifact and
+// its frontend_artifacts row with the given run argv.
+func (f *fixture) provisionFrontend(t *testing.T, feHash string, argv []string) {
+	t.Helper()
+	scratch, _, err := f.files.NewScratchDir("fe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.files.PublishFrontend("demo", feHash, scratch, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(manifest.Frontend{
+		Run:          argv,
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.CreateFrontendArtifact(db.FrontendArtifact{
+		RepoID: f.repoID, FeHash: feHash, RunConfig: string(raw),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // initRuns counts how many times the init helper ran against the state dir.
 func (f *fixture) initRuns(t *testing.T, beHash string) int {
 	t.Helper()
@@ -230,6 +256,55 @@ func TestEnsureRunningReuseAndStop(t *testing.T) {
 	recs, _ = f.db.ListProcessRecords()
 	if len(recs) != 0 {
 		t.Fatalf("records after stop = %+v", recs)
+	}
+}
+
+// TestStartDeployWarmStartsBothSides: StartDeploy brings up the deploy's
+// backend and process-mode frontend without any request; a static frontend
+// (no frontend_artifacts row) is skipped rather than attempted.
+func TestStartDeployWarmStartsBothSides(t *testing.T) {
+	f := newFixture(t)
+	f.provision(t, "be-warm", serverArgv(t))
+	f.provisionFrontend(t, "fe-warm", []string{testExe(t), "--helper-server", "{port}", "."})
+
+	row := db.DeployRow{RepoName: "demo"}
+	row.RepoID = f.repoID
+	row.BeHash = "be-warm"
+	row.FeHash = "fe-warm"
+	if err := f.m.StartDeploy(context.Background(), row); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.m.Status(BackendKey(f.repoID, "be-warm")); got != "running" {
+		t.Fatalf("backend Status = %q, want running", got)
+	}
+	if got := f.m.Status(FrontendKey(f.repoID, "fe-warm", "be-warm")); got != "running" {
+		t.Fatalf("frontend Status = %q, want running", got)
+	}
+
+	// Static frontend: FeHash set but no artifact row → only the backend runs.
+	static := db.DeployRow{RepoName: "demo"}
+	static.RepoID = f.repoID
+	static.BeHash = "be-warm"
+	static.FeHash = "fe-static"
+	if err := f.m.StartDeploy(context.Background(), static); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.m.Status(FrontendKey(f.repoID, "fe-static", "be-warm")); got != "idle" {
+		t.Fatalf("static frontend Status = %q, want idle", got)
+	}
+}
+
+// TestStopAllRefusesNewStarts: once shutdown began, a straggling start
+// trigger must not spawn a child the orchestrator would leak.
+func TestStopAllRefusesNewStarts(t *testing.T) {
+	f := newFixture(t)
+	f.provision(t, "be-late", serverArgv(t))
+	f.m.StopAll()
+	if _, err := f.m.EnsureRunning(context.Background(), BackendKey(f.repoID, "be-late"), "demo"); err == nil {
+		t.Fatal("EnsureRunning after StopAll succeeded; want refusal")
+	}
+	if got := f.m.Status(BackendKey(f.repoID, "be-late")); got != "idle" {
+		t.Fatalf("Status = %q, want idle", got)
 	}
 }
 

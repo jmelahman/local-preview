@@ -38,7 +38,10 @@ The unit of a running backend is the *backend artifact*, not the commit. All
 deploys whose backend hash matches share one supervised process, so
 iterating on frontend code reuses the same backend, process and all.
 
-Processes start lazily. The first `/api/*` request to a preview boots the
+A new deploy's processes start automatically as soon as its build turns
+ready, so the first visit usually hits a warm process. Anything not
+running — stopped by the idle timeout or warm cap, or after a server
+restart — starts on demand instead: the first `/api/*` request boots the
 backend (the proxy waits briefly, then shows a self-refreshing "starting"
 page) and later requests hit the warm process. Backends bind loopback-only;
 the only exposed listener is the orchestrator's own address.
