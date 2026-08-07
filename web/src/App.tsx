@@ -1107,7 +1107,10 @@ export default function App() {
                       {(d.branch || (d.ref && d.ref !== d.branch)) && (
                         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
                           {d.branch && (
-                            <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-px font-mono text-[11px] text-fg-muted">
+                            <span
+                              className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-surface-2 px-2 py-px font-mono text-[11px] text-fg-muted"
+                              title={d.branch}
+                            >
                               <IconGitBranch className="h-3 w-3 shrink-0" />
                               <span className="truncate">{d.branch}</span>
                             </span>
