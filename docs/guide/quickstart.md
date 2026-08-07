@@ -116,15 +116,6 @@ It installs a git post-commit hook that requests a deploy of each new commit
 (or, if the repo uses the pre-commit framework, prints the stanza to add to
 `.pre-commit-config.yaml` instead). From then on, committing is deploying.
 
-## Ephemeral runs
-
-For demos and tests, keep the database in memory. Deploy history is
-discarded on shutdown:
-
-```sh
-preview serve --in-memory
-```
-
 ## What's next
 
 - [Concepts](./concepts) explains what makes previews cheap: content
