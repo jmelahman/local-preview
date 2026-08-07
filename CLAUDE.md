@@ -92,6 +92,9 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - Side publishes rename their subtree out of the shared scratch dir —
   anything reading the extracted tree (artifact builds, checksums) must run
   before `PublishFrontend`/`PublishBackend`.
+- React's `autoFocus` prop loses the focus race against `<dialog>.showModal()`
+  — opt a control into initial focus with `data-autofocus` (which `Modal`
+  focuses after opening) instead.
 
 ## Documentation upkeep
 

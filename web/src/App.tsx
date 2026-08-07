@@ -155,7 +155,7 @@ const buttonClass =
 const neutralButtonClass =
   "inline-flex shrink-0 items-center rounded bg-surface-2 px-2 py-1 text-xs text-fg transition-colors duration-150 hover:bg-surface-3";
 const dangerButtonClass =
-  "inline-flex shrink-0 items-center rounded bg-danger px-3 py-1 text-sm text-white transition-colors duration-150 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex shrink-0 items-center rounded bg-accent-600 px-3 py-1 text-sm text-white transition-colors duration-150 hover:bg-accent-500 disabled:cursor-not-allowed disabled:opacity-50";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -206,7 +206,12 @@ function Modal({
     // Guarded and without a close() cleanup: StrictMode re-runs the effect, and
     // closing here would fire the close event and unmount the dialog instantly.
     const dialog = ref.current;
-    if (dialog && !dialog.open) dialog.showModal();
+    if (!dialog) return;
+    if (!dialog.open) dialog.showModal();
+    // showModal() runs the native dialog-focusing steps, which land on the first
+    // focusable control (the header close button). Hand focus to an opt-in target
+    // afterward so, e.g., Enter confirms a destructive action instead of cancelling.
+    dialog.querySelector<HTMLElement>("[data-autofocus]")?.focus();
   }, []);
   return (
     // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click-to-close; Escape is handled natively by <dialog>.
@@ -258,7 +263,12 @@ function ConfirmDialog({
   return (
     <Modal title={title} onClose={() => !pending && onClose()}>
       <div className="flex flex-col gap-2 p-4 text-sm">{children}</div>
-      <DialogFooter error={error} hint="This can't be undone.">
+      <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-2">
+        {error ? (
+          <p className="mr-auto min-w-0 truncate text-xs text-danger" title={String(error)}>
+            {String(error)}
+          </p>
+        ) : null}
         <button
           type="button"
           onClick={onClose}
@@ -267,10 +277,16 @@ function ConfirmDialog({
         >
           Cancel
         </button>
-        <button type="button" onClick={onConfirm} disabled={pending} className={dangerButtonClass}>
+        <button
+          type="button"
+          onClick={onConfirm}
+          disabled={pending}
+          data-autofocus
+          className={dangerButtonClass}
+        >
           {confirmLabel}
         </button>
-      </DialogFooter>
+      </div>
     </Modal>
   );
 }

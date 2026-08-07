@@ -62,3 +62,30 @@ build sequence, or any post-publish step that touches the scratch tree
 (checksums, manifests, uploads) after `PublishFrontend`/`PublishBackend`
 ran. Anything that must read the extracted tree has to run before the
 rename-based publishes — or take its own extraction.
+
+## React `autoFocus` doesn't survive `<dialog>.showModal()`
+
+**Symptom.** The `ConfirmDialog` confirm button carried React's `autoFocus`
+prop so that pressing Enter right after the modal opened would confirm the
+destructive action. It didn't: Enter cancelled instead, because focus sat on
+the header close button.
+
+**Root cause.** React implements the `autoFocus` prop as an imperative
+`.focus()` call during commit — it does *not* render a real `autofocus`
+attribute. `Modal` opens the dialog with `dialog.showModal()` from a *parent*
+effect, which runs after the child button mounts. `showModal()` then runs the
+native dialog-focusing steps, and with no `autofocus` attribute in the DOM to
+delegate to, it focuses the first focusable descendant (the close button),
+clobbering React's earlier `.focus()`.
+
+**Fix.** Focus after the dialog is modal, not before. `Modal` calls
+`dialog.querySelector("[data-autofocus]")?.focus()` immediately after
+`showModal()`, and the control that wants initial focus opts in with a plain
+`data-autofocus` attribute. Running last, this focus sticks. Using a data
+attribute (not `autoFocus`) also sidesteps Biome's `a11y/noAutofocus` rule.
+
+**What would reintroduce it.** Reaching for the `autoFocus` prop on any
+control inside a `<dialog>` that opens via `showModal()` — it will lose the
+focus race every time. Mark the target with `data-autofocus` instead. Same
+trap applies to focusing in a child effect: child effects run before the
+parent's `showModal()`, so that focus is clobbered too.
