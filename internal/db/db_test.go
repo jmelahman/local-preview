@@ -352,6 +352,24 @@ func TestDeployArtifactsRoundTrip(t *testing.T) {
 		t.Fatalf("artifacts = %+v, want %+v", got.Artifacts, refs)
 	}
 
+	// Per-artifact build outcomes land on the stored refs one at a time.
+	if err := s.SetDeployArtifactStatus(d.ID, "cli", ArtifactFailed, "boom"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetDeployByID(d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref := got.Artifacts["cli"]; ref.Status != ArtifactFailed || ref.Error != "boom" || ref.Hash != "abc" {
+		t.Fatalf("cli ref after status update = %+v", ref)
+	}
+	if ref := got.Artifacts["agent"]; ref.Status != "" || ref.Error != "" {
+		t.Fatalf("agent ref touched by cli update = %+v", ref)
+	}
+	if err := s.SetDeployArtifactStatus(d.ID, "nope", ArtifactReady, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("status update of unknown artifact = %v, want ErrNotFound", err)
+	}
+
 	// An empty map clears the column (a rebuild whose manifest dropped them).
 	if err := s.SetDeployArtifacts(d.ID, nil); err != nil {
 		t.Fatal(err)
@@ -362,6 +380,58 @@ func TestDeployArtifactsRoundTrip(t *testing.T) {
 	}
 	if got.Artifacts != nil {
 		t.Fatalf("cleared artifacts = %+v, want none", got.Artifacts)
+	}
+}
+
+// TestListUnfinishedDeployIDs: startup resume picks up queued/building rows
+// and ready rows whose post-ready artifact builds were interrupted — not
+// ready rows whose artifacts finished (or predate per-artifact statuses).
+func TestListUnfinishedDeployIDs(t *testing.T) {
+	s := newTestStore(t)
+	r, err := s.CreateRepo("demo", "/src", "/bare", RepoReady)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(sha string, status string, refs map[string]ArtifactRef) int64 {
+		t.Helper()
+		d, err := s.CreateDeploy(r.ID, sha, DeployMeta{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if refs != nil {
+			if err := s.SetDeployArtifacts(d.ID, refs); err != nil {
+				t.Fatal(err)
+			}
+		}
+		switch status {
+		case DeployBuilding:
+			err = s.SetDeployBuilding(d.ID)
+		case DeployReady:
+			err = s.SetDeployReady(d.ID)
+		case DeployFailed:
+			err = s.SetDeployFailed(d.ID, "boom")
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.ID
+	}
+
+	queued := mk("a000000000000000000000000000000000000000", DeployQueued, nil)
+	building := mk("b000000000000000000000000000000000000000", DeployBuilding, nil)
+	interrupted := mk("c000000000000000000000000000000000000000", DeployReady, map[string]ArtifactRef{"cli": {Hash: "a", Status: ArtifactBuilding}})
+	mk("d000000000000000000000000000000000000000", DeployReady, map[string]ArtifactRef{"cli": {Hash: "a", Status: ArtifactReady}})
+	mk("e000000000000000000000000000000000000000", DeployReady, map[string]ArtifactRef{"cli": {Hash: "a"}})
+	mk("f000000000000000000000000000000000000000", DeployReady, nil)
+	mk("0a00000000000000000000000000000000000000", DeployFailed, map[string]ArtifactRef{"cli": {Hash: "a", Status: ArtifactBuilding}})
+
+	ids, err := s.ListUnfinishedDeployIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []int64{queued, building, interrupted}
+	if len(ids) != len(want) || ids[0] != want[0] || ids[1] != want[1] || ids[2] != want[2] {
+		t.Fatalf("ids = %v, want %v", ids, want)
 	}
 }
 

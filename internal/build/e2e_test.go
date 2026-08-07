@@ -139,6 +139,28 @@ func (e *env) deployAndWait(t *testing.T, ref string) db.DeployRow {
 	}
 }
 
+// waitArtifact polls until the deploy's named artifact reaches a terminal
+// build status — artifacts build on after the deploy turns ready — and
+// returns its ref.
+func (e *env) waitArtifact(t *testing.T, id int64, name string) db.ArtifactRef {
+	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		row, err := e.db.GetDeployByID(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, ok := row.Artifacts[name]
+		if ok && (ref.Status == db.ArtifactReady || ref.Status == db.ArtifactFailed) {
+			return ref
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("artifact %s did not finish; ref=%+v", name, ref)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func readLogTail(t *testing.T, path string) string {
 	t.Helper()
 	if path == "" {
@@ -382,6 +404,9 @@ func TestArtifactBuildAndReuse(t *testing.T) {
 	if !ok || ref.Hash == "" || ref.LogPath == "" {
 		t.Fatalf("deploy artifacts = %+v", a.Artifacts)
 	}
+	if ref = e.waitArtifact(t, a.ID, "cli"); ref.Status != db.ArtifactReady {
+		t.Fatalf("artifact ref = %+v", ref)
+	}
 	if !e.files.HasArtifact("demo", ref.Hash) {
 		t.Fatal("artifact not published")
 	}
@@ -409,6 +434,10 @@ func TestArtifactBuildAndReuse(t *testing.T) {
 	if b.Artifacts["cli"].Hash != ref.Hash {
 		t.Fatalf("frontend-only commit changed the artifact hash: %s → %s", ref.Hash, b.Artifacts["cli"].Hash)
 	}
+	// A cache hit is ready the moment its hash is known — no artifact phase.
+	if b.Artifacts["cli"].Status != db.ArtifactReady {
+		t.Fatalf("cached artifact ref = %+v", b.Artifacts["cli"])
+	}
 
 	// A commit inside the partition rebuilds under a new hash.
 	if err := os.WriteFile(filepath.Join(src, "backend", "note.txt"), []byte("x"), 0o644); err != nil {
@@ -420,14 +449,68 @@ func TestArtifactBuildAndReuse(t *testing.T) {
 	if c.Artifacts["cli"].Hash == ref.Hash {
 		t.Fatal("partition change did not change the artifact hash")
 	}
+	e.waitArtifact(t, c.ID, "cli")
 	if !e.files.HasArtifact("demo", c.Artifacts["cli"].Hash) {
 		t.Fatal("rebuilt artifact not published")
 	}
 }
 
-// TestArtifactMissingFileFailsDeploy: declaring a file the build doesn't
-// produce fails the deploy with an error naming the file and the artifact.
-func TestArtifactMissingFileFailsDeploy(t *testing.T) {
+// TestArtifactsBuildAfterReady: the frontend and backend gate readiness while
+// downloadable artifacts build afterwards — a slow artifact never delays the
+// preview. The artifact build blocks on a gate file the test only creates
+// once it has observed the deploy ready with the artifact unbuilt.
+func TestArtifactsBuildAfterReady(t *testing.T) {
+	src := newFixtureRepo(t)
+	gate := filepath.Join(t.TempDir(), "gate")
+	section := fmt.Sprintf(`
+[artifacts.cli]
+path  = "backend"
+build = [["sh", "-c", "until [ -f %s ]; do sleep 0.05; done; mkdir -p bin && echo gated > bin/fixture-cli"]]
+files = ["bin/fixture-cli"]
+`, gate)
+	f, err := os.OpenFile(filepath.Join(src, "preview.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(section); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	runTestGit(t, src, "commit", "-qam", "declare gated artifact")
+
+	e := newEnv(t, src, func(q *Queue) { q.SetAutoStart(false) })
+	d := e.deployAndWait(t, "main")
+
+	// Ready arrived while the artifact build is still blocked: the sides are
+	// published and servable, the artifact is not.
+	if !e.files.HasFrontend("demo", d.FeHash) || !e.files.HasBackend("demo", d.BeHash) {
+		t.Fatal("sides not published at ready")
+	}
+	ref := d.Artifacts["cli"]
+	if ref.Status != db.ArtifactBuilding {
+		t.Fatalf("artifact ref at ready = %+v, want status building", ref)
+	}
+	if e.files.HasArtifact("demo", ref.Hash) {
+		t.Fatal("artifact published before its build was allowed to finish")
+	}
+
+	if err := os.WriteFile(gate, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := e.waitArtifact(t, d.ID, "cli")
+	if got.Status != db.ArtifactReady || got.Error != "" {
+		t.Fatalf("artifact ref = %+v", got)
+	}
+	if !e.files.HasArtifact("demo", got.Hash) {
+		t.Fatal("artifact not published after the gate opened")
+	}
+}
+
+// TestArtifactBuildFailureLeavesDeployReady: declaring a file the build
+// doesn't produce fails only that artifact — the error (naming the file)
+// lands on its ref, nothing is published for it, and the deploy itself
+// stays ready.
+func TestArtifactBuildFailureLeavesDeployReady(t *testing.T) {
 	src := newFixtureRepo(t)
 	section := strings.Replace(fixtureArtifactSection,
 		`files = ["bin/fixture-cli"]`, `files = ["bin/nope"]`, 1)
@@ -442,30 +525,23 @@ func TestArtifactMissingFileFailsDeploy(t *testing.T) {
 	runTestGit(t, src, "commit", "-qam", "declare bogus artifact file")
 
 	e := newEnv(t, src)
-	row, err := e.q.RequestDeploy(context.Background(), "demo", "main", false)
+	d := e.deployAndWait(t, "main")
+	ref := e.waitArtifact(t, d.ID, "cli")
+	if ref.Status != db.ArtifactFailed {
+		t.Fatalf("artifact ref = %+v, want status failed", ref)
+	}
+	if !strings.Contains(ref.Error, "bin/nope") {
+		t.Fatalf("artifact error = %q", ref.Error)
+	}
+	if e.files.HasArtifact("demo", ref.Hash) {
+		t.Fatal("failed artifact build must not publish")
+	}
+	got, err := e.db.GetDeployByID(d.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(60 * time.Second)
-	var got db.DeployRow
-	for {
-		got, err = e.db.GetDeployByID(row.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.Status == db.DeployFailed {
-			break
-		}
-		if got.Status == db.DeployReady || time.Now().After(deadline) {
-			t.Fatalf("expected failure, status=%s", got.Status)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !strings.Contains(got.Error, "artifacts.cli build") || !strings.Contains(got.Error, "bin/nope") {
-		t.Fatalf("error = %q", got.Error)
-	}
-	if e.files.HasArtifact("demo", got.Artifacts["cli"].Hash) {
-		t.Fatal("failed artifact build must not publish")
+	if got.Status != db.DeployReady || got.Error != "" {
+		t.Fatalf("deploy = %s %q, want ready with no error", got.Status, got.Error)
 	}
 }
 

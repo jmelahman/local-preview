@@ -53,11 +53,14 @@ type Deploy struct {
 }
 
 // DeployArtifact mirrors the API's downloadable-artifact shape on ready
-// deploys.
+// deploys. Artifacts build after the deploy turns ready, so Status can lag
+// the deploy's: building, ready, or failed (Error holds the summary).
 type DeployArtifact struct {
-	Name  string         `json:"name"`
-	Hash  string         `json:"hash"`
-	Files []ArtifactFile `json:"files"`
+	Name   string         `json:"name"`
+	Hash   string         `json:"hash"`
+	Status string         `json:"status"`
+	Error  string         `json:"error,omitempty"`
+	Files  []ArtifactFile `json:"files"`
 }
 
 // ArtifactFile is one downloadable file within an artifact. URL is a path

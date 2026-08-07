@@ -714,8 +714,10 @@ function BuildLogPane({ deployId, building }: { deployId: number; building: bool
 
 // ArtifactDownload is one artifact's download affordance: a plain link when
 // the build produced a single file, a dropdown listing every file (e.g. one
-// binary per platform) when it produced several. The menu is fixed-positioned
-// so the list container's overflow-hidden can't clip it.
+// binary per platform) when it produced several. Artifacts build after the
+// deploy turns ready, so the chip may first show the build still running (or
+// failed) before the download appears. The menu is fixed-positioned so the
+// list container's overflow-hidden can't clip it.
 function ArtifactDownload({ artifact }: { artifact: DeployArtifact }) {
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -740,6 +742,29 @@ function ArtifactDownload({ artifact }: { artifact: DeployArtifact }) {
       window.removeEventListener("resize", close);
     };
   }, [menuPos]);
+
+  if (artifact.status === "building") {
+    return (
+      <span
+        title={`Building ${artifact.name}…`}
+        className="inline-flex shrink-0 animate-pulse items-center gap-1 rounded bg-surface-2 px-2 py-1 font-mono text-xs text-fg-muted"
+      >
+        <IconDownload className="h-3 w-3" />
+        {artifact.name}
+      </span>
+    );
+  }
+  if (artifact.status === "failed") {
+    return (
+      <span
+        title={`${artifact.name} build failed${artifact.error ? `: ${artifact.error}` : ""}`}
+        className="inline-flex shrink-0 items-center gap-1 rounded bg-surface-2 px-2 py-1 font-mono text-xs text-danger"
+      >
+        <IconDownload className="h-3 w-3" />
+        {artifact.name}
+      </span>
+    );
+  }
 
   if (artifact.files.length === 1) {
     const f = artifact.files[0];
@@ -808,7 +833,12 @@ type LogTab = LogSide | "build";
 // DeployDetailDialog is the observability view of one deployment: live
 // resource stats plus docker-logs-like views of its process and build logs.
 function DeployDetailDialog({ deploy, onClose }: { deploy: Deploy; onClose: () => void }) {
-  const building = deploy.status === "queued" || deploy.status === "building";
+  // Artifact builds run on after the deploy turns ready and append to the
+  // same build-log snapshot, so they keep the pane refreshing too.
+  const building =
+    deploy.status === "queued" ||
+    deploy.status === "building" ||
+    (deploy.artifacts?.some((a) => a.status === "building") ?? false);
   const hasBackend = !!deploy.be_hash;
   const hasFeProcess = deploy.fe_process != null;
   const [tab, setTab] = useState<LogTab>(hasBackend && !building ? "be" : "build");
@@ -1402,15 +1432,16 @@ export default function App() {
     // Keep the previous page while a filter change refetches, so the list
     // doesn't blank out between keystrokes.
     placeholderData: keepPreviousData,
-    // Poll while anything is in flight (builds or cold starts) so state
-    // flips surface promptly.
+    // Poll while anything is in flight (builds, post-ready artifact builds,
+    // or cold starts) so state flips surface promptly.
     refetchInterval: (query) =>
       query.state.data?.some(
         (d) =>
           d.status === "queued" ||
           d.status === "building" ||
           d.process === "starting" ||
-          d.fe_process === "starting",
+          d.fe_process === "starting" ||
+          d.artifacts?.some((a) => a.status === "building"),
       )
         ? 1000
         : 5000,

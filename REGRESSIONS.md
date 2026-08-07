@@ -53,15 +53,19 @@ path tree. Publishing a side therefore *consumes* part of the scratch tree;
 any later step that reads it (a build cwd, declared output files) finds it
 gone.
 
-**Fix.** Downloadable artifacts build first: their publish only *copies*
-the declared files out, leaving the tree intact for the frontend and
-backend publishes that follow.
+**Fix.** Originally, downloadable artifacts built first: their publish only
+*copies* the declared files out, leaving the tree intact for the frontend
+and backend publishes that follow. Since artifacts moved to a post-ready
+build phase (they must not gate the preview), they take the other escape
+hatch instead: `buildArtifacts` extracts its own tree and never touches
+`buildDeploy`'s scratch dir.
 
 **What would reintroduce it.** Adding a new output kind, reordering the
 build sequence, or any post-publish step that touches the scratch tree
 (checksums, manifests, uploads) after `PublishFrontend`/`PublishBackend`
 ran. Anything that must read the extracted tree has to run before the
-rename-based publishes — or take its own extraction.
+rename-based publishes — or take its own extraction, as the artifact phase
+does.
 
 ## React `autoFocus` doesn't survive `<dialog>.showModal()`
 

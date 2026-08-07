@@ -290,10 +290,15 @@ type deployJSON struct {
 }
 
 // artifactJSON is one named downloadable artifact on a ready deploy.
+// Artifacts build after the deploy itself turns ready, so Status can lag
+// the deploy's: building (files still empty), ready, or failed (Error holds
+// the build failure summary).
 type artifactJSON struct {
-	Name  string             `json:"name"`
-	Hash  string             `json:"hash"`
-	Files []artifactFileJSON `json:"files"`
+	Name   string             `json:"name"`
+	Hash   string             `json:"hash"`
+	Status string             `json:"status"`
+	Error  string             `json:"error,omitempty"`
+	Files  []artifactFileJSON `json:"files"`
 }
 
 type artifactFileJSON struct {
@@ -317,7 +322,13 @@ func (d Deps) deployJSON(row db.DeployRow) deployJSON {
 		}
 		for _, name := range slices.Sorted(maps.Keys(row.Artifacts)) {
 			ref := row.Artifacts[name]
-			art := artifactJSON{Name: name, Hash: ref.Hash, Files: []artifactFileJSON{}}
+			status := ref.Status
+			if status == "" {
+				// Rows written before per-artifact statuses were built in full.
+				status = db.ArtifactReady
+			}
+			art := artifactJSON{Name: name, Hash: ref.Hash, Status: status,
+				Error: ref.Error, Files: []artifactFileJSON{}}
 			for _, f := range d.Files.ListArtifactFiles(row.RepoName, ref.Hash) {
 				art.Files = append(art.Files, artifactFileJSON{
 					Name: f.Name,
@@ -466,6 +477,14 @@ func (d Deps) handleArtifactDownload(w http.ResponseWriter, r *http.Request) {
 	ref, ok := row.Artifacts[r.PathValue("name")]
 	if !ok {
 		httpError(w, http.StatusNotFound, "no such artifact")
+		return
+	}
+	switch ref.Status {
+	case db.ArtifactBuilding:
+		httpError(w, http.StatusConflict, "artifact is still building")
+		return
+	case db.ArtifactFailed:
+		httpError(w, http.StatusConflict, fmt.Sprintf("artifact build failed: %s", ref.Error))
 		return
 	}
 	// Path values are decoded, so a segment can smuggle separators

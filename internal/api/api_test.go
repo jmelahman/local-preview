@@ -390,17 +390,20 @@ files = ["mycli"]
 	var d struct {
 		Status    string `json:"status"`
 		Artifacts []struct {
-			Name  string `json:"name"`
-			Hash  string `json:"hash"`
-			Files []struct {
+			Name   string `json:"name"`
+			Hash   string `json:"hash"`
+			Status string `json:"status"`
+			Error  string `json:"error"`
+			Files  []struct {
 				Name string `json:"name"`
 				Size int64  `json:"size"`
 				URL  string `json:"url"`
 			} `json:"files"`
 		} `json:"artifacts"`
 	}
+	// Artifacts build after the deploy turns ready, so wait for both.
 	deadline := time.Now().Add(30 * time.Second)
-	for d.Status != "ready" {
+	for d.Status != "ready" || len(d.Artifacts) != 1 || d.Artifacts[0].Status == "building" {
 		if d.Status == "failed" || time.Now().After(deadline) {
 			logs := doJSON(t, mux, "GET", "/api/deploys/1/logs", "")
 			t.Fatalf("deploy status = %s; logs:\n%s", d.Status, logs.Body)
@@ -410,6 +413,9 @@ files = ["mycli"]
 		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if d.Artifacts[0].Status != "ready" || d.Artifacts[0].Error != "" {
+		t.Fatalf("artifact = %+v", d.Artifacts[0])
 	}
 
 	if len(d.Artifacts) != 1 || d.Artifacts[0].Name != "cli" || d.Artifacts[0].Hash == "" {

@@ -19,12 +19,25 @@ const (
 	DeployEvicted  = "evicted"
 )
 
+// Artifact build statuses. Downloadable artifacts build after the deploy
+// itself turns ready — they never gate the preview — so a ready deploy may
+// still carry building artifacts. An empty status on a stored ref means
+// built (rows written before per-artifact statuses existed).
+const (
+	ArtifactBuilding = "building"
+	ArtifactReady    = "ready"
+	ArtifactFailed   = "failed"
+)
+
 // ArtifactRef locates one named downloadable artifact of a deploy: its
-// content hash and build log path. Stored as JSON in the deploys.artifacts
-// column, keyed by artifact name.
+// content hash, build log path, and build outcome. Stored as JSON in the
+// deploys.artifacts column, keyed by artifact name.
 type ArtifactRef struct {
 	Hash    string `json:"hash"`
 	LogPath string `json:"log_path"`
+	Status  string `json:"status,omitempty"`
+	// Error is the build failure summary while Status is ArtifactFailed.
+	Error string `json:"error,omitempty"`
 }
 
 // Deploy is a row in the deploys table.
@@ -249,12 +262,14 @@ func (s *Store) DeploysBySHAPrefix(repoID int64, prefix string) ([]Deploy, error
 	return out, rows.Err()
 }
 
-// ListUnfinishedDeployIDs returns deploys stuck in queued/building — used
-// at startup to resume work interrupted by a shutdown mid-build.
+// ListUnfinishedDeployIDs returns deploys with interrupted work to resume at
+// startup: rows stuck in queued/building, plus ready rows whose artifact
+// builds (which run after readiness) a shutdown cut short.
 func (s *Store) ListUnfinishedDeployIDs() ([]int64, error) {
 	rows, err := s.db.Query(
-		`SELECT id FROM deploys WHERE status IN (?, ?) ORDER BY id`,
-		DeployQueued, DeployBuilding)
+		`SELECT id, status, artifacts FROM deploys
+		 WHERE status IN (?, ?) OR (status = ? AND artifacts != '') ORDER BY id`,
+		DeployQueued, DeployBuilding, DeployReady)
 	if err != nil {
 		return nil, err
 	}
@@ -262,12 +277,31 @@ func (s *Store) ListUnfinishedDeployIDs() ([]int64, error) {
 	out := []int64{}
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var status, artifacts string
+		if err := rows.Scan(&id, &status, &artifacts); err != nil {
 			return nil, err
+		}
+		if status == DeployReady && !anyArtifactBuilding(artifacts) {
+			continue
 		}
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// anyArtifactBuilding reports whether the encoded artifact refs hold at
+// least one artifact still marked building.
+func anyArtifactBuilding(encoded string) bool {
+	refs := map[string]ArtifactRef{}
+	if json.Unmarshal([]byte(encoded), &refs) != nil {
+		return false
+	}
+	for _, ref := range refs {
+		if ref.Status == ArtifactBuilding {
+			return true
+		}
+	}
+	return false
 }
 
 // ResetDeploy re-queues a failed or evicted deploy for another attempt.
@@ -302,6 +336,31 @@ func (s *Store) SetDeployArtifacts(id int64, refs map[string]ArtifactRef) error 
 		encoded = string(b)
 	}
 	return s.updateDeploy(id, `artifacts = ?`, encoded)
+}
+
+// SetDeployArtifactStatus records one named artifact's build outcome on the
+// deploy's stored refs. Only the build worker holding the deploy writes the
+// artifacts column, so read-modify-write is race-free.
+func (s *Store) SetDeployArtifactStatus(id int64, name, status, errMsg string) error {
+	var encoded string
+	if err := s.db.QueryRow(
+		`SELECT artifacts FROM deploys WHERE id = ?`, id).Scan(&encoded); err != nil {
+		return mapNoRows(err)
+	}
+	refs := map[string]ArtifactRef{}
+	if encoded != "" {
+		if err := json.Unmarshal([]byte(encoded), &refs); err != nil {
+			return fmt.Errorf("deploy %d: parse artifacts: %w", id, err)
+		}
+	}
+	ref, ok := refs[name]
+	if !ok {
+		return fmt.Errorf("deploy %d has no artifact %q: %w", id, name, ErrNotFound)
+	}
+	ref.Status = status
+	ref.Error = errMsg
+	refs[name] = ref
+	return s.SetDeployArtifacts(id, refs)
 }
 
 // SetDeployReady marks the deploy ready to serve.

@@ -48,11 +48,19 @@ export type ArtifactFile = {
   url: string;
 };
 
+// Build state of one downloadable artifact. Artifacts build after the
+// deploy itself turns ready — they never gate the preview — so a ready
+// deploy can still be building (or have failed to build) an artifact.
+export type ArtifactStatus = "building" | "ready" | "failed";
+
 // A named downloadable artifact ([artifacts.<name>] in preview.toml),
 // present on ready deploys.
 export type DeployArtifact = {
   name: string;
   hash: string;
+  status: ArtifactStatus;
+  // Build failure summary, while status is "failed".
+  error?: string;
   files: ArtifactFile[];
 };
 

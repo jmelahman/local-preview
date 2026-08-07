@@ -90,8 +90,9 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   filesystem — bind mounts silently resolve on the host; probe before
   asserting on bind-mounted output.
 - Side publishes rename their subtree out of the shared scratch dir —
-  anything reading the extracted tree (artifact builds, checksums) must run
-  before `PublishFrontend`/`PublishBackend`.
+  anything reading the extracted tree (checksums, post-publish steps) must
+  run before `PublishFrontend`/`PublishBackend`, or take its own extraction
+  (as the post-ready artifact phase does).
 - React's `autoFocus` prop loses the focus race against `<dialog>.showModal()`
   — opt a control into initial focus with `data-autofocus` (which `Modal`
   focuses after opening) instead.

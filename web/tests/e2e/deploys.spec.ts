@@ -83,17 +83,19 @@ test("register, deploy, and open a preview", async ({ page }) => {
   expect(depRes.status()).toBe(202);
   const deploy = await depRes.json();
 
+  // Artifacts build on after the deploy turns ready (they never gate the
+  // preview), so wait for both the deploy and its artifact to finish.
   let latest = deploy;
   await expect
     .poll(
       async () => {
         const r = await page.request.get(`/api/deploys/${deploy.id}`);
         latest = await r.json();
-        if (latest.status === "failed") {
+        if (latest.status === "failed" || latest.artifacts?.[0]?.status === "failed") {
           const logs = await page.request.get(`/api/deploys/${deploy.id}/logs`);
           throw new Error(`deploy failed: ${latest.error}\n${await logs.text()}`);
         }
-        return latest.status;
+        return latest.status === "ready" ? latest.artifacts?.[0]?.status : latest.status;
       },
       { timeout: 120_000, intervals: [500] },
     )
@@ -124,6 +126,7 @@ test("register, deploy, and open a preview", async ({ page }) => {
     {
       name: "cli",
       hash: expect.any(String),
+      status: "ready",
       files: [
         {
           name: "fixture-cli-darwin",

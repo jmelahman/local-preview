@@ -172,8 +172,15 @@ The name must be a lowercase label (letters, digits, inner hyphens) — it
 appears in download URLs. Artifacts are content-addressed exactly like the
 two sides: a commit that doesn't touch an artifact's partition (or its
 manifest section) reuses the cached build. Nothing is ever run — there is
-no run command, health check, state dir, or env — and a build that doesn't
-produce every declared file fails the deploy.
+no run command, health check, state dir, or env.
+
+Artifacts never gate the preview: the frontend and backend builds make the
+deploy ready, then artifacts build on afterwards, surfacing per-artifact
+`building`/`ready`/`failed` states in the
+[API](/reference/api#post-api-deploys) and dashboard. An artifact build
+failure (including a build that doesn't produce every declared file) fails
+only that artifact — the error lands on the artifact, its build log has the
+detail, and the deploy stays ready.
 
 A build matrix is just more build steps and more files — cross-compile once
 per platform and declare every output:

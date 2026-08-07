@@ -53,7 +53,9 @@ A manifest can also declare
 binaries like a monorepo's CLI — built from the same commit as the two
 sides. They're hashed and cached exactly the same way, but nothing is ever
 run: the declared build outputs are published once per hash and served as
-downloads from the dashboard and API.
+downloads from the dashboard and API. Artifacts build only after the
+frontend and backend have made the deploy ready, so a slow artifact matrix
+never delays the preview itself.
 
 ## State follows git lineage
 

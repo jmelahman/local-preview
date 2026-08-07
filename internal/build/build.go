@@ -1,8 +1,10 @@
 // Package build turns deploy requests into published artifacts. A small
 // worker pool drains a queue of deploy IDs; each build extracts the commit's
-// tree once, reads preview.toml from that commit, computes the partition
-// hashes, and builds only the sides whose artifacts don't exist yet.
-// Concurrent deploys that share a hash are deduplicated with singleflight.
+// tree, reads preview.toml from that commit, computes the partition hashes,
+// and builds only the sides whose artifacts don't exist yet. The frontend
+// and backend gate readiness; downloadable artifacts build afterwards, from
+// their own extraction, so they never delay the preview. Concurrent deploys
+// that share a hash are deduplicated with singleflight.
 //
 // Build logs are keyed by artifact hash, not deploy ID — that's what a build
 // execution actually is, and deploys sharing a hash share its log. Deploy
@@ -65,8 +67,8 @@ func (r ManifestRef) String() string {
 	return fmt.Sprintf("%s [%s]", r.Path, r.Table)
 }
 
-// Queue coordinates deploys: request → queued row → worker → artifacts →
-// state provisioning → ready.
+// Queue coordinates deploys: request → queued row → worker → frontend and
+// backend builds → state provisioning → ready → downloadable artifacts.
 type Queue struct {
 	db      *db.Store
 	git     *gitrepo.Manager
@@ -295,14 +297,21 @@ func (q *Queue) process(ctx context.Context, id int64) {
 		log.Printf("build: load deploy %d: %v", id, err)
 		return
 	}
-	if row.Status == db.DeployReady || row.Status == db.DeployEvicted {
+	if row.Status == db.DeployEvicted {
+		return
+	}
+	if row.Status == db.DeployReady {
+		// Re-enqueued at startup: the preview already serves; only artifact
+		// builds a shutdown interrupted remain.
+		q.buildArtifacts(ctx, row, false)
 		return
 	}
 	if err := q.db.SetDeployBuilding(id); err != nil {
 		log.Printf("build: mark building %d: %v", id, err)
 		return
 	}
-	if err := q.buildDeploy(ctx, row, q.takeRebuild(id)); err != nil {
+	rebuild := q.takeRebuild(id)
+	if err := q.buildDeploy(ctx, row, rebuild); err != nil {
 		log.Printf("build: deploy %d (%s@%s) failed: %v", id, row.RepoName, row.ShortSHA, err)
 		q.db.SetDeployFailed(id, truncate(err.Error(), 500))
 		return
@@ -311,6 +320,11 @@ func (q *Queue) process(ctx context.Context, id int64) {
 	log.Printf("build: deploy %d (%s@%s) ready", id, row.RepoName, row.ShortSHA)
 	if q.autoStart {
 		q.autoStartDeploy(ctx, id)
+	}
+	// Downloadable artifacts build only now, after the deploy went ready:
+	// they can take a while and must never gate the preview.
+	if row, err = q.db.GetDeployByID(id); err == nil {
+		q.buildArtifacts(ctx, row, rebuild)
 	}
 }
 
@@ -361,7 +375,13 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 		if err != nil {
 			return fmt.Errorf("artifacts.%s: %w", name, err)
 		}
-		artRefs[name] = db.ArtifactRef{Hash: h, LogPath: q.logPath(row.RepoName, "dl", h)}
+		// Artifacts build after the deploy turns ready (see buildArtifacts);
+		// a cache hit is ready the moment its hash is known.
+		status := db.ArtifactBuilding
+		if !rebuild && q.files.HasArtifact(row.RepoName, h) {
+			status = db.ArtifactReady
+		}
+		artRefs[name] = db.ArtifactRef{Hash: h, LogPath: q.logPath(row.RepoName, "dl", h), Status: status}
 	}
 	feLog := q.logPath(row.RepoName, "fe", feHash)
 	beLog := q.logPath(row.RepoName, "be", beHash)
@@ -374,16 +394,10 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 
 	needFe := rebuild || !q.files.HasFrontend(row.RepoName, feHash)
 	needBe := rebuild || !q.files.HasBackend(row.RepoName, beHash)
-	needArt := false
-	for _, name := range artNames {
-		if rebuild || !q.files.HasArtifact(row.RepoName, artRefs[name].Hash) {
-			needArt = true
-		}
-	}
 
-	// One extraction serves every side; skipped entirely on full cache hits.
+	// One extraction serves both sides; skipped entirely on full cache hits.
 	var scratch string
-	if needFe || needBe || needArt {
+	if needFe || needBe {
 		dir, cleanup, err := q.files.NewScratchDir("build")
 		if err != nil {
 			return err
@@ -395,21 +409,6 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 		scratch = dir
 	}
 
-	// Artifacts build first: publishing a frontend or backend *renames* its
-	// built subtree out of the scratch tree, while artifact publishing only
-	// copies the declared files, leaving the tree intact for the sides.
-	for _, name := range artNames {
-		ref := artRefs[name]
-		if !rebuild && q.files.HasArtifact(row.RepoName, ref.Hash) {
-			continue
-		}
-		key := row.RepoName + ":dl:" + ref.Hash
-		if _, err, _ := q.sf.Do(key, func() (any, error) {
-			return nil, q.buildArtifact(ctx, row, m.Artifacts[name], env, scratch, ref.Hash, ref.LogPath, rebuild)
-		}); err != nil {
-			return fmt.Errorf("artifacts.%s build: %w (log: %s)", name, err, ref.LogPath)
-		}
-	}
 	if needFe {
 		key := row.RepoName + ":fe:" + feHash
 		if _, err, _ := q.sf.Do(key, func() (any, error) {
@@ -461,6 +460,81 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 		}
 	}
 	return q.super.ForkOrInitStateDir(ctx, gr, repo.ID, row.RepoName, beHash, row.SHA, string(runCfg))
+}
+
+// buildArtifacts builds the deploy's still-pending downloadable artifacts.
+// It runs after the deploy turned ready — artifact builds can take a while
+// and must never gate the preview — so failures land on the artifact's ref
+// (status + error) and leave the deploy ready. The side publishes renamed
+// their subtrees out of buildDeploy's scratch tree (see REGRESSIONS.md), so
+// this phase takes its own extraction of the same commit.
+func (q *Queue) buildArtifacts(ctx context.Context, row db.DeployRow, rebuild bool) {
+	var pending []string
+	for _, name := range slices.Sorted(maps.Keys(row.Artifacts)) {
+		if row.Artifacts[name].Status == db.ArtifactBuilding {
+			pending = append(pending, name)
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+	fail := func(name string, err error) {
+		// A cancelled build is an interrupted one, not a failed one: leave
+		// the ref building so the startup resume finishes it.
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("build: deploy %d (%s@%s) artifacts.%s failed: %v",
+			row.ID, row.RepoName, row.ShortSHA, name, err)
+		if err := q.db.SetDeployArtifactStatus(row.ID, name, db.ArtifactFailed, truncate(err.Error(), 500)); err != nil {
+			log.Printf("build: mark artifacts.%s failed for deploy %d: %v", name, row.ID, err)
+		}
+	}
+	gr := q.git.Open(row.RepoName)
+	m, err := q.loadManifest(ctx, gr, row)
+	if err != nil {
+		for _, name := range pending {
+			fail(name, err)
+		}
+		return
+	}
+	env := q.loadDevcontainer(ctx, gr, row.SHA, m)
+
+	var scratch string
+	for _, name := range pending {
+		ref := row.Artifacts[name]
+		// A sibling deploy sharing the hash may have published it meanwhile.
+		if !rebuild && q.files.HasArtifact(row.RepoName, ref.Hash) {
+			q.db.SetDeployArtifactStatus(row.ID, name, db.ArtifactReady, "")
+			continue
+		}
+		spec, ok := m.Artifacts[name]
+		if !ok {
+			fail(name, fmt.Errorf("artifact is no longer declared by the manifest"))
+			continue
+		}
+		if scratch == "" {
+			dir, cleanup, err := q.files.NewScratchDir("artifacts")
+			if err != nil {
+				fail(name, err)
+				continue
+			}
+			defer cleanup()
+			if err := gr.Archive(ctx, row.SHA, dir); err != nil {
+				fail(name, err)
+				continue
+			}
+			scratch = dir
+		}
+		key := row.RepoName + ":dl:" + ref.Hash
+		if _, err, _ := q.sf.Do(key, func() (any, error) {
+			return nil, q.buildArtifact(ctx, row, spec, env, scratch, ref.Hash, ref.LogPath, rebuild)
+		}); err != nil {
+			fail(name, fmt.Errorf("%w (log: %s)", err, ref.LogPath))
+			continue
+		}
+		q.db.SetDeployArtifactStatus(row.ID, name, db.ArtifactReady, "")
+	}
 }
 
 // loadManifest reads the first present manifest source at the deployed

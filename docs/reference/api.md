@@ -142,12 +142,19 @@ Ready deploys whose manifest declares
   {
     "name": "cli",
     "hash": "…",
+    "status": "ready",
     "files": [
       { "name": "mycli", "size": 5242880, "url": "/api/deploys/7/artifacts/cli/mycli" }
     ]
   }
 ]
 ```
+
+Artifacts build after the deploy itself turns ready — only the frontend and
+backend gate readiness, so a slow artifact never delays the preview. Each
+entry's `status` is `building` (its `files` list is still empty), `ready`,
+or `failed` (an `error` field carries the build failure summary; the deploy
+itself stays ready). Cached artifacts are `ready` immediately.
 
 `ref` is what the deploy request asked for (empty when it was a sha);
 `branch`, `author_name`, and `author_email` are captured from git when the
@@ -271,7 +278,9 @@ Downloads one file of a ready deploy's named
 [downloadable artifact](/reference/preview-toml#artifacts-name), as
 `application/octet-stream` with an attachment disposition. The URL is what
 the deploy's `artifacts` field lists. `404` for an unknown deploy,
-artifact, or file; `409` while the deploy isn't ready.
+artifact, or file; `409` while the deploy isn't ready, while the artifact
+is still building (they build after the deploy turns ready), or when its
+build failed.
 
 ## Storage & retention
 

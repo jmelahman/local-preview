@@ -297,8 +297,17 @@ func runDeploy(ctx context.Context, url string, out io.Writer, repoName, ref str
 	case "ready":
 		fmt.Fprintf(out, "ready: %s\n", d.PreviewURL)
 		for _, a := range d.Artifacts {
-			for _, f := range a.Files {
-				fmt.Fprintf(out, "%s: %s%s\n", a.Name, strings.TrimRight(url, "/"), f.URL)
+			// Artifacts build after the deploy turns ready; report the ones
+			// that aren't downloadable yet instead of waiting on them.
+			switch a.Status {
+			case "building":
+				fmt.Fprintf(out, "%s: still building (preview deploy show %d)\n", a.Name, d.ID)
+			case "failed":
+				fmt.Fprintf(out, "%s: build failed: %s\n", a.Name, a.Error)
+			default:
+				for _, f := range a.Files {
+					fmt.Fprintf(out, "%s: %s%s\n", a.Name, strings.TrimRight(url, "/"), f.URL)
+				}
 			}
 		}
 		if rebuild {
