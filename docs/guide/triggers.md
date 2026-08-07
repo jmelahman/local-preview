@@ -70,7 +70,20 @@ with `--branches` first. Content addressing keeps the cost down (unchanged
 sides of each commit are never rebuilt), but each distinct tip still builds
 once.
 
-`preview repo unwatch myapp` stops the polling; existing previews stay.
+The same poll cleans up in the other direction. Each fetch prunes branches
+deleted upstream, and any preview whose commit is no longer reachable from a
+surviving branch tip is then **evicted**: its backend processes stop and its
+build artifacts are reclaimed, freeing disk, while the deploy record stays as
+a tombstone. Reachability is judged against *every* branch, not just the
+matched ones, so a commit that still lives on another branch keeps its
+preview — as does one whose branch was merged into `main`'s history with a
+plain merge commit (a squash or rebase merge rewrites the commit, so its
+preview is evicted like any other deleted branch). Eviction is reversible: an
+evicted host serves a *cleaned up* notice, and `preview deploy <sha>` rebuilds
+it on demand.
+
+`preview repo unwatch myapp` stops the polling; existing previews stay, and
+eviction stops with it.
 
 ## GitHub webhooks
 
@@ -98,7 +111,9 @@ Each branch push deploys the pushed head commit. Deliveries are matched to
 registered repos by repository URL (https, ssh, and git forms of the same
 repo all match), so the source can be any clone-URL form. Tag pushes and
 branch deletions are acknowledged but ignored; GitHub's webhook delivery
-log shows the reason for anything skipped.
+log shows the reason for anything skipped. (A branch deletion isn't a
+teardown signal here — if the repo is also watched, the poller evicts the
+orphaned previews on its next fetch, as [above](#watched-repos).)
 
 The endpoint refuses unsigned or mis-signed deliveries, and doesn't exist
 at all until a secret is configured. Details in the

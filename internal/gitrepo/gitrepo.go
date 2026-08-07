@@ -208,6 +208,47 @@ func (r Repo) BranchTips(ctx context.Context) ([]BranchTip, error) {
 	return tips, nil
 }
 
+// UnreachableSHAs returns the subset of candidates no longer reachable from
+// any of tips — commits that have fallen out of the repo's branch history
+// because an unmerged branch was deleted or a tip was force-pushed past them.
+// Every argument is a full or abbreviated object name; tips are the surviving
+// branch heads (see BranchTips), gathered after a fetch --prune.
+//
+// One walk does it: `git rev-list <candidates> --not <tips>` enumerates every
+// commit reachable from a candidate but from no tip, so a candidate appearing
+// in the output is itself unreachable. --ignore-missing drops candidates the
+// mirror has already gc'd rather than erroring; those are left for a later
+// pass, keeping the result conservative. With no surviving tips every present
+// candidate is unreachable. Output order follows git's; each match is
+// returned once.
+func (r Repo) UnreachableSHAs(ctx context.Context, candidates, tips []string) ([]string, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"rev-list", "--ignore-missing"}, candidates...)
+	if len(tips) > 0 {
+		args = append(args, "--not")
+		args = append(args, tips...)
+	}
+	out, err := runGit(ctx, r.Path, args...)
+	if err != nil {
+		return nil, err
+	}
+	want := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		want[c] = true
+	}
+	var unreachable []string
+	for line := range strings.Lines(string(out)) {
+		sha := strings.TrimSpace(line)
+		if want[sha] {
+			delete(want, sha) // dedupe; each candidate reported at most once
+			unreachable = append(unreachable, sha)
+		}
+	}
+	return unreachable, nil
+}
+
 // ReadFile returns the content of path at sha.
 func (r Repo) ReadFile(ctx context.Context, sha, path string) ([]byte, error) {
 	return runGit(ctx, r.Path, "show", sha+":"+path)

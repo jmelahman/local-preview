@@ -149,6 +149,72 @@ func TestCommitMetaAndBranches(t *testing.T) {
 	}
 }
 
+func TestUnreachableSHAs(t *testing.T) {
+	ctx := context.Background()
+	src := newSourceRepo(t)
+	base := runTestGit(t, src, "rev-parse", "HEAD")
+
+	// A second commit advances main; base is now an ancestor of the tip.
+	writeFile(t, src, "a.txt", "a")
+	runTestGit(t, src, "add", "-A")
+	runTestGit(t, src, "commit", "-qm", "second")
+	mainTip := runTestGit(t, src, "rev-parse", "HEAD")
+
+	// An unmerged feature branch off base.
+	runTestGit(t, src, "checkout", "-qb", "feature", base)
+	writeFile(t, src, "f.txt", "f")
+	runTestGit(t, src, "add", "-A")
+	runTestGit(t, src, "commit", "-qm", "feature work")
+	featTip := runTestGit(t, src, "rev-parse", "HEAD")
+	runTestGit(t, src, "checkout", "-q", "main")
+
+	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
+	repo, err := mgr.Add(ctx, "demo", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	candidates := []string{base, mainTip, featTip}
+
+	// While feature survives, nothing is unreachable: base and featTip are
+	// both reachable from a tip.
+	got, err := repo.UnreachableSHAs(ctx, candidates, []string{mainTip, featTip})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("with all tips: unreachable = %v, want none", got)
+	}
+
+	// Drop feature's tip. featTip falls out of history; base stays (still an
+	// ancestor of main), mainTip stays (it is the tip).
+	got, err = repo.UnreachableSHAs(ctx, candidates, []string{mainTip})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != featTip {
+		t.Fatalf("after feature deleted: unreachable = %v, want [%s]", got, featTip)
+	}
+
+	// No surviving tips at all → every candidate is unreachable.
+	got, err = repo.UnreachableSHAs(ctx, candidates, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(candidates) {
+		t.Fatalf("with no tips: unreachable = %v, want all %v", got, candidates)
+	}
+
+	// A candidate the mirror doesn't have is skipped, not an error.
+	got, err = repo.UnreachableSHAs(ctx, []string{strings.Repeat("0", 40)}, []string{mainTip})
+	if err != nil {
+		t.Fatalf("missing candidate errored: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("missing candidate: unreachable = %v, want none", got)
+	}
+}
+
 func TestLsTreeReadFileArchive(t *testing.T) {
 	ctx := context.Background()
 	src := newSourceRepo(t)

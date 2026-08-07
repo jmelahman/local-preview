@@ -97,9 +97,10 @@ func (w *Watcher) PollAll(ctx context.Context) {
 	}
 }
 
-// pollRepo fetches one repo and requests a deploy for every matching branch
-// tip that doesn't have one. Tips are deployed by sha, so RequestDeploy
-// resolves them without a second fetch.
+// pollRepo fetches one repo, requests a deploy for every matching branch tip
+// that doesn't have one, then evicts deploys whose commit fell out of the
+// repo's branch history. Tips are deployed by sha, so RequestDeploy resolves
+// them without a second fetch.
 func (w *Watcher) pollRepo(ctx context.Context, repo db.Repo) error {
 	gr := w.git.Open(repo.Name)
 	if err := gr.Fetch(ctx); err != nil {
@@ -124,6 +125,20 @@ func (w *Watcher) pollRepo(ctx context.Context, repo db.Repo) error {
 			continue
 		}
 		log.Printf("watch: deploying %s@%s (%.7s)", repo.Name, tip.Branch, tip.SHA)
+	}
+	// The fetch above prunes deleted branches. Reachability is judged against
+	// every surviving tip — not just the watched ones — so a commit still
+	// living on an unwatched branch keeps its preview.
+	tipSHAs := make([]string, len(tips))
+	for i, tip := range tips {
+		tipSHAs[i] = tip.SHA
+	}
+	n, err := w.queue.EvictUnreachable(ctx, repo, tipSHAs)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		log.Printf("watch: %s: evicted %d deploy(s) for deleted branches", repo.Name, n)
 	}
 	return nil
 }

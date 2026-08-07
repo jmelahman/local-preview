@@ -133,6 +133,48 @@ func TestPollDeploysNewBranchTips(t *testing.T) {
 	}
 }
 
+func TestPollEvictsDeletedBranchDeploys(t *testing.T) {
+	w, repo, src := newWatchFixture(t, "")
+	ctx := context.Background()
+
+	// main plus an unmerged feature branch each get a (queued) deploy.
+	runTestGit(t, src, "checkout", "-qb", "feature")
+	featSHA := commitFile(t, src, "b.txt", "two", "feature work")
+	runTestGit(t, src, "checkout", "-q", "main")
+	mainSHA := runTestGit(t, src, "rev-parse", "HEAD")
+	w.PollAll(ctx)
+	if rows, _ := w.db.ListDeploys(db.DeployFilter{}); len(rows) != 2 {
+		t.Fatalf("deploy count = %d, want 2", len(rows))
+	}
+
+	// Deleting the unmerged branch evicts its deploy on the next poll; the
+	// main deploy is untouched because its commit is still a live tip.
+	runTestGit(t, src, "branch", "-D", "feature")
+	w.PollAll(ctx)
+
+	feat, err := w.db.GetDeployBySHA(repo.ID, featSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feat.Status != db.DeployEvicted {
+		t.Fatalf("feature deploy status = %q, want %q", feat.Status, db.DeployEvicted)
+	}
+	main, err := w.db.GetDeployBySHA(repo.ID, mainSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if main.Status == db.DeployEvicted {
+		t.Fatal("main deploy was evicted, want it left alone")
+	}
+
+	// Re-poll is idempotent: an already-evicted deploy is not re-processed and
+	// no live deploy is disturbed.
+	w.PollAll(ctx)
+	if feat, _ = w.db.GetDeployBySHA(repo.ID, featSHA); feat.Status != db.DeployEvicted {
+		t.Fatalf("after re-poll feature status = %q, want %q", feat.Status, db.DeployEvicted)
+	}
+}
+
 func TestPollHonorsBranchFilter(t *testing.T) {
 	w, _, src := newWatchFixture(t, "main,release/*")
 	runTestGit(t, src, "branch", "release/1.0")

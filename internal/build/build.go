@@ -193,6 +193,57 @@ func (q *Queue) RequestDeploy(ctx context.Context, repoName, ref string, rebuild
 	return q.db.GetDeployByID(d.ID)
 }
 
+// EvictUnreachable reclaims deploys of repo whose commit is no longer
+// reachable from any surviving branch tip — the cleanup that deleting an
+// unmerged branch (or force-pushing past a commit) should trigger. tips are
+// the repo's current branch-head shas, gathered by the caller after a
+// fetch --prune; reachability is judged against every branch, not just the
+// watched subset, so a commit still living on some other branch is never
+// evicted. Returns the number of deploys evicted.
+//
+// Only pending and serving deploys are candidates. A queued deploy is
+// cancelled before it wastes a build — process() skips evicted rows. A ready
+// deploy's processes and content-addressed artifacts are released via
+// GCDeploy, which spares any hash a surviving deploy still shares. Building
+// deploys are left to finish and are caught on a later poll; failed and
+// already-evicted rows own nothing to reclaim and stand as the historical
+// record. Each deploy is marked evicted before its GC sweep so the
+// shared-hash check observes the correct surviving set. Eviction is
+// reversible: the proxy serves a "cleaned up" page and RequestDeploy rebuilds
+// the deploy on demand.
+func (q *Queue) EvictUnreachable(ctx context.Context, repo db.Repo, tips []string) (int, error) {
+	rows, err := q.db.ListDeploys(db.DeployFilter{Repo: repo.Name})
+	if err != nil {
+		return 0, err
+	}
+	bySHA := make(map[string]db.DeployRow, len(rows))
+	var candidates []string
+	for _, row := range rows {
+		if row.Status == db.DeployReady || row.Status == db.DeployQueued {
+			bySHA[row.SHA] = row
+			candidates = append(candidates, row.SHA)
+		}
+	}
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+	stale, err := q.git.Open(repo.Name).UnreachableSHAs(ctx, candidates, tips)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, sha := range stale {
+		row := bySHA[sha]
+		if err := q.db.SetDeployEvicted(row.ID); err != nil {
+			log.Printf("evict %s@%.7s: %v", repo.Name, sha, err)
+			continue
+		}
+		q.super.GCDeploy(row)
+		n++
+	}
+	return n, nil
+}
+
 func (q *Queue) setRebuild(id int64, v bool) {
 	q.mu.Lock()
 	if v {
