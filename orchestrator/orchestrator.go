@@ -215,10 +215,6 @@ func New(opts Options) (*Orchestrator, error) {
 		opts.BuildConcurrency = 2
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := gitrepo.CheckGit(ctx); err != nil {
-		cancel()
-		return nil, err
-	}
 	if err := os.MkdirAll(opts.DataDir, 0o755); err != nil {
 		cancel()
 		return nil, fmt.Errorf("orchestrator: create data dir: %w", err)

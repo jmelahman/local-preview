@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -250,7 +249,7 @@ func runDeploy(ctx context.Context, url string, out io.Writer, repoName, ref str
 	c := client.New(url, nil)
 
 	if ref == "" {
-		sha, err := gitOutput(ctx, "rev-parse", "HEAD")
+		sha, err := localHeadSHA(".")
 		if err != nil {
 			return fmt.Errorf("no ref given and no commit found in the current directory: %w", err)
 		}
@@ -312,15 +311,14 @@ func detectRepo(ctx context.Context, c *client.Client) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if top, err := gitOutput(ctx, "rev-parse", "--show-toplevel"); err == nil {
-		absTop, _ := filepath.Abs(top)
+	if top, err := findWorktreeRoot("."); err == nil {
 		for _, r := range repos {
-			if absSource, err := filepath.Abs(r.Source); err == nil && absSource == absTop {
+			if absSource, err := filepath.Abs(r.Source); err == nil && absSource == top {
 				return r.Name, nil
 			}
 		}
 	}
-	if origin, err := gitOutput(ctx, "config", "--get", "remote.origin.url"); err == nil && origin != "" {
+	if origin := localOriginURL("."); origin != "" {
 		for _, r := range repos {
 			if r.Source == origin {
 				return r.Name, nil
@@ -339,14 +337,6 @@ func repoNames(repos []client.Repo) string {
 		names[i] = r.Name
 	}
 	return strings.Join(names, ", ")
-}
-
-func gitOutput(ctx context.Context, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, "git", args...).Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 func runDeployList(ctx context.Context, url string, out io.Writer, f client.DeployFilter) error {

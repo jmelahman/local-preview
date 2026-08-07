@@ -1,20 +1,87 @@
 // Package gitrepo manages the orchestrator's mirror clones and exposes the
 // git plumbing the pipeline needs: ref resolution, tree listing (for content
 // addressing), file reads at a commit, ancestry walks, and tree extraction.
-// It shells out to system git — behavior identical to what a developer sees —
+// It is implemented in-process on go-git — no system git binary is required —
 // and has no database dependency.
 package gitrepo
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+
+	"github.com/go-git/go-billy/v5/osfs"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/storer"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	gitclient "github.com/go-git/go-git/v5/plumbing/transport/client"
+	"github.com/go-git/go-git/v5/plumbing/transport/server"
+	"github.com/go-git/go-git/v5/storage/filesystem"
 )
+
+// go-git's stock "file" transport spawns git-upload-pack, which would keep
+// the system-git dependency alive. Serve local clone/fetch sources in-process
+// instead.
+func init() {
+	gitclient.InstallProtocol("file", server.NewClient(gitDirLoader{}))
+}
+
+// gitDirLoader resolves a local path — working tree, bare repo, or linked
+// worktree — to its real git directory and serves it to the transport layer.
+type gitDirLoader struct{}
+
+func (gitDirLoader) Load(ep *transport.Endpoint) (storer.Storer, error) {
+	dir, err := resolveGitDir(ep.Path)
+	if err != nil {
+		return nil, transport.ErrRepositoryNotFound
+	}
+	return filesystem.NewStorage(osfs.New(dir), cache.NewObjectLRUDefault()), nil
+}
+
+// resolveGitDir maps path to the directory that actually holds refs and
+// objects: path itself for a bare repo, path/.git for a working tree, and the
+// main clone's git dir for a linked worktree (whose .git is a file pointing
+// at a per-worktree dir that in turn defers to a commondir).
+func resolveGitDir(path string) (string, error) {
+	dotGit := filepath.Join(path, ".git")
+	if fi, err := os.Stat(dotGit); err == nil {
+		if fi.IsDir() {
+			path = dotGit
+		} else {
+			raw, err := os.ReadFile(dotGit)
+			if err != nil {
+				return "", err
+			}
+			target := strings.TrimSpace(strings.TrimPrefix(string(raw), "gitdir:"))
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(path, target)
+			}
+			path = target
+		}
+	}
+	if raw, err := os.ReadFile(filepath.Join(path, "commondir")); err == nil {
+		common := strings.TrimSpace(string(raw))
+		if !filepath.IsAbs(common) {
+			common = filepath.Join(path, common)
+		}
+		path = common
+	}
+	if _, err := os.Stat(filepath.Join(path, "objects")); err != nil {
+		return "", fmt.Errorf("%s is not a git repository", path)
+	}
+	return filepath.Clean(path), nil
+}
 
 // nameRE restricts repo names to a single lowercase RFC 1035 DNS label so
 // Host-header parsing of <label>.<repo>.<domain> is unambiguous.
@@ -24,17 +91,6 @@ var nameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 func ValidateName(name string) error {
 	if !nameRE.MatchString(name) {
 		return fmt.Errorf("invalid repo name %q: must be a lowercase DNS label (letters, digits, hyphens)", name)
-	}
-	return nil
-}
-
-// CheckGit verifies system git is available. Called once at server startup.
-func CheckGit(ctx context.Context) error {
-	if _, err := exec.LookPath("git"); err != nil {
-		return fmt.Errorf("git binary not found in PATH: %w", err)
-	}
-	if _, err := runGit(ctx, "", "version"); err != nil {
-		return err
 	}
 	return nil
 }
@@ -72,9 +128,11 @@ func (m *Manager) Open(name string) Repo {
 	return Repo{Name: name, Path: m.repoPath(name)}
 }
 
-// Add registers a repo by mirror-cloning source (a local path or clone URL).
-// A mirror clone keeps refs/heads in sync on Fetch, unlike a plain --bare
+// mirrorRefSpec keeps refs/heads in sync on Fetch, unlike a plain bare
 // clone whose fetch refspec is unset.
+const mirrorRefSpec = config.RefSpec("+refs/*:refs/*")
+
+// Add registers a repo by mirror-cloning source (a local path or clone URL).
 func (m *Manager) Add(ctx context.Context, name, source string) (Repo, error) {
 	if err := ValidateName(name); err != nil {
 		return Repo{}, err
@@ -95,11 +153,35 @@ func (m *Manager) Add(ctx context.Context, name, source string) (Repo, error) {
 		}
 		source = abs
 	}
-	if _, err := runGit(ctx, "", "clone", "--mirror", "--quiet", source, dest); err != nil {
+	_, err := git.PlainCloneContext(ctx, dest, true, &git.CloneOptions{
+		URL:    source,
+		Mirror: true,
+	})
+	if errors.Is(err, transport.ErrEmptyRemoteRepository) {
+		// A source with no commits yet: set up the empty mirror by hand
+		// (clone cleans up after itself on error) so refs arrive on a later
+		// Fetch, matching `git clone --mirror` of an empty repo.
+		err = initEmptyMirror(dest, source)
+	}
+	if err != nil {
 		os.RemoveAll(dest)
-		return Repo{}, err
+		return Repo{}, fmt.Errorf("clone %s: %w", source, err)
 	}
 	return Repo{Name: name, Path: dest}, nil
+}
+
+func initEmptyMirror(dest, source string) error {
+	repo, err := git.PlainInit(dest, true)
+	if err != nil {
+		return err
+	}
+	_, err = repo.CreateRemote(&config.RemoteConfig{
+		Name:   "origin",
+		URLs:   []string{source},
+		Fetch:  []config.RefSpec{mirrorRefSpec},
+		Mirror: true,
+	})
+	return err
 }
 
 // Remove deletes the mirror clone for name. A missing clone is not an
@@ -111,10 +193,61 @@ func (m *Manager) Remove(name string) error {
 	return os.RemoveAll(m.repoPath(name))
 }
 
+func (r Repo) open() (*git.Repository, error) {
+	repo, err := git.PlainOpen(r.Path)
+	if err != nil {
+		return nil, fmt.Errorf("open repo %s: %w", r.Path, err)
+	}
+	return repo, nil
+}
+
 // Fetch updates all refs from origin, pruning deleted ones.
 func (r Repo) Fetch(ctx context.Context) error {
-	_, err := runGit(ctx, r.Path, "fetch", "--quiet", "--prune", "origin")
-	return err
+	repo, err := r.open()
+	if err != nil {
+		return err
+	}
+	remote, err := repo.Remote("origin")
+	if err != nil {
+		return fmt.Errorf("fetch %s: %w", r.Name, err)
+	}
+	// List first: the advertised refs both drive pruning below and let an
+	// unreachable source fail before any ref is touched.
+	advertised, err := remote.ListContext(ctx, &git.ListOptions{})
+	if err != nil {
+		if errors.Is(err, transport.ErrEmptyRemoteRepository) {
+			return nil
+		}
+		return fmt.Errorf("fetch %s: %w", r.Name, err)
+	}
+	err = remote.FetchContext(ctx, &git.FetchOptions{Force: true})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return fmt.Errorf("fetch %s: %w", r.Name, err)
+	}
+	// Prune: drop local refs the remote no longer advertises (the --prune
+	// half of `fetch --prune` under a +refs/*:refs/* mirror refspec).
+	live := make(map[plumbing.ReferenceName]bool, len(advertised))
+	for _, ref := range advertised {
+		live[ref.Name()] = true
+	}
+	iter, err := repo.References()
+	if err != nil {
+		return fmt.Errorf("fetch %s: %w", r.Name, err)
+	}
+	var stale []plumbing.ReferenceName
+	iter.ForEach(func(ref *plumbing.Reference) error {
+		name := ref.Name()
+		if ref.Type() == plumbing.HashReference && strings.HasPrefix(string(name), "refs/") && !live[name] {
+			stale = append(stale, name)
+		}
+		return nil
+	})
+	for _, name := range stale {
+		if err := repo.Storer.RemoveReference(name); err != nil {
+			return fmt.Errorf("fetch %s: prune %s: %w", r.Name, name, err)
+		}
+	}
+	return nil
 }
 
 // ResolveRef resolves a branch, tag, or (abbreviated) sha to a full commit
@@ -134,12 +267,40 @@ func (r Repo) ResolveRef(ctx context.Context, ref string) (string, error) {
 	return sha, nil
 }
 
-func (r Repo) revParse(ctx context.Context, ref string) (string, error) {
-	out, err := runGit(ctx, r.Path, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+func (r Repo) revParse(_ context.Context, ref string) (string, error) {
+	repo, err := r.open()
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	hash, err := resolveCommit(repo, ref)
+	if err != nil {
+		return "", err
+	}
+	return hash.String(), nil
+}
+
+// resolveCommit resolves ref (branch, tag, HEAD, full or abbreviated sha)
+// and peels annotated tags down to the commit they tag.
+func resolveCommit(repo *git.Repository, ref string) (plumbing.Hash, error) {
+	h, err := repo.ResolveRevision(plumbing.Revision(ref))
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	hash := *h
+	for {
+		obj, err := repo.Object(plumbing.AnyObject, hash)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		switch o := obj.(type) {
+		case *object.Commit:
+			return hash, nil
+		case *object.Tag:
+			hash = o.Target
+		default:
+			return plumbing.ZeroHash, fmt.Errorf("%q is not a commit", ref)
+		}
+	}
 }
 
 // CommitMeta is display metadata for one commit.
@@ -149,37 +310,46 @@ type CommitMeta struct {
 }
 
 // CommitMeta returns the author of sha.
-func (r Repo) CommitMeta(ctx context.Context, sha string) (CommitMeta, error) {
-	out, err := runGit(ctx, r.Path, "show", "-s", "--format=%an%x00%ae", sha)
+func (r Repo) CommitMeta(_ context.Context, sha string) (CommitMeta, error) {
+	repo, err := r.open()
 	if err != nil {
 		return CommitMeta{}, err
 	}
-	name, email, ok := strings.Cut(strings.TrimRight(string(out), "\n"), "\x00")
-	if !ok {
-		return CommitMeta{}, fmt.Errorf("unexpected commit format for %s: %q", sha, out)
+	commit, err := commitAt(repo, sha)
+	if err != nil {
+		return CommitMeta{}, fmt.Errorf("commit meta %s: %w", sha, err)
 	}
-	return CommitMeta{AuthorName: name, AuthorEmail: email}, nil
+	return CommitMeta{AuthorName: commit.Author.Name, AuthorEmail: commit.Author.Email}, nil
+}
+
+func commitAt(repo *git.Repository, sha string) (*object.Commit, error) {
+	hash, err := resolveCommit(repo, sha)
+	if err != nil {
+		return nil, err
+	}
+	return repo.CommitObject(hash)
 }
 
 // IsBranch reports whether name is a branch head in the mirror.
-func (r Repo) IsBranch(ctx context.Context, name string) bool {
-	_, err := runGit(ctx, r.Path, "rev-parse", "--verify", "--quiet", "refs/heads/"+name)
+func (r Repo) IsBranch(_ context.Context, name string) bool {
+	repo, err := r.open()
+	if err != nil {
+		return false
+	}
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(name), false)
 	return err == nil
 }
 
 // BranchesPointingAt returns the branches whose tip is sha, in refname
 // order. Commits that are no longer any branch's tip return none.
-func (r Repo) BranchesPointingAt(ctx context.Context, sha string) ([]string, error) {
-	out, err := runGit(ctx, r.Path,
-		"for-each-ref", "--points-at", sha, "--format=%(refname:short)", "refs/heads")
+func (r Repo) BranchesPointingAt(_ context.Context, sha string) ([]string, error) {
+	tips, err := r.branchTips(sha)
 	if err != nil {
 		return nil, err
 	}
 	var branches []string
-	for line := range strings.Lines(string(out)) {
-		if b := strings.TrimSpace(line); b != "" {
-			branches = append(branches, b)
-		}
+	for _, t := range tips {
+		branches = append(branches, t.Branch)
 	}
 	return branches, nil
 }
@@ -191,20 +361,41 @@ type BranchTip struct {
 }
 
 // BranchTips returns every branch head in the mirror, in refname order.
-func (r Repo) BranchTips(ctx context.Context) ([]BranchTip, error) {
-	out, err := runGit(ctx, r.Path,
-		"for-each-ref", "--format=%(refname:short)%00%(objectname)", "refs/heads")
+func (r Repo) BranchTips(_ context.Context) ([]BranchTip, error) {
+	return r.branchTips("")
+}
+
+// branchTips lists branch heads sorted by refname; a non-empty at filters to
+// branches whose tip is exactly that commit.
+func (r Repo) branchTips(at string) ([]BranchTip, error) {
+	repo, err := r.open()
+	if err != nil {
+		return nil, err
+	}
+	var want plumbing.Hash
+	if at != "" {
+		h, err := resolveCommit(repo, at)
+		if err != nil {
+			return nil, fmt.Errorf("branches pointing at %s: %w", at, err)
+		}
+		want = h
+	}
+	iter, err := repo.Branches()
 	if err != nil {
 		return nil, err
 	}
 	var tips []BranchTip
-	for line := range strings.Lines(string(out)) {
-		branch, sha, ok := strings.Cut(strings.TrimSpace(line), "\x00")
-		if !ok {
-			continue
+	err = iter.ForEach(func(ref *plumbing.Reference) error {
+		if at != "" && ref.Hash() != want {
+			return nil
 		}
-		tips = append(tips, BranchTip{Branch: branch, SHA: sha})
+		tips = append(tips, BranchTip{Branch: ref.Name().Short(), SHA: ref.Hash().String()})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	sort.Slice(tips, func(i, j int) bool { return tips[i].Branch < tips[j].Branch })
 	return tips, nil
 }
 
@@ -214,80 +405,144 @@ func (r Repo) BranchTips(ctx context.Context) ([]BranchTip, error) {
 // Every argument is a full or abbreviated object name; tips are the surviving
 // branch heads (see BranchTips), gathered after a fetch --prune.
 //
-// One walk does it: `git rev-list <candidates> --not <tips>` enumerates every
-// commit reachable from a candidate but from no tip, so a candidate appearing
-// in the output is itself unreachable. --ignore-missing drops candidates the
-// mirror has already gc'd rather than erroring; those are left for a later
-// pass, keeping the result conservative. With no surviving tips every present
-// candidate is unreachable. Output order follows git's; each match is
-// returned once.
+// Reachability is one ancestry walk from the tips; a candidate the walk never
+// visits is unreachable. Candidates the mirror has already gc'd are skipped
+// rather than reported, keeping the result conservative — they're left for a
+// later pass. With no surviving tips every present candidate is unreachable.
+// Candidates come back in input order; each match is returned once.
 func (r Repo) UnreachableSHAs(ctx context.Context, candidates, tips []string) ([]string, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"rev-list", "--ignore-missing"}, candidates...)
-	if len(tips) > 0 {
-		args = append(args, "--not")
-		args = append(args, tips...)
-	}
-	out, err := runGit(ctx, r.Path, args...)
+	repo, err := r.open()
 	if err != nil {
 		return nil, err
 	}
-	want := make(map[string]bool, len(candidates))
-	for _, c := range candidates {
-		want[c] = true
+
+	type candidate struct {
+		orig string
+		hash plumbing.Hash
 	}
+	var cands []candidate
+	seen := make(map[string]bool, len(candidates))
+	remaining := make(map[plumbing.Hash]int)
+	for _, c := range candidates {
+		if seen[c] {
+			continue // dedupe; each candidate reported at most once
+		}
+		seen[c] = true
+		h, err := resolveCommit(repo, c)
+		if err != nil {
+			continue // gc'd or unknown: conservatively not unreachable
+		}
+		cands = append(cands, candidate{orig: c, hash: h})
+		remaining[h]++
+	}
+	if len(cands) == 0 {
+		return nil, nil
+	}
+
+	// Walk ancestry from every surviving tip, stopping early once all
+	// candidates have been proven reachable.
+	reachable := make(map[plumbing.Hash]bool)
+	var queue []plumbing.Hash
+	for _, t := range tips {
+		if h, err := resolveCommit(repo, t); err == nil {
+			queue = append(queue, h)
+		}
+	}
+	for len(queue) > 0 && len(remaining) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		h := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if reachable[h] {
+			continue
+		}
+		reachable[h] = true
+		delete(remaining, h)
+		commit, err := repo.CommitObject(h)
+		if err != nil {
+			continue // shallow or corrupt edge: treat as a dead end
+		}
+		queue = append(queue, commit.ParentHashes...)
+	}
+
 	var unreachable []string
-	for line := range strings.Lines(string(out)) {
-		sha := strings.TrimSpace(line)
-		if want[sha] {
-			delete(want, sha) // dedupe; each candidate reported at most once
-			unreachable = append(unreachable, sha)
+	for _, c := range cands {
+		if !reachable[c.hash] {
+			unreachable = append(unreachable, c.orig)
 		}
 	}
 	return unreachable, nil
 }
 
 // ReadFile returns the content of path at sha.
-func (r Repo) ReadFile(ctx context.Context, sha, path string) ([]byte, error) {
-	return runGit(ctx, r.Path, "show", sha+":"+path)
+func (r Repo) ReadFile(_ context.Context, sha, path string) ([]byte, error) {
+	repo, err := r.open()
+	if err != nil {
+		return nil, err
+	}
+	commit, err := commitAt(repo, sha)
+	if err != nil {
+		return nil, fmt.Errorf("read %s:%s: %w", sha, path, err)
+	}
+	f, err := commit.File(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s:%s: %w", sha, path, err)
+	}
+	rd, err := f.Blob.Reader()
+	if err != nil {
+		return nil, fmt.Errorf("read %s:%s: %w", sha, path, err)
+	}
+	defer rd.Close()
+	content, err := io.ReadAll(rd)
+	if err != nil {
+		return nil, fmt.Errorf("read %s:%s: %w", sha, path, err)
+	}
+	return content, nil
 }
 
 // LsTree lists all blobs at sha, optionally restricted to a subtree.
 // Submodule (commit) entries are skipped — submodules are out of scope.
-// Entries come back in git's sorted order, which content hashing relies on.
-func (r Repo) LsTree(ctx context.Context, sha, sub string) ([]TreeEntry, error) {
-	args := []string{"ls-tree", "-r", "-z", "--full-tree", sha}
-	if sub != "" && sub != "." {
-		args = append(args, "--", sub)
-	}
-	out, err := runGit(ctx, r.Path, args...)
+// Entries come back in git's sorted tree order, which content hashing relies
+// on (trees store entries sorted, and the walk is depth-first).
+func (r Repo) LsTree(_ context.Context, sha, sub string) ([]TreeEntry, error) {
+	repo, err := r.open()
 	if err != nil {
 		return nil, err
 	}
+	commit, err := commitAt(repo, sha)
+	if err != nil {
+		return nil, fmt.Errorf("ls-tree %s: %w", sha, err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("ls-tree %s: %w", sha, err)
+	}
+	walker := object.NewTreeWalker(tree, true, nil)
+	defer walker.Close()
 	var entries []TreeEntry
-	for rec := range bytes.SplitSeq(out, []byte{0}) {
-		if len(rec) == 0 {
+	for {
+		name, entry, err := walker.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("ls-tree %s: %w", sha, err)
+		}
+		if entry.Mode == filemode.Dir || entry.Mode == filemode.Submodule {
 			continue
 		}
-		// "<mode> <type> <oid>\t<path>"
-		head, path, ok := bytes.Cut(rec, []byte{'\t'})
-		if !ok {
-			return nil, fmt.Errorf("unexpected ls-tree record %q", rec)
-		}
-		fields := strings.Fields(string(head))
-		if len(fields) != 3 {
-			return nil, fmt.Errorf("unexpected ls-tree record %q", rec)
-		}
-		if fields[1] != "blob" {
+		if sub != "" && sub != "." && name != sub && !strings.HasPrefix(name, sub+"/") {
 			continue
 		}
 		entries = append(entries, TreeEntry{
-			Mode: fields[0],
-			Type: fields[1],
-			OID:  fields[2],
-			Path: string(path),
+			Mode: fmt.Sprintf("%06o", uint32(entry.Mode)),
+			Type: "blob",
+			OID:  entry.Hash.String(),
+			Path: name,
 		})
 	}
 	return entries, nil
@@ -297,69 +552,125 @@ func (r Repo) LsTree(ctx context.Context, sha, sub string) ([]TreeEntry, error) 
 // itself), nearest first, following only first parents. Merge commits
 // therefore walk the branch that received the merge.
 func (r Repo) FirstParentAncestry(ctx context.Context, sha string, limit int) ([]string, error) {
-	out, err := runGit(ctx, r.Path,
-		"rev-list", "--first-parent", fmt.Sprintf("--max-count=%d", limit+1), sha)
+	repo, err := r.open()
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Fields(string(out))
-	if len(lines) > 0 && lines[0] == sha {
-		lines = lines[1:]
+	commit, err := commitAt(repo, sha)
+	if err != nil {
+		return nil, fmt.Errorf("ancestry of %s: %w", sha, err)
 	}
-	return lines, nil
+	var ancestors []string
+	for len(ancestors) < limit && commit.NumParents() > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		parent := commit.ParentHashes[0]
+		ancestors = append(ancestors, parent.String())
+		commit, err = repo.CommitObject(parent)
+		if err != nil {
+			return nil, fmt.Errorf("ancestry of %s: %w", sha, err)
+		}
+	}
+	return ancestors, nil
 }
 
-// Archive extracts the full tree at sha into dest via git archive | tar.
-// Stateless by design: it reads only the object database and needs no
-// cleanup bookkeeping, so concurrent extractions are always safe.
+// Archive extracts the full tree at sha into dest. Stateless by design: it
+// reads only the object database and needs no cleanup bookkeeping, so
+// concurrent extractions are always safe.
 func (r Repo) Archive(ctx context.Context, sha, dest string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return fmt.Errorf("create archive dest: %w", err)
 	}
-	arch := exec.CommandContext(ctx, "git", "archive", "--format=tar", sha)
-	arch.Dir = r.Path
-	var archErr bytes.Buffer
-	arch.Stderr = &archErr
-
-	pipe, err := arch.StdoutPipe()
+	repo, err := r.open()
 	if err != nil {
 		return err
 	}
-	untar := exec.CommandContext(ctx, "tar", "-x", "-C", dest)
-	untar.Stdin = pipe
-	var tarErr bytes.Buffer
-	untar.Stderr = &tarErr
-
-	if err := arch.Start(); err != nil {
-		return fmt.Errorf("git archive: %w", err)
+	commit, err := commitAt(repo, sha)
+	if err != nil {
+		return fmt.Errorf("archive %s: %w", sha, err)
 	}
-	if err := untar.Start(); err != nil {
-		arch.Process.Kill()
-		arch.Wait()
-		return fmt.Errorf("tar -x: %w", err)
+	tree, err := commit.Tree()
+	if err != nil {
+		return fmt.Errorf("archive %s: %w", sha, err)
 	}
-	archWaitErr := arch.Wait()
-	tarWaitErr := untar.Wait()
-	if archWaitErr != nil {
-		return fmt.Errorf("git archive %s: %w: %s", sha, archWaitErr, strings.TrimSpace(archErr.String()))
+	walker := object.NewTreeWalker(tree, true, nil)
+	defer walker.Close()
+	for {
+		name, entry, err := walker.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("archive %s: %w", sha, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		target := filepath.Join(dest, filepath.FromSlash(name))
+		switch entry.Mode {
+		case filemode.Dir, filemode.Submodule:
+			err = os.MkdirAll(target, 0o755)
+		case filemode.Symlink:
+			err = extractSymlink(repo, entry.Hash, target)
+		default:
+			err = extractBlob(repo, entry.Hash, target, entry.Mode)
+		}
+		if err != nil {
+			return fmt.Errorf("archive %s: %s: %w", sha, name, err)
+		}
 	}
-	if tarWaitErr != nil {
-		return fmt.Errorf("tar -x: %w: %s", tarWaitErr, strings.TrimSpace(tarErr.String()))
-	}
-	return nil
 }
 
-// runGit executes git with args in dir (empty = inherit cwd), returning
-// stdout and folding stderr into any error.
-func runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	var out, errb bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errb
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s",
-			strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
+func extractSymlink(repo *git.Repository, hash plumbing.Hash, target string) error {
+	linkTarget, err := blobContent(repo, hash)
+	if err != nil {
+		return err
 	}
-	return out.Bytes(), nil
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	os.Remove(target)
+	return os.Symlink(string(linkTarget), target)
+}
+
+func extractBlob(repo *git.Repository, hash plumbing.Hash, target string, mode filemode.FileMode) error {
+	blob, err := repo.BlobObject(hash)
+	if err != nil {
+		return err
+	}
+	rd, err := blob.Reader()
+	if err != nil {
+		return err
+	}
+	defer rd.Close()
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	perm := os.FileMode(0o644)
+	if mode == filemode.Executable {
+		perm = 0o755
+	}
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, rd); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func blobContent(repo *git.Repository, hash plumbing.Hash) ([]byte, error) {
+	blob, err := repo.BlobObject(hash)
+	if err != nil {
+		return nil, err
+	}
+	rd, err := blob.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close()
+	return io.ReadAll(rd)
 }

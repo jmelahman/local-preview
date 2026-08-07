@@ -52,7 +52,7 @@ func installHookCmd() *cobra.Command {
 }
 
 func runInstallHook(ctx context.Context, out io.Writer, dryRun bool) error {
-	top, err := gitOutput(ctx, "rev-parse", "--show-toplevel")
+	top, err := findWorktreeRoot(".")
 	if err != nil {
 		return fmt.Errorf("not inside a git working tree: %w", err)
 	}
@@ -64,12 +64,9 @@ func runInstallHook(ctx context.Context, out io.Writer, dryRun bool) error {
 		return nil
 	}
 
-	gitDir, err := gitOutput(ctx, "rev-parse", "--git-dir")
+	gitDir, err := localGitDir(top)
 	if err != nil {
 		return err
-	}
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(top, gitDir)
 	}
 	hookPath := filepath.Join(gitDir, "hooks", "post-commit")
 

@@ -26,11 +26,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -tags embed -tr
       -o /out/preview .
 
 FROM alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
-# git is a hard startup dependency (mirror clones, tree hashing). Build
+# Git operations run in-process (go-git), so no git binary is needed. Build
 # toolchains for target repos are intentionally not bundled — see
 # docs/guide/install.md. busybox-extras provides httpd so manifests can run
 # a static-file shim backend in this otherwise toolchain-less image.
-RUN apk add --no-cache ca-certificates git busybox-extras \
+RUN apk add --no-cache ca-certificates busybox-extras \
     && addgroup -S -g 65532 nonroot \
     && adduser -S -D -u 65532 -G nonroot -h /home/nonroot -s /sbin/nologin nonroot \
     && mkdir -p /home/nonroot /data \

@@ -121,9 +121,6 @@ func run(opts serveOptions) error {
 	}
 	workCtx, stopWork := context.WithCancel(context.Background())
 	defer stopWork()
-	if err := gitrepo.CheckGit(workCtx); err != nil {
-		return err
-	}
 
 	dbPath := cfg.DBPath()
 	if opts.inMemory {

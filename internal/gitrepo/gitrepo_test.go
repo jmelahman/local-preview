@@ -2,6 +2,7 @@ package gitrepo
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -272,6 +273,79 @@ func TestLsTreeReadFileArchive(t *testing.T) {
 	}
 	if string(got) != "package main" {
 		t.Fatalf("extracted main.go = %q", got)
+	}
+}
+
+// TestLsTreeMatchesGit pins LsTree to real `git ls-tree -r` output — order,
+// modes, and OIDs feed content-address hashes (see hashkey), so any drift
+// silently invalidates every cached build. The fixture exercises git's tree
+// sort quirk (directories order as "name/": a-b < a.txt < a/) plus
+// executable and symlink modes.
+func TestLsTreeMatchesGit(t *testing.T) {
+	ctx := context.Background()
+	src := t.TempDir()
+	runTestGit(t, src, "init", "-q", "-b", "main")
+	writeFile(t, src, "a.txt", "file")
+	writeFile(t, src, "a-b", "dash sorts before dot")
+	writeFile(t, src, "a/nested.txt", "dir sorts after both")
+	writeFile(t, src, "tool.sh", "#!/bin/sh\n")
+	if err := os.Chmod(filepath.Join(src, "tool.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a.txt", filepath.Join(src, "link")); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "add", "-A")
+	runTestGit(t, src, "commit", "-q", "-m", "tree shapes")
+
+	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
+	repo, err := mgr.Add(ctx, "demo", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha, err := repo.ResolveRef(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := repo.LsTree(ctx, sha, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range entries {
+		got = append(got, fmt.Sprintf("%s %s %s\t%s", e.Mode, e.Type, e.OID, e.Path))
+	}
+	want := strings.Split(runTestGit(t, src, "ls-tree", "-r", "--full-tree", sha), "\n")
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("LsTree diverges from git ls-tree -r:\ngot:\n%s\nwant:\n%s",
+			strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// TestAddFromLinkedWorktree registers a linked worktree path (.git is a
+// pointer file, refs live in the main clone) as a repo source.
+func TestAddFromLinkedWorktree(t *testing.T) {
+	ctx := context.Background()
+	src := newSourceRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	runTestGit(t, src, "worktree", "add", "-q", "-b", "feature", wt)
+	writeFile(t, wt, "feature.txt", "from the worktree")
+	runTestGit(t, wt, "add", "-A")
+	runTestGit(t, wt, "commit", "-q", "-m", "feature commit")
+	featureHead := runTestGit(t, wt, "rev-parse", "HEAD")
+
+	mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
+	repo, err := mgr.Add(ctx, "demo", wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha, err := repo.ResolveRef(ctx, "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha != featureHead {
+		t.Fatalf("ResolveRef(feature) = %s, want %s", sha, featureHead)
 	}
 }
 
