@@ -1,12 +1,13 @@
 package supervise
 
-// Container-mode process start: a manifest run_image runs the side's run
-// command inside a stock container image with the artifact (and state dir)
-// bind-mounted at their host paths — the same-path discipline the composed
-// server already relies on for build containers. The published port equals
-// the probed host port, so templating, health polling, and proxying are
-// identical to host processes; the process must bind 0.0.0.0:{port} inside
-// the container.
+// Container-mode process start: a manifest run_image (or the repo's
+// devcontainer, the default runtime when no run_image is pinned) runs the
+// side's run command inside a container image with the artifact (and state
+// dir) bind-mounted at their host paths — the same-path discipline the
+// composed server already relies on for build containers. The published
+// port equals the probed host port, so templating, health polling, and
+// proxying are identical to host processes; the process must bind
+// 0.0.0.0:{port} inside the container.
 
 import (
 	"context"
@@ -20,14 +21,17 @@ import (
 // imagePullTimeout bounds the runtime-image pull on first use.
 const imagePullTimeout = 10 * time.Minute
 
-func (m *Manager) startContainer(k Key, p *process, spec runSpec, argv, env []string, port int, logFile *os.File) error {
+func (m *Manager) startContainer(k Key, p *process, spec runSpec, rt runtimeEnv, argv, env []string, port int, logFile *os.File) error {
 	ctx, cancel := context.WithTimeout(context.Background(), imagePullTimeout)
 	defer cancel()
 	cli, err := m.docker(ctx)
 	if err != nil {
-		return fmt.Errorf("run_image %q requires a docker daemon: %w", spec.runImage, err)
+		return fmt.Errorf("run_image %q requires a docker daemon: %w", rt.image, err)
 	}
-	if err := cli.EnsureImage(ctx, spec.runImage, logFile); err != nil {
+	if rt.devc {
+		fmt.Fprintf(logFile, "[devcontainer runtime: %s]\n", rt.image)
+	}
+	if err := cli.EnsureImage(ctx, rt.image, logFile); err != nil {
 		return err
 	}
 
@@ -67,10 +71,7 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, argv, env []st
 		// owns the artifact and state dirs.
 		user = "0:0"
 	}
-	binds := []string{spec.dir + ":" + spec.dir}
-	if spec.stateDir != "" {
-		binds = append(binds, spec.stateDir+":"+spec.stateDir)
-	}
+	binds := runtimeBinds(spec, rt)
 
 	name := fmt.Sprintf("local-preview-%s-%s-%s", p.repoName, k.Side, k.Hash[:12])
 	if k.Side == SideFrontend && k.Peer != "" {
@@ -82,9 +83,9 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, argv, env []st
 	cli.RemoveContainerByName(ctx, name)
 
 	id, err := cli.CreateContainer(ctx, dockerapi.ContainerSpec{
-		Image:        spec.runImage,
+		Image:        rt.image,
 		Cmd:          argv,
-		Env:          append(env, "HOME=/tmp"),
+		Env:          append(env, "HOME="+rt.homeOrTmp()),
 		User:         user,
 		WorkDir:      spec.dir,
 		Binds:        binds,
@@ -153,36 +154,56 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, argv, env []st
 }
 
 // runInitContainer runs one init step to completion inside the backend's
-// run_image — the same mounts, user, and external dependency networks as
-// the server container, so migrations reach whatever the server will. The
-// image pull gets its own timeout; ctx carries the init budget.
-func (m *Manager) runInitContainer(ctx context.Context, spec runSpec, argv, env []string, logFile *os.File) error {
+// container runtime — the same mounts, user, and external dependency
+// networks as the server container, so migrations reach whatever the server
+// will. The image pull gets its own timeout; ctx carries the init budget.
+func (m *Manager) runInitContainer(ctx context.Context, spec runSpec, rt runtimeEnv, argv, env []string, logFile *os.File) error {
 	pullCtx, cancel := context.WithTimeout(context.Background(), imagePullTimeout)
 	defer cancel()
 	cli, err := m.docker(pullCtx)
 	if err != nil {
-		return fmt.Errorf("run_image %q requires a docker daemon: %w", spec.runImage, err)
+		return fmt.Errorf("run_image %q requires a docker daemon: %w", rt.image, err)
 	}
-	if err := cli.EnsureImage(pullCtx, spec.runImage, logFile); err != nil {
+	if err := cli.EnsureImage(pullCtx, rt.image, logFile); err != nil {
 		return err
 	}
 	user := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
 	if cli.Rootless() {
 		user = "0:0"
 	}
+	return cli.RunStep(ctx, dockerapi.Step{
+		Image:    rt.image,
+		Cmd:      argv,
+		WorkDir:  spec.dir,
+		Env:      append(env, "HOME="+rt.homeOrTmp()),
+		User:     user,
+		Binds:    runtimeBinds(spec, rt),
+		Networks: spec.networks,
+	}, logFile)
+}
+
+// runtimeBinds are a process container's mounts: the artifact (and state
+// dir) at their host paths, plus the devcontainer's cache volumes when that
+// runtime applies.
+func runtimeBinds(spec runSpec, rt runtimeEnv) []string {
 	binds := []string{spec.dir + ":" + spec.dir}
 	if spec.stateDir != "" {
 		binds = append(binds, spec.stateDir+":"+spec.stateDir)
 	}
-	return cli.RunStep(ctx, dockerapi.Step{
-		Image:    spec.runImage,
-		Cmd:      argv,
-		WorkDir:  spec.dir,
-		Env:      append(env, "HOME=/tmp"),
-		User:     user,
-		Binds:    binds,
-		Networks: spec.networks,
-	}, logFile)
+	for _, mt := range rt.mounts {
+		binds = append(binds, mt.Source+":"+mt.Target)
+	}
+	return binds
+}
+
+// homeOrTmp is the HOME inside a process container: the devcontainer's
+// remote-user home when known (so toolchain caches resolve onto its
+// volumes), /tmp otherwise — a guaranteed-writable default.
+func (rt runtimeEnv) homeOrTmp() string {
+	if rt.home != "" {
+		return rt.home
+	}
+	return "/tmp"
 }
 
 // networkName is the per-backend deploy network shared by a backend and

@@ -68,6 +68,16 @@ type Manifest struct {
 	// process joins — how previews reach shared dependencies the user runs
 	// themselves (e.g. a target repo's own deps compose network).
 	Networks []string `toml:"networks" json:"networks,omitempty"`
+	// Devcontainer, when set to false, disables devcontainer discovery: sides
+	// without an explicit image/run_image build and run on the host even if
+	// the commit carries a usable .devcontainer/devcontainer.json. Unset
+	// means true (discovery on).
+	Devcontainer *bool `toml:"devcontainer" json:"devcontainer,omitempty"`
+}
+
+// DevcontainerEnabled reports whether devcontainer discovery applies.
+func (m Manifest) DevcontainerEnabled() bool {
+	return m.Devcontainer == nil || *m.Devcontainer
 }
 
 // Frontend describes how to hash, build, and serve the frontend. Build

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/devcontainer"
 	"github.com/jmelahman/local-preview/internal/dockerapi"
 	"github.com/jmelahman/local-preview/internal/manifest"
 )
@@ -44,6 +45,19 @@ func dockerOrSkip(t *testing.T, probeDir string) *dockerapi.Client {
 // so the test can observe env expansion from outside.
 func (f *fixture) provisionContainer(t *testing.T, beHash string, env map[string]string) {
 	t.Helper()
+	f.provisionContainerCfg(t, beHash, backendRunConfig{Backend: manifest.Backend{
+		Run:          []string{"sh", "-c", "env > env.txt && exec busybox httpd -f -p 0.0.0.0:{port} -h ."},
+		RunImage:     "busybox:1",
+		Env:          env,
+		HealthPath:   "/health.txt",
+		StartTimeout: manifest.Duration(60 * time.Second),
+	}})
+}
+
+// provisionContainerCfg publishes a backend artifact (with a served
+// health.txt) under an arbitrary stored run config.
+func (f *fixture) provisionContainerCfg(t *testing.T, beHash string, cfg backendRunConfig) {
+	t.Helper()
 	scratch, _, err := f.files.NewScratchDir("be")
 	if err != nil {
 		t.Fatal(err)
@@ -57,13 +71,6 @@ func (f *fixture) provisionContainer(t *testing.T, beHash string, env map[string
 	if err := f.files.InitFreshStateDir("demo", beHash); err != nil {
 		t.Fatal(err)
 	}
-	cfg := backendRunConfig{Backend: manifest.Backend{
-		Run:          []string{"sh", "-c", "env > env.txt && exec busybox httpd -f -p 0.0.0.0:{port} -h ."},
-		RunImage:     "busybox:1",
-		Env:          env,
-		HealthPath:   "/health.txt",
-		StartTimeout: manifest.Duration(60 * time.Second),
-	}}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +82,16 @@ func (f *fixture) provisionContainer(t *testing.T, beHash string, env map[string
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// readRunLog returns the first run-log file of a backend hash.
+func (f *fixture) readRunLog(t *testing.T, beHash string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(f.m.logsDir, "demo", "run", "be-"+beHash, "1.log"))
+	if err != nil {
+		t.Fatalf("read run log: %v", err)
+	}
+	return string(b)
 }
 
 func TestContainerBackendLifecycle(t *testing.T) {
@@ -225,5 +242,80 @@ func TestContainerReclaimAndPurge(t *testing.T) {
 		if c.ID == id {
 			t.Fatalf("orphan survived reclaim: %v", cs)
 		}
+	}
+}
+
+// TestDevcontainerRuntimeBackend: with no run_image, the devcontainer
+// stored in the run config is the default runtime — the process runs
+// containered with the devcontainer's cache volumes mounted and HOME
+// pointed at its remote-user home.
+func TestDevcontainerRuntimeBackend(t *testing.T) {
+	f := newFixture(t)
+	dockerOrSkip(t, t.TempDir())
+
+	const beHash = "be-devc-0000000"
+	f.provisionContainerCfg(t, beHash, backendRunConfig{
+		Backend: manifest.Backend{
+			// Writing into the volume target proves the mount exists (the
+			// redirect fails and the start never turns healthy otherwise).
+			Run: []string{"sh", "-c",
+				"env > env.txt && echo warm > /devc-cache/marker && exec busybox httpd -f -p 0.0.0.0:{port} -h ."},
+			HealthPath:   "/health.txt",
+			StartTimeout: manifest.Duration(60 * time.Second),
+		},
+		Devcontainer: &devcontainer.Config{
+			Image:  "busybox:1",
+			Mounts: []devcontainer.Mount{{Source: "local-preview-test-devc", Target: "/devc-cache"}},
+			Home:   "/home/devuser",
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	port, err := f.m.EnsureRunning(ctx, BackendKey(f.repoID, beHash), "demo")
+	if err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	if code, body := get(t, port, "/health.txt"); code != 200 || !strings.Contains(body, "ok") {
+		t.Fatalf("health: %d %q", code, body)
+	}
+	if _, body := get(t, port, "/env.txt"); !strings.Contains(body, "HOME=/home/devuser") {
+		t.Fatalf("HOME not pointed at the devcontainer home: %q", body)
+	}
+	if log := f.readRunLog(t, beHash); !strings.Contains(log, "[devcontainer runtime: busybox:1]") {
+		t.Fatalf("run log missing devcontainer line: %q", log)
+	}
+	f.m.Stop(BackendKey(f.repoID, beHash), "test")
+}
+
+// TestDevcontainerRuntimeFallsBackToHost: the devcontainer default is soft —
+// with no reachable daemon the process starts on the host and the run log
+// says why (an explicit run_image fails the start instead).
+func TestDevcontainerRuntimeFallsBackToHost(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
+	f := newFixture(t)
+
+	const beHash = "be-devc-host-00"
+	f.provisionRunCfg(t, beHash, backendRunConfig{
+		Backend: manifest.Backend{
+			Run:          serverArgv(t),
+			HealthPath:   "/api/health",
+			StartTimeout: manifest.Duration(10 * time.Second),
+		},
+		Devcontainer: &devcontainer.Config{Image: "busybox:1"},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	port, err := f.m.EnsureRunning(ctx, BackendKey(f.repoID, beHash), "demo")
+	if err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	if code, _ := get(t, port, "/api/health"); code != 200 {
+		t.Fatalf("health on host fallback: %d", code)
+	}
+	log := f.readRunLog(t, beHash)
+	if !strings.Contains(log, "devcontainer busybox:1 unavailable") || !strings.Contains(log, "running on the host") {
+		t.Fatalf("run log missing fallback note: %q", log)
 	}
 }

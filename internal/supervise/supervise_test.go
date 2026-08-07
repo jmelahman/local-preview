@@ -136,8 +136,14 @@ func (f *fixture) provisionIdle(t *testing.T, beHash string, argv []string, idle
 	})
 }
 
-// provisionCfg is provision with full control over the run config.
+// provisionCfg is provision with full control over the manifest section.
 func (f *fixture) provisionCfg(t *testing.T, beHash string, cfg manifest.Backend) {
+	t.Helper()
+	f.provisionRunCfg(t, beHash, backendRunConfig{Backend: cfg})
+}
+
+// provisionRunCfg is provision with full control over the stored run config.
+func (f *fixture) provisionRunCfg(t *testing.T, beHash string, cfg backendRunConfig) {
 	t.Helper()
 	scratch, _, err := f.files.NewScratchDir("be")
 	if err != nil {

@@ -17,39 +17,42 @@ import (
 	"github.com/jmelahman/local-preview/internal/manifest"
 )
 
-// Frontend hashes the frontend partition: entries under fe.Path.
-func Frontend(fe manifest.Frontend, entries []gitrepo.TreeEntry) (string, error) {
+// Frontend hashes the frontend partition: entries under fe.Path. extra is
+// environment context resolved outside the manifest section (the repo's
+// devcontainer, when this side would use it); nil contributes nothing, so
+// digests predate-and-postdate identically for repos without one.
+func Frontend(fe manifest.Frontend, extra []byte, entries []gitrepo.TreeEntry) (string, error) {
 	sel := filter(entries, func(p string) bool { return under(p, fe.Path) })
 	if len(sel) == 0 {
 		return "", fmt.Errorf("frontend.path %q matches no files at this commit", fe.Path)
 	}
-	return digest(fe, sel)
+	return digest(fe, extra, sel)
 }
 
 // Backend hashes the backend partition: entries under be.Path, minus the
 // frontend subtree, minus be.Exclude patterns.
-func Backend(be manifest.Backend, frontendPath string, entries []gitrepo.TreeEntry) (string, error) {
+func Backend(be manifest.Backend, frontendPath string, extra []byte, entries []gitrepo.TreeEntry) (string, error) {
 	sel := filter(entries, func(p string) bool {
 		return under(p, be.Path) && !under(p, frontendPath) && !excluded(p, be.Exclude)
 	})
 	if len(sel) == 0 {
 		return "", fmt.Errorf("backend partition matches no files at this commit (path %q)", be.Path)
 	}
-	return digest(be, sel)
+	return digest(be, extra, sel)
 }
 
 // Artifact hashes a downloadable-artifact partition: entries under a.Path,
 // minus the frontend subtree, minus a.Exclude patterns — the same partition
 // rule as Backend. The artifact's name is deliberately not part of the
 // digest: renaming an entry with an unchanged section doesn't rebuild.
-func Artifact(a manifest.Artifact, frontendPath string, entries []gitrepo.TreeEntry) (string, error) {
+func Artifact(a manifest.Artifact, frontendPath string, extra []byte, entries []gitrepo.TreeEntry) (string, error) {
 	sel := filter(entries, func(p string) bool {
 		return under(p, a.Path) && !under(p, frontendPath) && !excluded(p, a.Exclude)
 	})
 	if len(sel) == 0 {
 		return "", fmt.Errorf("artifact partition matches no files at this commit (path %q)", a.Path)
 	}
-	return digest(a, sel)
+	return digest(a, extra, sel)
 }
 
 func filter(entries []gitrepo.TreeEntry, keep func(string) bool) []gitrepo.TreeEntry {
@@ -89,9 +92,10 @@ func excluded(p string, patterns []string) bool {
 }
 
 // digest hashes the manifest section (canonical JSON — struct field order is
-// fixed) followed by the sorted tree entries. Entries arrive in git ls-tree
-// order, which is already deterministic.
-func digest(section any, entries []gitrepo.TreeEntry) (string, error) {
+// fixed), the extra environment blob when present, then the sorted tree
+// entries. Entries arrive in git ls-tree order, which is already
+// deterministic.
+func digest(section any, extra []byte, entries []gitrepo.TreeEntry) (string, error) {
 	h := sha256.New()
 	cfg, err := json.Marshal(section)
 	if err != nil {
@@ -99,6 +103,10 @@ func digest(section any, entries []gitrepo.TreeEntry) (string, error) {
 	}
 	h.Write(cfg)
 	h.Write([]byte{0})
+	if len(extra) > 0 {
+		h.Write(extra)
+		h.Write([]byte{0})
+	}
 	for _, e := range entries {
 		fmt.Fprintf(h, "%s %s %s\t%s\x00", e.Mode, e.Type, e.OID, e.Path)
 	}

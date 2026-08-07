@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/devcontainer"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/hashkey"
 	"github.com/jmelahman/local-preview/internal/manifest"
@@ -43,6 +44,11 @@ var ErrRepoNotReady = errors.New("repo is not ready")
 
 // ManifestName is the default contract file read from the committed tree.
 const ManifestName = "preview.toml"
+
+// devcontainerPaths are the in-tree locations tried, in order, for the
+// devcontainer config at the deployed commit — the two standard spec
+// locations (nested .devcontainer/<folder>/ variants are not searched).
+var devcontainerPaths = []string{".devcontainer/devcontainer.json", ".devcontainer.json"}
 
 // ManifestRef locates a preview manifest in a target repo: a TOML file at
 // the repo root, optionally rooted at a top-level table (so embedders can
@@ -80,12 +86,13 @@ type Queue struct {
 	rebuild map[int64]bool
 }
 
-// NewQueue wires the pipeline. runner may be nil for the default HostRunner.
+// NewQueue wires the pipeline. runner may be nil for the default runner.
 // Call Start to launch workers.
 func NewQueue(database *db.Store, git *gitrepo.Manager, files *store.Store, super *supervise.Manager, logsDir string, runner Runner) *Queue {
 	if runner == nil {
-		// The default routes image-declared steps into containers and
-		// everything else to the host.
+		// The default routes image-declared steps into containers, steps of
+		// image-less sides into the repo's devcontainer when one resolves,
+		// and everything else to the host.
 		runner = &autoRunner{}
 	}
 	return &Queue{
@@ -331,22 +338,26 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 	if err != nil {
 		return err
 	}
+	env := q.loadDevcontainer(ctx, gr, row.SHA, m)
 	entries, err := gr.LsTree(ctx, row.SHA, "")
 	if err != nil {
 		return err
 	}
-	feHash, err := hashkey.Frontend(m.Frontend, entries)
+	feHash, err := hashkey.Frontend(m.Frontend,
+		devcExtra(env.devc, m.Frontend.Image, m.Frontend.RunImage, len(m.Frontend.Run) > 0), entries)
 	if err != nil {
 		return err
 	}
-	beHash, err := hashkey.Backend(m.Backend, m.Frontend.Path, entries)
+	beHash, err := hashkey.Backend(m.Backend, m.Frontend.Path,
+		devcExtra(env.devc, m.Backend.Image, m.Backend.RunImage, true), entries)
 	if err != nil {
 		return err
 	}
 	artNames := slices.Sorted(maps.Keys(m.Artifacts))
 	artRefs := make(map[string]db.ArtifactRef, len(artNames))
 	for _, name := range artNames {
-		h, err := hashkey.Artifact(m.Artifacts[name], m.Frontend.Path, entries)
+		h, err := hashkey.Artifact(m.Artifacts[name], m.Frontend.Path,
+			devcExtra(env.devc, m.Artifacts[name].Image, "", false), entries)
 		if err != nil {
 			return fmt.Errorf("artifacts.%s: %w", name, err)
 		}
@@ -394,7 +405,7 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 		}
 		key := row.RepoName + ":dl:" + ref.Hash
 		if _, err, _ := q.sf.Do(key, func() (any, error) {
-			return nil, q.buildArtifact(ctx, row, m.Artifacts[name], scratch, ref.Hash, ref.LogPath, rebuild)
+			return nil, q.buildArtifact(ctx, row, m.Artifacts[name], env, scratch, ref.Hash, ref.LogPath, rebuild)
 		}); err != nil {
 			return fmt.Errorf("artifacts.%s build: %w (log: %s)", name, err, ref.LogPath)
 		}
@@ -402,7 +413,7 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 	if needFe {
 		key := row.RepoName + ":fe:" + feHash
 		if _, err, _ := q.sf.Do(key, func() (any, error) {
-			return nil, q.buildFrontend(ctx, row, m.Frontend, scratch, feHash, feLog, rebuild)
+			return nil, q.buildFrontend(ctx, row, m.Frontend, env, scratch, feHash, feLog, rebuild)
 		}); err != nil {
 			return fmt.Errorf("frontend build: %w (log: %s)", err, feLog)
 		}
@@ -410,7 +421,7 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 	if needBe {
 		key := row.RepoName + ":be:" + beHash
 		if _, err, _ := q.sf.Do(key, func() (any, error) {
-			return nil, q.buildBackend(ctx, row, m.Backend, scratch, beHash, beLog, rebuild)
+			return nil, q.buildBackend(ctx, row, m.Backend, env, scratch, beHash, beLog, rebuild)
 		}); err != nil {
 			return fmt.Errorf("backend build: %w (log: %s)", err, beLog)
 		}
@@ -418,12 +429,15 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 
 	// Provision state before ready: "ready" must imply the state dir exists
 	// so the proxy's hot path never provisions anything. Run configs carry
-	// the top-level networks list alongside the section — it's run-time
-	// context the supervisor needs but not part of the artifact hash.
+	// the top-level networks list — and the resolved devcontainer, the
+	// side's default runtime when it pins no run_image — alongside the
+	// section: run-time context the supervisor needs. Networks stay out of
+	// the artifact hash; the devcontainer already fed it via devcExtra.
 	runCfg, err := json.Marshal(struct {
 		manifest.Backend
-		Networks []string `json:"networks,omitempty"`
-	}{m.Backend, m.Networks})
+		Networks     []string             `json:"networks,omitempty"`
+		Devcontainer *devcontainer.Config `json:"devcontainer,omitempty"`
+	}{m.Backend, m.Networks, env.runDefault(m.Backend.RunImage)})
 	if err != nil {
 		return err
 	}
@@ -434,8 +448,9 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 	if len(m.Frontend.Run) > 0 {
 		feCfg, err := json.Marshal(struct {
 			manifest.Frontend
-			Networks []string `json:"networks,omitempty"`
-		}{m.Frontend, m.Networks})
+			Networks     []string             `json:"networks,omitempty"`
+			Devcontainer *devcontainer.Config `json:"devcontainer,omitempty"`
+		}{m.Frontend, m.Networks, env.runDefault(m.Frontend.RunImage)})
 		if err != nil {
 			return err
 		}
@@ -486,14 +501,15 @@ func (q *Queue) loadManifest(ctx context.Context, gr gitrepo.Repo, row db.Deploy
 		row.ShortSHA, strings.Join(tried, ", "))
 }
 
-func (q *Queue) buildFrontend(ctx context.Context, row db.DeployRow, fe manifest.Frontend, scratch, hash, logPath string, overwrite bool) error {
+func (q *Queue) buildFrontend(ctx context.Context, row db.DeployRow, fe manifest.Frontend, env buildEnv, scratch, hash, logPath string, overwrite bool) error {
 	logF, err := openLog(logPath)
 	if err != nil {
 		return err
 	}
 	defer logF.Close()
+	env.noteSkipped(fe.Image, logF)
 	for _, step := range fe.Build {
-		if err := q.runStep(ctx, row, scratch, fe.Path, fe.Image, step, logF); err != nil {
+		if err := q.runStep(ctx, row, scratch, fe.Path, fe.Image, env.devc, step, logF); err != nil {
 			return err
 		}
 	}
@@ -509,46 +525,122 @@ func (q *Queue) buildFrontend(ctx context.Context, row db.DeployRow, fe manifest
 	return q.files.PublishFrontend(row.RepoName, hash, dist, overwrite)
 }
 
-func (q *Queue) buildBackend(ctx context.Context, row db.DeployRow, be manifest.Backend, scratch, hash, logPath string, overwrite bool) error {
+func (q *Queue) buildBackend(ctx context.Context, row db.DeployRow, be manifest.Backend, env buildEnv, scratch, hash, logPath string, overwrite bool) error {
 	logF, err := openLog(logPath)
 	if err != nil {
 		return err
 	}
 	defer logF.Close()
+	env.noteSkipped(be.Image, logF)
 	for _, step := range be.Build {
-		if err := q.runStep(ctx, row, scratch, be.Path, be.Image, step, logF); err != nil {
+		if err := q.runStep(ctx, row, scratch, be.Path, be.Image, env.devc, step, logF); err != nil {
 			return err
 		}
 	}
 	return q.files.PublishBackend(row.RepoName, hash, filepath.Join(scratch, be.Path), overwrite)
 }
 
-func (q *Queue) buildArtifact(ctx context.Context, row db.DeployRow, a manifest.Artifact, scratch, hash, logPath string, overwrite bool) error {
+func (q *Queue) buildArtifact(ctx context.Context, row db.DeployRow, a manifest.Artifact, env buildEnv, scratch, hash, logPath string, overwrite bool) error {
 	logF, err := openLog(logPath)
 	if err != nil {
 		return err
 	}
 	defer logF.Close()
+	env.noteSkipped(a.Image, logF)
 	for _, step := range a.Build {
-		if err := q.runStep(ctx, row, scratch, a.Path, a.Image, step, logF); err != nil {
+		if err := q.runStep(ctx, row, scratch, a.Path, a.Image, env.devc, step, logF); err != nil {
 			return err
 		}
 	}
 	return q.files.PublishArtifactFiles(row.RepoName, hash, filepath.Join(scratch, a.Path), a.Files, overwrite)
 }
 
-func (q *Queue) runStep(ctx context.Context, row db.DeployRow, scratch, dir, image string, argv []string, logF io.Writer) error {
+func (q *Queue) runStep(ctx context.Context, row db.DeployRow, scratch, dir, image string, devc devcontainer.Config, argv []string, logF io.Writer) error {
 	cctx, cancel := context.WithTimeout(ctx, q.buildTimeout)
 	defer cancel()
 	fmt.Fprintf(logF, "$ %s\n", strings.Join(argv, " "))
 	return q.runner.Run(cctx, RunSpec{
-		RepoName:   row.RepoName,
-		SHA:        row.SHA,
-		ScratchDir: scratch,
-		Dir:        dir,
-		Argv:       argv,
-		Image:      image,
+		RepoName:     row.RepoName,
+		SHA:          row.SHA,
+		ScratchDir:   scratch,
+		Dir:          dir,
+		Argv:         argv,
+		Image:        image,
+		Devcontainer: devc,
 	}, logF)
+}
+
+// buildEnv is the deploy-wide default build/run environment resolved from
+// the commit's devcontainer: the config itself, or a note explaining why a
+// present devcontainer was skipped (surfaced in the build logs of sides
+// that would have used it).
+type buildEnv struct {
+	devc devcontainer.Config
+	note string
+}
+
+// noteSkipped writes the skip note to a side's build log when the side has
+// no explicit image — the sides an unusable devcontainer actually affects.
+func (e buildEnv) noteSkipped(sideImage string, logF io.Writer) {
+	if e.note != "" && sideImage == "" {
+		fmt.Fprintln(logF, e.note)
+	}
+}
+
+// runDefault is the devcontainer stored in a side's run config as its
+// default runtime — nil when the side pins an explicit run_image or no
+// devcontainer resolved.
+func (e buildEnv) runDefault(runImage string) *devcontainer.Config {
+	if runImage != "" || e.devc.Image == "" {
+		return nil
+	}
+	d := e.devc
+	return &d
+}
+
+// loadDevcontainer resolves the deployed commit's devcontainer as the
+// default build/run environment for sides without an explicit image. An
+// unusable config (parse error, no image — e.g. a Dockerfile build) never
+// fails the deploy — the file isn't part of the preview contract; it falls
+// back to the host with the reason in buildEnv.note.
+func (q *Queue) loadDevcontainer(ctx context.Context, gr gitrepo.Repo, sha string, m manifest.Manifest) buildEnv {
+	if !m.DevcontainerEnabled() {
+		return buildEnv{}
+	}
+	for _, p := range devcontainerPaths {
+		raw, err := gr.ReadFile(ctx, sha, p)
+		if err != nil {
+			continue
+		}
+		cfg, err := devcontainer.Parse(raw)
+		if err != nil {
+			return buildEnv{note: fmt.Sprintf("warning: %s: %v; building on the host", p, err)}
+		}
+		if cfg.Image == "" {
+			return buildEnv{note: fmt.Sprintf("warning: %s declares no usable image (Dockerfile-built devcontainers are not supported); building on the host", p)}
+		}
+		return buildEnv{devc: cfg}
+	}
+	return buildEnv{}
+}
+
+// devcExtra is a side's hash contribution from the resolved devcontainer:
+// non-nil only when the side would actually use it — for build steps (no
+// explicit image) or for its run (a run command without run_image). The
+// canonical JSON covers exactly the honored subset, so edits to unrelated
+// devcontainer.json keys don't rebuild anything.
+func devcExtra(devc devcontainer.Config, buildImage, runImage string, hasRun bool) []byte {
+	if devc.Image == "" {
+		return nil
+	}
+	if buildImage != "" && (!hasRun || runImage != "") {
+		return nil
+	}
+	b, err := json.Marshal(devc)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 func (q *Queue) logPath(repoName, kind, hash string) string {

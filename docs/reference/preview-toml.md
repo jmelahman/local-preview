@@ -59,7 +59,8 @@ With `run` set the frontend is a server (SSR apps like Next.js standalone),
 not a static bundle: the whole built `path` tree is published as the
 artifact, the command runs from it on demand exactly like a backend, and
 the proxy forwards every non-API path to it. `dist` is unused. The process
-must bind `{port}` — on all interfaces (`0.0.0.0`) when `run_image` is set.
+must bind `{port}` — on all interfaces (`0.0.0.0`) when it runs containered
+(`run_image`, or the [devcontainer default](#devcontainer-default)).
 
 ## `[backend]`
 
@@ -86,7 +87,7 @@ Two placeholders are substituted into every `run` argv element:
 
 | Placeholder | Value |
 | --- | --- |
-| `{port}` | The port assigned to this process — bind `127.0.0.1:{port}` on the host, `0.0.0.0:{port}` under `run_image` |
+| `{port}` | The port assigned to this process — bind `0.0.0.0:{port}`, which works on every runtime (only a pure host process may narrow to `127.0.0.1`; containered runs — `run_image` or the [devcontainer default](#devcontainer-default) — need all interfaces) |
 | `{state_dir}` | The artifact's mutable state directory (see [state lineage](/guide/concepts#state-follows-git-lineage)) |
 
 ### Env placeholders
@@ -202,7 +203,10 @@ at their host paths, the port published to the host loopback — instead of
 directly on the server's host. This is how apps whose runtime the server
 doesn't have (Node, Python, …) run under the toolchain-less composed
 server. Unlike build `image` steps there is no host fallback: `run_image`
-with no reachable daemon fails the start with a clear error.
+with no reachable daemon fails the start with a clear error. (A side with
+no `run_image` still defaults into the repo's devcontainer when the commit
+carries one — see [Devcontainer default](#devcontainer-default), which
+*does* fall back to the host.)
 
 A process-mode frontend and its backend share a per-deploy bridge network:
 the backend is reachable from the frontend container by the DNS alias
@@ -285,13 +289,60 @@ or the rootless per-user socket). If none is reachable, the build logs a
 warning and falls back to host execution. Toolchain caches (npm, Go) are
 kept warm on a named volume per image. Embedding applications with their
 own runners (agentic-kanban's devcontainer builds) honor `image` when set —
-an explicit image beats environment discovery.
+an explicit image beats environment discovery. The standalone server does
+its own discovery for sides without one: the repo's devcontainer, below.
+
+## Devcontainer default
+
+Sides that pin no `image`/`run_image` don't go straight to the host: when
+the deployed commit carries a devcontainer config
+(`.devcontainer/devcontainer.json` or `.devcontainer.json`, read from the
+committed tree like the manifest), its image becomes the default
+environment for both build steps and server processes. Per side the
+precedence is explicit `image`/`run_image` → devcontainer → host.
+
+What's honored:
+
+- `image` — Dockerfile-built devcontainers aren't supported and fall back
+  to the host with a note in the build log.
+- `mounts` of `type=volume` — the devcontainer's named cache volumes are
+  mounted into build and run containers, so preview builds share the warm
+  toolchain caches your interactive sandbox already populated. Bind mounts
+  reference paths personal to a developer's machine and are dropped.
+- `remoteUser` / `containerUser` — only to derive the `HOME` steps run
+  with, so toolchains (go, npm) resolve their caches onto the mounted
+  volume targets.
+- `${localEnv:VAR}` and `${localEnv:VAR:default}` are expanded against the
+  server's environment; entries still referencing other variables
+  (`${localWorkspaceFolder}`, …) are skipped.
+
+Everything else — features, `runArgs`, `containerEnv`, lifecycle
+commands — is ignored: previews want the toolchain, not the sandbox.
+
+Unlike `run_image` there is always a host fallback: with no reachable
+docker daemon, builds and runs execute on the host and the logs say why. A
+server must bind `0.0.0.0:{port}` to work under the devcontainer runtime
+(which also works on the host — see [Run templating](#run-templating)).
+
+The resolved config (image, cache volumes, home) feeds the artifact hash
+of every side that would use it, so bumping the devcontainer image
+rebuilds — while edits to the ignored keys (lifecycle commands, bind
+mounts) rebuild nothing.
+
+Opt out per side with an explicit `image`/`run_image`, or for the whole
+repo with the top-level key:
+
+```toml
+devcontainer = false
+```
 
 ## Hashing caveats
 
 Each side's hash covers its declared partition **plus its own manifest
 section** — editing a build command, `env` value, or `run_image` rebuilds
-that side. Files outside the declared partition don't bust the cache; if
-your backend depends on files across the whole tree, use `path = "."`. The
-top-level `networks` list is the one run-time-only exception: it feeds no
-hash, and changes apply to the next process start after a redeploy.
+that side — plus the resolved [devcontainer](#devcontainer-default) when
+the side would use it. Files outside the declared partition don't bust the
+cache; if your backend depends on files across the whole tree, use
+`path = "."`. The top-level `networks` list is the one run-time-only
+exception: it feeds no hash, and changes apply to the next process start
+after a redeploy.

@@ -59,11 +59,34 @@ type RunSpec struct {
 	Dir        string
 	Argv       []string
 	Image      string
+	// Devcontainer is the target repo's devcontainer resolved at the
+	// deployed commit (zero when the commit carries none or the manifest
+	// opts out) — the default environment for steps without an explicit
+	// Image. Custom runners with their own devcontainer machinery can use
+	// it directly.
+	Devcontainer Devcontainer
 }
 
-// Runner executes build steps. Omit it for host execution; inject an
-// implementation to run steps inside a container (e.g. the target repo's
-// devcontainer) for reproducible builds.
+// Devcontainer is the honored subset of a repo's devcontainer.json.
+type Devcontainer struct {
+	// Image is the container image builds and runs default into.
+	Image string
+	// Mounts are the devcontainer's named cache volumes.
+	Mounts []DevcontainerMount
+	// Home is the remote user's home directory — steps run with HOME set to
+	// it so toolchain caches resolve onto the mounted volumes.
+	Home string
+}
+
+// DevcontainerMount is one named-volume mount of a devcontainer.
+type DevcontainerMount struct {
+	Source string
+	Target string
+}
+
+// Runner executes build steps. Omit it for the default behavior — the
+// side's manifest image, else the repo's devcontainer, else the host —
+// or inject an implementation to take over step execution entirely.
 type Runner interface {
 	Run(ctx context.Context, spec RunSpec, output io.Writer) error
 }
@@ -85,7 +108,8 @@ type Options struct {
 	// BuildConcurrency is the number of deploys built in parallel.
 	// Defaults to 2.
 	BuildConcurrency int
-	// Runner executes build steps. Defaults to host execution.
+	// Runner executes build steps. Defaults to manifest image / repo
+	// devcontainer / host execution, in that order of precedence per side.
 	Runner Runner
 	// MaxWarm caps concurrently running preview processes; beyond it the
 	// least-recently-used are stopped. 0 defaults to 8; negative disables
@@ -198,7 +222,22 @@ type Orchestrator struct {
 type runnerAdapter struct{ r Runner }
 
 func (a runnerAdapter) Run(ctx context.Context, spec build.RunSpec, output io.Writer) error {
-	return a.r.Run(ctx, RunSpec(spec), output)
+	pub := RunSpec{
+		RepoName:   spec.RepoName,
+		SHA:        spec.SHA,
+		ScratchDir: spec.ScratchDir,
+		Dir:        spec.Dir,
+		Argv:       spec.Argv,
+		Image:      spec.Image,
+		Devcontainer: Devcontainer{
+			Image: spec.Devcontainer.Image,
+			Home:  spec.Devcontainer.Home,
+		},
+	}
+	for _, m := range spec.Devcontainer.Mounts {
+		pub.Devcontainer.Mounts = append(pub.Devcontainer.Mounts, DevcontainerMount(m))
+	}
+	return a.r.Run(ctx, pub, output)
 }
 
 // New starts an orchestrator: it verifies git, opens the database, sweeps

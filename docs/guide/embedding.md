@@ -70,9 +70,10 @@ can't carry a manifest.
 
 ## Custom build execution
 
-By default build steps exec on the host. Inject `Options.Runner` to run
-them elsewhere — for example inside the target repo's devcontainer for
-reproducible builds:
+By default build steps run in the environment the manifest and commit
+declare — the side's `image` when set, else the repo's
+[devcontainer](/reference/preview-toml#devcontainer-default), else the
+host. Inject `Options.Runner` to replace that execution entirely:
 
 ```go
 type dockerRunner struct{ /* your container client */ }
@@ -84,4 +85,8 @@ func (r dockerRunner) Run(ctx context.Context, spec orchestrator.RunSpec, out io
 ```
 
 `RunSpec` carries the repo name and sha, so a runner can pick (and cache)
-the right environment image per repository.
+the right environment image per repository. It also carries the resolved
+`Devcontainer` (image, cache-volume mounts, remote home) so a custom
+runner can honor the same default without re-parsing devcontainer.json —
+and `Image`, which custom runners should still respect when set: an
+explicit image beats environment discovery.

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/devcontainer"
 	"github.com/jmelahman/local-preview/internal/dockerapi"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/manifest"
@@ -247,6 +248,7 @@ func (m *Manager) forget(k Key, p *process) {
 type runSpec struct {
 	argv         []string
 	runImage     string
+	devc         devcontainer.Config // default runtime when runImage is empty
 	env          map[string]string
 	healthPath   string
 	startTimeout time.Duration
@@ -262,15 +264,18 @@ type runSpec struct {
 }
 
 // Stored run_config shapes: the manifest section plus the top-level
-// networks list, marshaled together at build time.
+// networks list and the resolved devcontainer (the side's default runtime
+// when it pins no run_image), marshaled together at build time.
 type backendRunConfig struct {
 	manifest.Backend
-	Networks []string `json:"networks,omitempty"`
+	Networks     []string             `json:"networks,omitempty"`
+	Devcontainer *devcontainer.Config `json:"devcontainer,omitempty"`
 }
 
 type frontendRunConfig struct {
 	manifest.Frontend
-	Networks []string `json:"networks,omitempty"`
+	Networks     []string             `json:"networks,omitempty"`
+	Devcontainer *devcontainer.Config `json:"devcontainer,omitempty"`
 }
 
 // loadRunSpec resolves the artifact's run contract for either side.
@@ -287,6 +292,7 @@ func (m *Manager) loadRunSpec(k Key, repoName string) (runSpec, error) {
 		return runSpec{
 			argv:         cfg.Run,
 			runImage:     cfg.RunImage,
+			devc:         derefDevc(cfg.Devcontainer),
 			env:          cfg.Env,
 			healthPath:   cfg.HealthPath,
 			startTimeout: time.Duration(cfg.StartTimeout),
@@ -306,6 +312,7 @@ func (m *Manager) loadRunSpec(k Key, repoName string) (runSpec, error) {
 	return runSpec{
 		argv:         cfg.Run,
 		runImage:     cfg.RunImage,
+		devc:         derefDevc(cfg.Devcontainer),
 		env:          cfg.Env,
 		healthPath:   cfg.HealthPath,
 		startTimeout: time.Duration(cfg.StartTimeout),
@@ -325,6 +332,48 @@ func idleOrDefault(d time.Duration) time.Duration {
 		return manifest.DefaultIdleTimeout
 	}
 	return d
+}
+
+func derefDevc(d *devcontainer.Config) devcontainer.Config {
+	if d == nil {
+		return devcontainer.Config{}
+	}
+	return *d
+}
+
+// runtimeEnv is the resolved container runtime for one process start: which
+// image (empty = host), the extra cache-volume binds, and the HOME inside
+// the container. devc marks the image as the repo devcontainer default
+// rather than an explicit run_image.
+type runtimeEnv struct {
+	image  string
+	mounts []devcontainer.Mount
+	home   string
+	devc   bool
+}
+
+// resolveRuntime picks the process runtime. An explicit run_image is a hard
+// container contract (starting without a daemon fails later, loudly); the
+// devcontainer is a soft default — when no daemon is reachable the process
+// runs on the host, and the returned note says so.
+func (m *Manager) resolveRuntime(spec runSpec) (runtimeEnv, string) {
+	if spec.runImage != "" {
+		return runtimeEnv{image: spec.runImage}, ""
+	}
+	if spec.devc.Image == "" {
+		return runtimeEnv{}, ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := m.docker(ctx); err != nil {
+		return runtimeEnv{}, fmt.Sprintf("[devcontainer %s unavailable (%v); running on the host]", spec.devc.Image, err)
+	}
+	return runtimeEnv{
+		image:  spec.devc.Image,
+		mounts: spec.devc.Mounts,
+		home:   spec.devc.Home,
+		devc:   true,
+	}, ""
 }
 
 // start runs the full start sequence: load run config, run init steps if
@@ -353,6 +402,7 @@ func (m *Manager) start(k Key, p *process) {
 		fail("start_attempt", fmt.Errorf("%s artifact files missing (evicted?): %w", k.Side, err))
 		return
 	}
+	rt, rtNote := m.resolveRuntime(spec)
 
 	// A frontend whose env references {backend_url} needs its peer backend
 	// up first — the URL carries the backend's port.
@@ -367,9 +417,11 @@ func (m *Manager) start(k Key, p *process) {
 			fail("start_attempt", fmt.Errorf("start backend for {backend_url}: %w", err))
 			return
 		}
-		if spec.runImage != "" {
-			// Both sides containered (manifest-validated): the deploy
-			// network resolves the backend by alias.
+		if rt.image != "" {
+			// The frontend runs containered, so its backend is containered
+			// too (manifest-validated for run_image; the devcontainer default
+			// applies to both sides alike): the deploy network resolves the
+			// backend by alias.
 			backendURL = fmt.Sprintf("http://backend:%d", bePort)
 		} else {
 			backendURL = fmt.Sprintf("http://127.0.0.1:%d", bePort)
@@ -381,6 +433,9 @@ func (m *Manager) start(k Key, p *process) {
 		fail("start_attempt", err)
 		return
 	}
+	if rtNote != "" {
+		fmt.Fprintln(logFile, rtNote)
+	}
 
 	// Init runs at most once per backend artifact: the artifact's code is
 	// immutable and nothing else writes its state dir, so a recorded success
@@ -388,7 +443,7 @@ func (m *Manager) start(k Key, p *process) {
 	// and the next start attempt retries from the first step.
 	if k.Side == SideBackend && len(spec.init) > 0 && !spec.initDone {
 		m.db.AddProcessEvent(k.RepoID, k.Hash, "init_attempt", fmt.Sprintf("%d steps", len(spec.init)))
-		if err := m.runInit(k, p.repoName, spec, logFile); err != nil {
+		if err := m.runInit(k, p.repoName, spec, rt, logFile); err != nil {
 			logFile.Close()
 			fail("init_failed", err)
 			return
@@ -412,8 +467,8 @@ func (m *Manager) start(k Key, p *process) {
 	argv := templateArgv(spec.argv, port, spec.stateDir)
 	envPairs := expandEnv(spec.env, p.repoName, k.Hash, port, spec.stateDir, backendURL)
 
-	if spec.runImage != "" {
-		if err := m.startContainer(k, p, spec, argv, envPairs, port, logFile); err != nil {
+	if rt.image != "" {
+		if err := m.startContainer(k, p, spec, rt, argv, envPairs, port, logFile); err != nil {
 			logFile.Close()
 			fail("start_attempt", err)
 			return
@@ -584,12 +639,12 @@ func envReferences(env map[string]string, placeholder string) bool {
 }
 
 // runInit executes the backend's init steps sequentially — on the host, or
-// under run_image in one-shot containers with the same mounts and external
-// networks as the server — streaming output into the run log so init output
-// leads the first cold start's log. Only {state_dir} is templated in argv (no
-// port exists yet), and env vars referencing {port} are omitted for the same
-// reason. The timeout spans all steps together.
-func (m *Manager) runInit(k Key, repoName string, spec runSpec, logFile *os.File) error {
+// under the resolved container runtime in one-shot containers with the same
+// mounts and external networks as the server — streaming output into the run
+// log so init output leads the first cold start's log. Only {state_dir} is
+// templated in argv (no port exists yet), and env vars referencing {port}
+// are omitted for the same reason. The timeout spans all steps together.
+func (m *Manager) runInit(k Key, repoName string, spec runSpec, rt runtimeEnv, logFile *os.File) error {
 	timeout := spec.initTimeout
 	if timeout <= 0 {
 		timeout = manifest.DefaultInitTimeout
@@ -604,8 +659,8 @@ func (m *Manager) runInit(k Key, repoName string, spec runSpec, logFile *os.File
 		}
 		fmt.Fprintf(logFile, "[init] %s\n", strings.Join(argv, " "))
 		var err error
-		if spec.runImage != "" {
-			err = m.runInitContainer(ctx, spec, argv, env, logFile)
+		if rt.image != "" {
+			err = m.runInitContainer(ctx, spec, rt, argv, env, logFile)
 		} else {
 			cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 			cmd.Dir = spec.dir

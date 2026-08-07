@@ -38,6 +38,30 @@ func TestParseValid(t *testing.T) {
 	}
 }
 
+func TestParseDevcontainerToggle(t *testing.T) {
+	m, err := Parse([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.DevcontainerEnabled() {
+		t.Fatal("discovery should default to enabled")
+	}
+	m, err = Parse([]byte("devcontainer = false\n" + valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.DevcontainerEnabled() {
+		t.Fatal("devcontainer = false should disable discovery")
+	}
+	m, err = Parse([]byte("devcontainer = true\n" + valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.DevcontainerEnabled() {
+		t.Fatal("devcontainer = true should keep discovery on")
+	}
+}
+
 func TestParseTimeouts(t *testing.T) {
 	src := valid + "\nstart_timeout = \"5s\"\nidle_timeout = \"1h\"\n"
 	m, err := Parse([]byte(src))

@@ -584,3 +584,106 @@ func TestRequestDeployUnknownRepo(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
+
+// TestDevcontainerDefaultDiscovery: a commit carrying
+// .devcontainer/devcontainer.json feeds both sides' hashes (the resolved
+// config is part of their content address), stores the devcontainer as the
+// backend's default runtime, and — docker being unreachable here — falls
+// back to host builds with the reason in the build log. Opting out via the
+// manifest restores the exact pre-devcontainer hashes: the top-level key
+// lives outside the hashed sections.
+func TestDevcontainerDefaultDiscovery(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
+	src := newFixtureRepo(t)
+	e := newEnv(t, src, func(q *Queue) { q.SetAutoStart(false) })
+
+	base := e.deployAndWait(t, "main")
+
+	// Commit B: add a devcontainer. It lives outside both partitions, so
+	// only the devcontainer machinery can move the hashes.
+	if err := os.MkdirAll(filepath.Join(src, ".devcontainer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	devcJSON := `{
+	  // JSONC on purpose
+	  "image": "example/devc:1",
+	  "mounts": ["source=devc-cache,target=/home/dev/.cache,type=volume",],
+	  "remoteUser": "dev",
+	}`
+	if err := os.WriteFile(filepath.Join(src, ".devcontainer", "devcontainer.json"), []byte(devcJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "add", "-A")
+	runTestGit(t, src, "commit", "-qm", "add devcontainer")
+	b := e.deployAndWait(t, runTestGit(t, src, "rev-parse", "HEAD"))
+	if b.FeHash == base.FeHash || b.BeHash == base.BeHash {
+		t.Fatalf("devcontainer did not feed the hashes: fe %s→%s be %s→%s",
+			base.FeHash, b.FeHash, base.BeHash, b.BeHash)
+	}
+	beLog, err := os.ReadFile(b.BeBuildLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(beLog), `warning: devcontainer "example/devc:1"`) {
+		t.Fatalf("backend log missing host-fallback warning: %s", beLog)
+	}
+	art, err := e.db.GetBackendArtifact(e.repoID, b.BeHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"devcontainer":{"image":"example/devc:1"`, `"home":"/home/dev"`, `"devc-cache"`} {
+		if !strings.Contains(art.RunConfig, want) {
+			t.Fatalf("run config missing %s: %s", want, art.RunConfig)
+		}
+	}
+
+	// Commit C: opt out via the manifest. The sections are untouched, so
+	// the hashes revert to the pre-devcontainer builds — full cache hit.
+	f, err := os.OpenFile(filepath.Join(src, "preview.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	toml, err := os.ReadFile(filepath.Join(src, "preview.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "preview.toml"), append([]byte("devcontainer = false\n"), toml...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "commit", "-qam", "opt out of devcontainer")
+	c := e.deployAndWait(t, runTestGit(t, src, "rev-parse", "HEAD"))
+	if c.FeHash != base.FeHash || c.BeHash != base.BeHash {
+		t.Fatalf("opt-out did not restore hashes: fe %s vs %s, be %s vs %s",
+			c.FeHash, base.FeHash, c.BeHash, base.BeHash)
+	}
+}
+
+// TestDevcontainerUnusableNote: a devcontainer without an image (Dockerfile
+// build) never fails the deploy; the sides that would have used it note the
+// fallback in their build logs.
+func TestDevcontainerUnusableNote(t *testing.T) {
+	src := newFixtureRepo(t)
+	if err := os.MkdirAll(filepath.Join(src, ".devcontainer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, ".devcontainer", "devcontainer.json"),
+		[]byte(`{"build": {"dockerfile": "Dockerfile"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, src, "add", "-A")
+	runTestGit(t, src, "commit", "-qm", "dockerfile devcontainer")
+
+	e := newEnv(t, src, func(q *Queue) { q.SetAutoStart(false) })
+	d := e.deployAndWait(t, "main")
+	beLog, err := os.ReadFile(d.BeBuildLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(beLog), "declares no usable image") {
+		t.Fatalf("backend log missing unusable-devcontainer note: %s", beLog)
+	}
+}
