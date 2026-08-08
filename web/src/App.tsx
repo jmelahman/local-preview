@@ -586,6 +586,49 @@ function usePinnedScroll(dep: unknown) {
 const logPaneClass =
   "h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-surface p-2 font-mono text-xs leading-relaxed";
 
+// CopyLogsButton floats over a log pane's top-right corner. It sits outside
+// the scrolling <pre> so it stays put as output streams past, and confirms in
+// place for a moment — the clipboard gives no other feedback.
+function CopyLogsButton({ text }: { text: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+
+  const copy = async () => {
+    let next: "copied" | "failed";
+    try {
+      await navigator.clipboard.writeText(text);
+      next = "copied";
+    } catch {
+      // Blocked clipboard (denied permission, insecure origin) — say so
+      // rather than looking like a no-op.
+      next = "failed";
+    }
+    setState(next);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setState("idle"), 1500);
+  };
+
+  const label = state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "Copy";
+  // Spelled out rather than composed from neutralButtonClass: the text color
+  // varies by state, and Tailwind can't be trusted to resolve a
+  // same-property override by class order.
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      disabled={!text}
+      title={text ? "Copy these logs to the clipboard" : "No output to copy"}
+      className={`absolute right-3 top-2 inline-flex shrink-0 items-center gap-1 rounded border border-border bg-surface-2 px-2 py-1 text-xs transition-colors duration-150 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-50 ${
+        state === "failed" ? "text-danger" : "text-fg"
+      }`}
+    >
+      {state === "copied" ? <IconCheck className="h-3 w-3" /> : <IconCopy className="h-3 w-3" />}
+      {label}
+    </button>
+  );
+}
+
 function Metric({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
     <span className="inline-flex items-baseline gap-1 tabular-nums" title={title}>
@@ -673,17 +716,20 @@ function RunLogPane({ deployId, side }: { deployId: number; side: LogSide }) {
 
   return (
     <div className="flex flex-col gap-1">
-      <pre ref={ref} onScroll={onScroll} className={logPaneClass}>
-        {truncated && <span className="text-fg-muted">{"… earlier output omitted\n"}</span>}
-        {text ||
-          (attempt === 0 ? (
-            <span className="text-fg-muted">
-              No output yet — the process starts on the preview's first request.
-            </span>
-          ) : (
-            <span className="text-fg-muted">The process hasn't written any output.</span>
-          ))}
-      </pre>
+      <div className="relative">
+        <pre ref={ref} onScroll={onScroll} className={logPaneClass}>
+          {truncated && <span className="text-fg-muted">{"… earlier output omitted\n"}</span>}
+          {text ||
+            (attempt === 0 ? (
+              <span className="text-fg-muted">
+                No output yet — the process starts on the preview's first request.
+              </span>
+            ) : (
+              <span className="text-fg-muted">The process hasn't written any output.</span>
+            ))}
+        </pre>
+        <CopyLogsButton text={text} />
+      </div>
       <div className="flex justify-between font-mono text-[11px] text-fg-muted">
         <span>{error ? `log fetch failed: ${error}` : "stdout+stderr, refreshed live"}</span>
         {attempt > 0 && <span>start attempt {attempt}</span>}
@@ -702,9 +748,12 @@ function BuildLogPane({ deployId, building }: { deployId: number; building: bool
   const { ref, onScroll } = usePinnedScroll(logs.data);
   return (
     <div className="flex flex-col gap-1">
-      <pre ref={ref} onScroll={onScroll} className={logPaneClass}>
-        {logs.error ? String(logs.error) : (logs.data ?? "loading…")}
-      </pre>
+      <div className="relative">
+        <pre ref={ref} onScroll={onScroll} className={logPaneClass}>
+          {logs.error ? String(logs.error) : (logs.data ?? "loading…")}
+        </pre>
+        <CopyLogsButton text={logs.error ? "" : (logs.data ?? "")} />
+      </div>
       <div className="font-mono text-[11px] text-fg-muted">
         {building ? "build in progress — refreshing" : "frontend and backend build output"}
       </div>
@@ -1856,6 +1905,41 @@ function IconSearch({ className = "" }: { className?: string }) {
     >
       <circle cx="11" cy="11" r="7" />
       <path d="m21 21-4.35-4.35" />
+    </svg>
+  );
+}
+
+function IconCopy({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
+    </svg>
+  );
+}
+
+function IconCheck({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m5 13 4 4L19 7" />
     </svg>
   );
 }

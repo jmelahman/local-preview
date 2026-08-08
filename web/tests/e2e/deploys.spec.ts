@@ -174,6 +174,15 @@ test("register, deploy, and open a preview", async ({ page }) => {
   await expect(page.getByText("start attempt 1")).toBeVisible();
   await expect(page.getByText(/[KMG]iB/).first()).toBeVisible({ timeout: 10_000 });
 
+  // The pane's copy button lifts the tailed text into the clipboard and
+  // confirms in place.
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(
+    /fixture backend listening on/,
+  );
+
   // Build logs are one tab over.
   await page.getByRole("button", { name: "build log" }).click();
   await expect(page.getByText("--- backend build ---")).toBeVisible();
