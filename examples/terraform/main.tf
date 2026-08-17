@@ -178,6 +178,8 @@ resource "aws_instance" "server" {
 
   user_data = templatefile("${path.module}/user-data.sh.tftpl", {
     aws_region      = data.aws_region.current.name
+    compose_stacks  = var.compose_stacks
+    compose_version = var.docker_compose_version
     config_dir      = local.config_dir
     data_dir        = var.data_dir
     data_volume_id  = aws_ebs_volume.data.id

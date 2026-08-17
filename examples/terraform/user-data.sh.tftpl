@@ -54,6 +54,59 @@ MANIFEST_B64
 set -x
 %{ endfor ~}
 
+%{ if length(compose_stacks) > 0 ~}
+# --- dependency stacks -----------------------------------------------------
+# Shared services previews connect to (databases, search, caches). They are
+# per-repo but not per-commit, so they run beside the orchestrator rather than
+# through it. Each stack's compose project name is its key, which is what
+# makes its network predictable: project "onyx" owns network "onyx_default".
+#
+# Amazon Linux ships docker without the compose plugin.
+mkdir -p /usr/libexec/docker/cli-plugins
+curl -fsSL -o /usr/libexec/docker/cli-plugins/docker-compose \
+  "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-linux-$(uname -m)"
+chmod +x /usr/libexec/docker/cli-plugins/docker-compose
+
+# Working directories live on the data volume, so bind-mounted stack data
+# outlives the instance. Only the compose file is rewritten — the data beside
+# it is the whole point of keeping it here.
+cat >/etc/systemd/system/local-preview-stack@.service <<EOF
+[Unit]
+Description=local-preview dependency stack %i
+Requires=docker.service
+After=docker.service network-online.target
+RequiresMountsFor=${data_dir}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=0
+WorkingDirectory=${data_dir}/stacks/%i
+ExecStart=/usr/bin/docker compose -p %i up -d --remove-orphans
+ExecStop=/usr/bin/docker compose -p %i down
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+%{ for name, content in compose_stacks ~}
+mkdir -p '${data_dir}/stacks/${name}'
+set +x
+base64 -d >'${data_dir}/stacks/${name}/compose.yaml' <<'COMPOSE_B64'
+${base64encode(content)}
+COMPOSE_B64
+set -x
+%{ endfor ~}
+
+systemctl daemon-reload
+%{ for name, content in compose_stacks ~}
+# Non-fatal: a stack that can't come up leaves previews unable to reach their
+# dependencies, but it must not stop the orchestrator itself from starting.
+systemctl enable 'local-preview-stack@${name}.service'
+systemctl start 'local-preview-stack@${name}.service' || true
+%{ endfor ~}
+
+%{ endif ~}
 # --- service ---------------------------------------------------------------
 # Runs as container root: it needs the docker socket for manifest `image`
 # build steps (root-equivalent on the daemon regardless), and the image's

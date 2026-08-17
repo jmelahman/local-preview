@@ -73,6 +73,19 @@ by repo name and writes them out with the rest of the instance config, so
 onboarding a repo that can't carry a `preview.toml` is a Terraform change like
 any other.
 
+## Dependencies live beside the server
+
+[External dependencies](/guide/external-dependencies) — the Postgres, search,
+and cache a target expects — are shared across previews, so on a shared host
+nobody should be starting them by hand: an instance rebuild would take them
+with it. The example takes them as `compose_stacks`, a map of compose project
+name to compose file, and runs each as a systemd unit with its working
+directory on the data volume.
+
+The project name is the contract between the two halves: stack `onyx` owns the
+network `onyx_default`, which is what a manifest's `networks` joins to resolve
+the compose service names its `env` points at.
+
 ## Toolchains on the server
 
 Build commands run on the server, not on the machine that triggered the

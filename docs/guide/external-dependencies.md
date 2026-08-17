@@ -54,6 +54,16 @@ out-of-repo at `~/.config/preview/manifests/onyx.toml` (see
    prefix stripped (`strip_api_prefix = true`), and `/openapi.json`,
    `/auth/saml`, `/scim` pass through via `extra_routes`.
 
+## On a shared server
+
+"You run them once" holds on a laptop, where the compose stack is one command
+away and you'd notice it stop. On a server nobody logs into, hand-started
+containers don't survive a rebuild. The
+[Terraform example](/guide/deploy-terraform#dependencies-live-beside-the-server)
+takes the deps stack as a `compose_stacks` input and runs it as a systemd unit
+with its data on the persistent volume, so the stack is part of the
+deployment rather than something someone remembered to start.
+
 ## Shared-state caveats
 
 Previews sharing dependencies share their state. `{hash}`-templated env

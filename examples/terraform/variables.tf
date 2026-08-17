@@ -188,7 +188,7 @@ variable "compose_stacks" {
     network "onyx_default" — the name a manifest's `networks` joins, and the
     namespace its compose service names resolve in.
 
-    Each stack gets ${data_dir}/stacks/<name> as its working directory, on the
+    Each stack gets <data_dir>/stacks/<name> as its working directory, on the
     data volume and preserved across instance rebuilds. Bind-mount persistent
     data under it (./data/...) rather than using named volumes, which land on
     the root disk.

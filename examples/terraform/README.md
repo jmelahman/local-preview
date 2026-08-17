@@ -138,6 +138,32 @@ of it.
 An in-repo `preview.toml` always wins, so adding a manifest here is safe to
 leave in place after the repo grows its own.
 
+## Dependency stacks
+
+Previews are per-commit; the databases they talk to are not. `compose_stacks`
+runs those shared services on the instance, keyed by compose project name:
+
+```hcl
+compose_stacks = {
+  onyx = file("${path.module}/stacks/onyx.yaml")
+}
+```
+
+The key is the project name, which fixes the network name: project `onyx`
+owns `onyx_default`, so a manifest with `networks = ["onyx_default"]` joins
+it and reaches the services by their compose names.
+
+Each stack runs from `/var/lib/local-preview/stacks/<name>` on the data
+volume, started by a `local-preview-stack@<name>.service` unit at boot. Bind
+persistent data under that directory (`./data/postgres:/var/lib/...`) so it
+survives an instance rebuild; a named volume would sit on the root disk and go
+with it. Setting a stack installs the docker compose plugin, which Amazon
+Linux doesn't ship.
+
+Like manifests, stack files are written by user_data — editing one rebuilds
+the instance, and the contents reach the cloud-init log, so reference an SSM
+parameter rather than inlining a credential.
+
 ## Webhook secret
 
 Set `github_webhook_secret_ssm_parameter` to the name of a SecureString
