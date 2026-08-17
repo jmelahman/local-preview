@@ -159,6 +159,11 @@ resource "aws_instance" "server" {
     webhook_ssm    = var.github_webhook_secret_ssm_parameter == null ? "" : var.github_webhook_secret_ssm_parameter
   })
 
+  # The image is baked into the unit file that user_data writes, so an image
+  # bump only takes effect if the instance is rebuilt. The data volume is a
+  # separate resource and survives.
+  user_data_replace_on_change = true
+
   metadata_options {
     http_endpoint = "enabled"
     http_tokens   = "required"

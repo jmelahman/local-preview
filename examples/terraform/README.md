@@ -104,10 +104,14 @@ access at all.
 
 ## Upgrades
 
-`image` defaults to `:latest`, which is only re-pulled when the service
-restarts. Pin a release tag and change it to upgrade deliberately:
+Pin `image` to a release tag and bump it to upgrade. The tag is baked into
+the systemd unit that user_data writes, so applying a new one rebuilds the
+instance; the data volume is a separate resource and reattaches with every
+repo, artifact, and state dir intact. Expect a few minutes of downtime while
+the replacement boots — the Elastic IP means DNS doesn't change.
 
 ```sh
-aws ssm start-session --target <instance-id>
-sudo systemctl restart local-preview
+terraform apply -var 'image=lahmanja/local-preview:0.3.0'
 ```
+
+Note that Docker Hub tags carry no `v` prefix, unlike the git tags.
