@@ -3,12 +3,12 @@ data "aws_region" "current" {}
 # Default VPC/subnet only when the caller doesn't pin one, so the example
 # stands alone in a fresh account without pulling in a VPC module.
 data "aws_vpc" "default" {
-  count   = var.subnet_id == null ? 1 : 0
+  count   = local.need_default_subnets ? 1 : 0
   default = true
 }
 
 data "aws_subnets" "default" {
-  count = var.subnet_id == null ? 1 : 0
+  count = local.need_default_subnets ? 1 : 0
 
   filter {
     name   = "vpc-id"
@@ -28,8 +28,15 @@ data "aws_ami" "al2023" {
 }
 
 locals {
-  subnet_id = var.subnet_id != null ? var.subnet_id : sort(data.aws_subnets.default[0].ids)[0]
-  ami_id    = var.ami_id != null ? var.ami_id : data.aws_ami.al2023[0].id
+  # The load balancer needs subnets in two AZs, so TLS pulls in the default
+  # VPC even when the caller pinned the instance's own subnet.
+  need_default_subnets = var.subnet_id == null || (var.enable_tls && var.alb_subnet_ids == null)
+
+  subnet_id      = var.subnet_id != null ? var.subnet_id : sort(data.aws_subnets.default[0].ids)[0]
+  alb_subnet_ids = var.alb_subnet_ids != null ? var.alb_subnet_ids : data.aws_subnets.default[0].ids
+  ami_id         = var.ami_id != null ? var.ami_id : data.aws_ami.al2023[0].id
+
+  scheme = var.enable_tls ? "https" : "http"
 
   tags = merge({
     Name      = var.name
@@ -47,12 +54,30 @@ resource "aws_security_group" "server" {
   description = "Dashboard and preview ingress for ${var.name}"
   vpc_id      = data.aws_subnet.instance.vpc_id
 
-  ingress {
-    description = "Dashboard and previews"
-    from_port   = var.http_port
-    to_port     = var.http_port
-    protocol    = "tcp"
-    cidr_blocks = var.allowed_ingress_cidrs
+  # Behind a load balancer the instance takes traffic from it and nothing
+  # else; without one it is the front door itself.
+  dynamic "ingress" {
+    for_each = var.enable_tls ? [] : [1]
+
+    content {
+      description = "Dashboard and previews"
+      from_port   = var.http_port
+      to_port     = var.http_port
+      protocol    = "tcp"
+      cidr_blocks = var.allowed_ingress_cidrs
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = var.enable_tls ? [1] : []
+
+    content {
+      description     = "Dashboard and previews, from the load balancer"
+      from_port       = var.http_port
+      to_port         = var.http_port
+      protocol        = "tcp"
+      security_groups = [aws_security_group.alb[0].id]
+    }
   }
 
   dynamic "ingress" {
@@ -185,6 +210,204 @@ resource "aws_volume_attachment" "data" {
   instance_id = aws_instance.server.id
 }
 
+# ---------------------------------------------------------------------------
+# TLS. The server speaks only HTTP, so the certificate lives on a load
+# balancer in front of it. Preview hosts are one label deep, so a single
+# wildcard certificate covers every repo.
+# ---------------------------------------------------------------------------
+
+resource "aws_security_group" "alb" {
+  count = var.enable_tls ? 1 : 0
+
+  name        = "${var.name}-alb"
+  description = "Public ingress for ${var.name}"
+  vpc_id      = data.aws_subnet.instance.vpc_id
+
+  ingress {
+    description = "HTTPS"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_ingress_cidrs
+  }
+
+  ingress {
+    description = "HTTP, redirected to HTTPS"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_ingress_cidrs
+  }
+
+  egress {
+    description = "To the server, and to the IdP when OIDC is on"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.tags
+}
+
+resource "aws_acm_certificate" "previews" {
+  count = var.enable_tls ? 1 : 0
+
+  domain_name               = var.preview_domain
+  subject_alternative_names = ["*.${var.preview_domain}"]
+  validation_method         = "DNS"
+  tags                      = local.tags
+
+  lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition     = var.route53_zone_id != null
+      error_message = "enable_tls needs route53_zone_id: the certificate is DNS-validated. Set enable_tls = false to serve plain HTTP instead."
+    }
+  }
+}
+
+# Keyed by domain name, the one part of domain_validation_options known at
+# plan time. The apex and the wildcard validate to the same CNAME, so the two
+# instances write the same record — hence allow_overwrite.
+resource "aws_route53_record" "cert_validation" {
+  for_each = var.enable_tls ? {
+    for dvo in aws_acm_certificate.previews[0].domain_validation_options :
+    dvo.domain_name => dvo
+  } : {}
+
+  zone_id         = var.route53_zone_id
+  name            = each.value.resource_record_name
+  type            = each.value.resource_record_type
+  records         = [each.value.resource_record_value]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "previews" {
+  count = var.enable_tls ? 1 : 0
+
+  certificate_arn         = aws_acm_certificate.previews[0].arn
+  validation_record_fqdns = [for r in aws_route53_record.cert_validation : r.fqdn]
+}
+
+resource "aws_lb" "server" {
+  count = var.enable_tls ? 1 : 0
+
+  name               = var.name
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb[0].id]
+  subnets            = local.alb_subnet_ids
+
+  # Build logs stream, so don't cut idle connections at the 60s default.
+  idle_timeout = 300
+
+  drop_invalid_header_fields = true
+  tags                       = local.tags
+}
+
+resource "aws_lb_target_group" "server" {
+  count = var.enable_tls ? 1 : 0
+
+  name        = var.name
+  port        = var.http_port
+  protocol    = "HTTP"
+  target_type = "instance"
+  vpc_id      = data.aws_subnet.instance.vpc_id
+
+  health_check {
+    path    = "/api/health"
+    matcher = "200"
+  }
+
+  tags = local.tags
+}
+
+resource "aws_lb_target_group_attachment" "server" {
+  count = var.enable_tls ? 1 : 0
+
+  target_group_arn = aws_lb_target_group.server[0].arn
+  target_id        = aws_instance.server.id
+  port             = var.http_port
+}
+
+resource "aws_lb_listener" "https" {
+  count = var.enable_tls ? 1 : 0
+
+  load_balancer_arn = aws_lb.server[0].arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = aws_acm_certificate_validation.previews[0].certificate_arn
+
+  # OIDC first when configured: without it the server is unauthenticated to
+  # anyone the security group lets through.
+  dynamic "default_action" {
+    for_each = var.oidc != null ? [var.oidc] : []
+
+    content {
+      type  = "authenticate-oidc"
+      order = 1
+
+      authenticate_oidc {
+        issuer                 = default_action.value.issuer
+        authorization_endpoint = default_action.value.authorization_endpoint
+        token_endpoint         = default_action.value.token_endpoint
+        user_info_endpoint     = default_action.value.user_info_endpoint
+        client_id              = default_action.value.client_id
+        client_secret          = default_action.value.client_secret
+        scope                  = default_action.value.scope
+        session_timeout        = default_action.value.session_timeout
+      }
+    }
+  }
+
+  default_action {
+    type             = "forward"
+    order            = var.oidc != null ? 2 : null
+    target_group_arn = aws_lb_target_group.server[0].arn
+  }
+}
+
+# The CLI and webhook senders can't follow a login redirect, so they reach
+# the server directly from known ranges instead.
+resource "aws_lb_listener_rule" "oidc_bypass" {
+  count = var.enable_tls && var.oidc != null && length(var.oidc_bypass_cidrs) > 0 ? 1 : 0
+
+  listener_arn = aws_lb_listener.https[0].arn
+  priority     = 1
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.server[0].arn
+  }
+
+  condition {
+    source_ip {
+      values = var.oidc_bypass_cidrs
+    }
+  }
+}
+
+resource "aws_lb_listener" "http" {
+  count = var.enable_tls ? 1 : 0
+
+  load_balancer_arn = aws_lb.server[0].arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
 # A static address, so the DNS records survive an instance replacement.
 resource "aws_eip" "server" {
   instance = aws_instance.server.id
@@ -192,26 +415,34 @@ resource "aws_eip" "server" {
   tags     = local.tags
 }
 
-# The dashboard: anything whose Host isn't *.<preview_domain> gets it.
-resource "aws_route53_record" "dashboard" {
-  count = var.route53_zone_id != null ? 1 : 0
-
-  zone_id = var.route53_zone_id
-  name    = var.preview_domain
-  type    = "A"
-  ttl     = 300
-  records = [aws_eip.server.public_ip]
+# Two records regardless of how many repos are registered: the dashboard
+# answers anything whose Host isn't a preview, and preview hosts are
+# <sha>-<repo>.<preview_domain> — a single label, so one wildcard covers
+# every repo and registering one needs no DNS change.
+#
+# They point at the load balancer when it terminates TLS, and straight at the
+# instance otherwise.
+locals {
+  dns_names = var.route53_zone_id == null ? [] : [var.preview_domain, "*.${var.preview_domain}"]
 }
 
-# One wildcard for every repo: preview hosts are <sha>-<repo>.<preview_domain>,
-# a single label, so this record answers for all of them. Registering a repo
-# needs no DNS change.
-resource "aws_route53_record" "previews" {
-  count = var.route53_zone_id != null ? 1 : 0
+resource "aws_route53_record" "server" {
+  for_each = toset(local.dns_names)
 
   zone_id = var.route53_zone_id
-  name    = "*.${var.preview_domain}"
+  name    = each.key
   type    = "A"
-  ttl     = 300
-  records = [aws_eip.server.public_ip]
+
+  ttl     = var.enable_tls ? null : 300
+  records = var.enable_tls ? null : [aws_eip.server.public_ip]
+
+  dynamic "alias" {
+    for_each = var.enable_tls ? [1] : []
+
+    content {
+      name                   = aws_lb.server[0].dns_name
+      zone_id                = aws_lb.server[0].zone_id
+      evaluate_target_health = false
+    }
+  }
 }

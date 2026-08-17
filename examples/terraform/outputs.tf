@@ -10,7 +10,19 @@ output "instance_id" {
 
 output "dashboard_url" {
   description = "Dashboard URL. Only resolves once the preview_domain record exists."
-  value       = var.http_port == 80 ? "http://${var.preview_domain}/" : "http://${var.preview_domain}:${var.http_port}/"
+  value = var.enable_tls || var.http_port == 80 ? (
+    "${local.scheme}://${var.preview_domain}/"
+  ) : "http://${var.preview_domain}:${var.http_port}/"
+}
+
+output "alb_dns_name" {
+  description = "Load balancer hostname, or null when enable_tls is off."
+  value       = var.enable_tls ? aws_lb.server[0].dns_name : null
+}
+
+output "certificate_arn" {
+  description = "ACM certificate covering the domain and its wildcard, or null when enable_tls is off."
+  value       = var.enable_tls ? aws_acm_certificate.previews[0].arn : null
 }
 
 output "session_command" {
@@ -19,9 +31,12 @@ output "session_command" {
 }
 
 output "dns_records" {
-  description = "Records that must exist, for zones this module doesn't manage."
+  description = "Records that must exist, for zones this module doesn't manage. With enable_tls these are aliases in Route 53 terms; elsewhere, CNAMEs to the same target (the wildcard as a CNAME, the apex however your provider fakes it)."
   value = [
-    { name = var.preview_domain, type = "A", value = aws_eip.server.public_ip },
-    { name = "*.${var.preview_domain}", type = "A", value = aws_eip.server.public_ip },
+    for name in [var.preview_domain, "*.${var.preview_domain}"] : {
+      name  = name
+      type  = var.enable_tls ? "ALIAS" : "A"
+      value = var.enable_tls ? aws_lb.server[0].dns_name : aws_eip.server.public_ip
+    }
   ]
 }

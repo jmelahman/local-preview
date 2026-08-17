@@ -17,6 +17,8 @@ registered repo, artifact, and state dir intact.
 - A security group restricted to `allowed_ingress_cidrs`
 - An instance profile with SSM Session Manager (so port 22 stays closed)
 - An Elastic IP, plus optional Route 53 records
+- An ALB with an ACM wildcard certificate terminating HTTPS, and optional
+  OIDC login in front of it (`enable_tls`, on by default)
 
 ## Usage
 
@@ -39,7 +41,7 @@ terraform apply
 Then register a repo against the dashboard the module printed:
 
 ```sh
-preview --server http://preview.example.com repo add my-app https://github.com/me/my-app
+preview --server https://preview.example.com repo add my-app https://github.com/me/my-app
 ```
 
 ## There is no authentication
@@ -49,8 +51,8 @@ repo and make this host run that repo's build commands — reaching it is
 equivalent to shell access. The module therefore requires
 `allowed_ingress_cidrs` and rejects `0.0.0.0/0`.
 
-For a wider audience, put an authenticating proxy (an ALB with OIDC, Tailscale,
-Cloudflare Access) in front and keep the security group closed to it.
+For a wider audience, authenticate in front of it — set `oidc` below, or use
+Tailscale or Cloudflare Access — and keep the security group closed.
 
 ## DNS is two records, whatever the repo count
 
@@ -59,22 +61,52 @@ below the base domain, so one wildcard covers every repo:
 
 | Record | Serves |
 | --- | --- |
-| `A *.<preview_domain>` | every preview |
-| `A <preview_domain>` | the dashboard (every Host that isn't `*.<preview_domain>`) |
+| `*.<preview_domain>` | every preview |
+| `<preview_domain>` | the dashboard (every Host that isn't `*.<preview_domain>`) |
 
 Registering a repo needs no DNS change. Set `route53_zone_id` and the module
-creates both; leave it unset and create what the `dns_records` output lists.
+creates both — aliases to the load balancer with `enable_tls`, A records to
+the Elastic IP without. Leave it unset and create what `dns_records` lists.
 
-## Plain HTTP
+## TLS
 
-The example serves HTTP on port 80 and stops there. Nothing structural blocks
-TLS — the single-label host means one `*.<preview_domain>` certificate covers
-every preview — but terminating it needs something in front of the instance
-(an ALB with an ACM cert, or a reverse proxy on the box doing DNS-01), which
-this example deliberately leaves out.
+On by default. The server itself only speaks HTTP, so `enable_tls` puts an
+ALB in front holding an ACM certificate for `<preview_domain>` and
+`*.<preview_domain>` — one certificate for every preview, because the host is
+a single label. Port 80 redirects to 443, and the instance's security group
+stops accepting anything but the load balancer.
 
-Until then, and given the server has no authentication, this is a deployment
-for a trusted network rather than the public internet.
+The certificate is DNS-validated, so this needs `route53_zone_id`. To manage
+DNS elsewhere, set `enable_tls = false` and terminate TLS yourself; the module
+then points the records at the instance's Elastic IP and serves plain HTTP.
+
+## Authenticating at the load balancer
+
+`allowed_ingress_cidrs` is the whole security boundary by default. To widen
+access, set `oidc` and the ALB requires a login before any request reaches the
+server:
+
+```hcl
+oidc = {
+  issuer                 = "https://accounts.google.com"
+  authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
+  token_endpoint         = "https://oauth2.googleapis.com/token"
+  user_info_endpoint     = "https://openidconnect.googleapis.com/v1/userinfo"
+  client_id              = "..."
+  client_secret          = var.oidc_client_secret
+}
+
+# The CLI can't follow a login redirect.
+oidc_bypass_cidrs = ["10.0.0.0/8"]
+```
+
+Anything that isn't a browser — the `preview` CLI, webhook senders — cannot
+complete the redirect, so it has to come from `oidc_bypass_cidrs`. Those
+ranges reach the server unauthenticated, so keep them as tight as the
+allowlist you'd have used anyway.
+
+The client secret lands in Terraform state; keep the state encrypted, or pass
+it from a secrets manager rather than a `.tfvars` file.
 
 ## Build toolchains
 

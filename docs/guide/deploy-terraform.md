@@ -28,8 +28,8 @@ example's README covers the module's own knobs.
 The server has no authentication. Anyone who can reach the dashboard can
 register a repo and make the host run that repo's build commands, which is
 shell access by another name. The example requires an ingress allowlist and
-refuses `0.0.0.0/0`; widen the audience with an authenticating proxy in
-front (ALB with OIDC, Tailscale, Cloudflare Access), never with an open
+refuses `0.0.0.0/0`; widen the audience by authenticating in front of the
+server — its `oidc` block, Tailscale, Cloudflare Access — never with an open
 security group.
 
 ## Two DNS records
@@ -51,11 +51,18 @@ preview serve --preview-domain preview.example.com
 
 ## TLS
 
-One `*.<domain>` certificate covers every preview, so TLS is a matter of
-putting something in front of the server that terminates it — an ALB with an
-ACM certificate, or a reverse proxy on the host validating over DNS-01. The
-example does neither and serves plain HTTP, which is why it also insists on a
-closed ingress allowlist.
+The server speaks HTTP and has no certificate configuration, so TLS has to be
+terminated in front of it. One `*.<domain>` certificate covers every preview,
+which makes that cheap: the example puts an ALB with an ACM wildcard
+certificate ahead of the instance, redirects port 80 to 443, and closes the
+instance to everything but the load balancer. It needs a Route 53 zone,
+because the certificate is DNS-validated.
+
+That load balancer is also where authentication belongs. The example takes an
+`oidc` block that makes the ALB require a login before any request reaches the
+server — the only way to widen access beyond a trusted range, given the server
+authenticates nothing itself. Non-browser clients (the CLI, webhook senders)
+can't complete a login redirect, so they need an exempted source range.
 
 ## Toolchains on the server
 

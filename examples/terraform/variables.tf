@@ -45,6 +45,55 @@ variable "subnet_id" {
   default     = null
 }
 
+variable "enable_tls" {
+  description = <<-EOT
+    Front the server with an ALB holding an ACM certificate for
+    <preview_domain> and *.<preview_domain>, and serve HTTPS. Requires
+    route53_zone_id, since the certificate is DNS-validated.
+
+    The server itself only speaks HTTP, so this is the only way to get TLS.
+    With it on, the instance stops accepting traffic from anywhere but the
+    load balancer.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "alb_subnet_ids" {
+  description = "Subnets for the load balancer; needs at least two in different AZs. Defaults to the default VPC's."
+  type        = list(string)
+  default     = null
+}
+
+variable "oidc" {
+  description = <<-EOT
+    Authenticate browser sessions at the load balancer. This is what lets you
+    widen allowed_ingress_cidrs beyond a trusted range, because the server
+    itself has no authentication.
+
+    Non-browser clients cannot complete an OIDC redirect, so the `preview`
+    CLI and any webhook sender must come from oidc_bypass_cidrs.
+  EOT
+  type = object({
+    issuer                 = string
+    authorization_endpoint = string
+    token_endpoint         = string
+    user_info_endpoint     = string
+    client_id              = string
+    client_secret          = string
+    scope                  = optional(string, "openid email")
+    session_timeout        = optional(number, 43200)
+  })
+  default   = null
+  sensitive = true
+}
+
+variable "oidc_bypass_cidrs" {
+  description = "Source ranges that skip OIDC — for the CLI and webhook senders, which can't follow a login redirect. Still bounded by allowed_ingress_cidrs."
+  type        = list(string)
+  default     = []
+}
+
 variable "instance_type" {
   description = "Instance type. Previews build and run target repos, so size for the heaviest target build."
   type        = string
