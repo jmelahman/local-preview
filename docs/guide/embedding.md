@@ -16,7 +16,7 @@ orch, err := orchestrator.New(orchestrator.Options{
 if err != nil { ... }
 defer orch.Close()
 
-// Requests to <sha>.<repo>.preview.localhost are served as previews;
+// Requests to <sha>-<repo>.preview.localhost are served as previews;
 // everything else falls through to your application.
 srv := &http.Server{Addr: ":8080", Handler: orch.WrapHost(appHandler)}
 ```

@@ -320,7 +320,7 @@ func TestDeployEndpoints(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	wantURL := "http://" + d.ShortSHA + ".demo.preview.localhost:8080/"
+	wantURL := "http://" + d.ShortSHA + "-demo.preview.localhost:8080/"
 	if d.PreviewURL != wantURL {
 		t.Fatalf("preview_url = %q, want %q", d.PreviewURL, wantURL)
 	}

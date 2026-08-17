@@ -128,7 +128,7 @@ func TestNonPreviewHostsGetDashboard(t *testing.T) {
 	e := newTestEnv(t)
 	for _, host := range []string{
 		"localhost:8080", "127.0.0.1:8080", "preview.localhost:8080",
-		"preview.localhost", "example.com", "too.many.labels.demo.preview.localhost",
+		"preview.localhost", "example.com", "too.many.labels.preview.localhost",
 	} {
 		code, body, _ := doReq(t, e.router, host, "/", true)
 		if code != 200 || body != "dashboard" {
@@ -140,7 +140,7 @@ func TestNonPreviewHostsGetDashboard(t *testing.T) {
 func TestPreviewStaticAndSPAFallback(t *testing.T) {
 	e := newTestEnv(t)
 	d := e.readyDeploy(t, shaOne)
-	host := d.ShortSHA + ".demo.preview.localhost:8080"
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
 
 	code, body, _ := doReq(t, e.router, host, "/", true)
 	if code != 200 || !strings.Contains(body, "preview home") {
@@ -178,7 +178,7 @@ func TestPreviewAPIProxied(t *testing.T) {
 	port, _ := strconv.Atoi(u.Port())
 	e.fake.port = port
 
-	host := d.ShortSHA + ".demo.preview.localhost:8080"
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
 	code, body, _ := doReq(t, e.router, host, "/api/things", false)
 	if code != 200 || body != "upstream:/api/things" {
 		t.Fatalf("api proxy: %d %q", code, body)
@@ -221,7 +221,7 @@ func TestProcessFrontendRouting(t *testing.T) {
 	port, _ := strconv.Atoi(u.Port())
 	e.fake.port = port
 
-	host := d.ShortSHA + ".demo.preview.localhost:8080"
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
 	cases := []struct {
 		path     string
 		wantBody string
@@ -254,7 +254,7 @@ func TestProcessFrontendRouting(t *testing.T) {
 func TestColdStartAndCrash(t *testing.T) {
 	e := newTestEnv(t)
 	d := e.readyDeploy(t, shaOne)
-	host := d.ShortSHA + ".demo.preview.localhost:8080"
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
 
 	// Still starting: JSON callers get 503 + Retry-After.
 	e.fake.slow = true
@@ -278,7 +278,7 @@ func TestNonReadyStatuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := d.ShortSHA + ".demo.preview.localhost:8080"
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
 
 	code, body, _ := doReq(t, e.router, host, "/", true)
 	if code != 503 || !strings.Contains(body, "refresh") {
@@ -305,26 +305,26 @@ func TestAmbiguousAndUnknown(t *testing.T) {
 	e.readyDeploy(t, shaX)
 	e.readyDeploy(t, shaY)
 
-	code, body, _ := doReq(t, e.router, "abcdef0.demo.preview.localhost", "/", true)
+	code, body, _ := doReq(t, e.router, "abcdef0-demo.preview.localhost", "/", true)
 	if code != 404 || !strings.Contains(body, "Ambiguous") {
 		t.Fatalf("ambiguous: %d %q", code, body)
 	}
 	// A full unique prefix works.
-	code, _, _ = doReq(t, e.router, "abcdef01.demo.preview.localhost", "/", true)
+	code, _, _ = doReq(t, e.router, "abcdef01-demo.preview.localhost", "/", true)
 	if code != 200 {
 		t.Fatalf("unique prefix: %d", code)
 	}
 
-	code, body, _ = doReq(t, e.router, "1234567.nope.preview.localhost", "/", true)
+	code, body, _ = doReq(t, e.router, "1234567-nope.preview.localhost", "/", true)
 	if code != 404 || !strings.Contains(body, "No repo") {
 		t.Fatalf("unknown repo: %d %q", code, body)
 	}
-	code, body, _ = doReq(t, e.router, "fffffff.demo.preview.localhost", "/", true)
+	code, body, _ = doReq(t, e.router, "fffffff-demo.preview.localhost", "/", true)
 	if code != 404 || !strings.Contains(body, "No deploy") {
 		t.Fatalf("unknown deploy: %d %q", code, body)
 	}
-	code, body, _ = doReq(t, e.router, "not-hex.demo.preview.localhost", "/", true)
-	if code != 404 || !strings.Contains(body, "not a sha prefix") {
+	code, body, _ = doReq(t, e.router, "nothex-demo.preview.localhost", "/", true)
+	if code != 404 || !strings.Contains(body, "not a preview address") {
 		t.Fatalf("non-hex label: %d %q", code, body)
 	}
 }
@@ -332,24 +332,44 @@ func TestAmbiguousAndUnknown(t *testing.T) {
 func TestParseHost(t *testing.T) {
 	e := newTestEnv(t)
 	cases := []struct {
-		host        string
-		label, repo string
-		ok          bool
+		host string
+		sub  string
+		ok   bool
 	}{
-		{"abc1234.demo.preview.localhost:8080", "abc1234", "demo", true},
-		{"ABC1234.DEMO.PREVIEW.LOCALHOST", "abc1234", "demo", true},
-		{"abc1234.demo.preview.localhost.", "abc1234", "demo", true},
-		{"preview.localhost", "", "", false},
-		{"demo.preview.localhost", "", "", false},
-		{"a.b.c.preview.localhost", "", "", false},
-		{"localhost:8080", "", "", false},
-		{"[::1]:8080", "", "", false},
+		{"abc1234-demo.preview.localhost:8080", "abc1234-demo", true},
+		{"ABC1234-DEMO.PREVIEW.LOCALHOST", "abc1234-demo", true},
+		{"abc1234-demo.preview.localhost.", "abc1234-demo", true},
+		{"preview.localhost", "", false},
+		// A dotted host is no longer a preview address: one label only, so
+		// that a single wildcard record and cert cover every repo.
+		{"abc1234.demo.preview.localhost", "", false},
+		{"a.b.c.preview.localhost", "", false},
+		{"localhost:8080", "", false},
+		{"[::1]:8080", "", false},
 	}
 	for _, tc := range cases {
-		label, repo, ok := e.router.parseHost(tc.host)
-		if label != tc.label || repo != tc.repo || ok != tc.ok {
-			t.Errorf("parseHost(%q) = (%q, %q, %v), want (%q, %q, %v)",
-				tc.host, label, repo, ok, tc.label, tc.repo, tc.ok)
+		sub, ok := e.router.parseHost(tc.host)
+		if sub != tc.sub || ok != tc.ok {
+			t.Errorf("parseHost(%q) = (%q, %v), want (%q, %v)",
+				tc.host, sub, ok, tc.sub, tc.ok)
 		}
+	}
+}
+
+// Repo names may contain hyphens, so the separator isn't always the first
+// one: the split is resolved against the registry.
+func TestHyphenatedRepoName(t *testing.T) {
+	e := newTestEnv(t)
+	if _, err := e.db.CreateRepo("my-app", "/src2", "/bare2", db.RepoReady); err != nil {
+		t.Fatal(err)
+	}
+	label, repo, _, ok := e.router.splitSub("abc1234-my-app")
+	if !ok || label != "abc1234" || repo.Name != "my-app" {
+		t.Fatalf("splitSub = (%q, %q, %v), want (abc1234, my-app, true)", label, repo.Name, ok)
+	}
+	// The leftmost split whose left side is hex wins only if that repo
+	// exists; "abc1234-my" is not registered, so it must not shadow it.
+	if _, _, guess, ok := e.router.splitSub("abc1234-nosuch-repo"); ok || guess != "nosuch-repo" {
+		t.Fatalf("unregistered: ok=%v guess=%q, want false/nosuch-repo", ok, guess)
 	}
 }

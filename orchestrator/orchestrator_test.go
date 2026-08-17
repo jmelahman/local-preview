@@ -145,7 +145,7 @@ func TestEmbeddedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	d = waitReady(t, o, d.ID)
-	wantURL := "http://" + d.ShortSHA + ".demo.preview.localhost:8080/"
+	wantURL := "http://" + d.ShortSHA + "-demo.preview.localhost:8080/"
 	if d.PreviewURL != wantURL {
 		t.Fatalf("PreviewURL = %q, want %q", d.PreviewURL, wantURL)
 	}
@@ -195,7 +195,7 @@ func TestEmbeddedLifecycle(t *testing.T) {
 	handler := o.WrapHost(fallback)
 
 	req := httptest.NewRequest("GET", "http://x/", nil)
-	req.Host = d.ShortSHA + ".demo.preview.localhost:8080"
+	req.Host = d.ShortSHA + "-demo.preview.localhost:8080"
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "embedded preview") {

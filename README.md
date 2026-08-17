@@ -8,7 +8,7 @@
 
 A local-first preview-deployment orchestrator: every commit of a registered
 git repository becomes a servable preview at its own subdomain
-(`<sha>.<repo>.preview.localhost:8080`), built once, deduplicated by
+(`<sha>-<repo>.preview.localhost:8080`), built once, deduplicated by
 content, and served from a single binary.
 
 `local-preview` resolves each commit into a *(frontend artifact, backend

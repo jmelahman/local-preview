@@ -62,7 +62,7 @@ func TestOpenCommand(t *testing.T) {
 			ShortSHA: "ddddddd", Branch: "feature/abc", Status: "building"},
 		{ID: 2, Repo: "demo", SHA: "abc12345555555555555555555555555555555555",
 			ShortSHA: "abc1234", Branch: "main", Status: "ready",
-			PreviewURL: "http://abc1234.demo.preview.localhost:8080/"},
+			PreviewURL: "http://abc1234-demo.preview.localhost:8080/"},
 		{ID: 1, Repo: "demo", SHA: "eeeeeee6666666666666666666666666666666666",
 			ShortSHA: "eeeeeee", Branch: "main", Status: "evicted"},
 	}
@@ -70,7 +70,7 @@ func TestOpenCommand(t *testing.T) {
 
 	t.Run("branch picks newest deploy", func(t *testing.T) {
 		out, err := runOpenCmd(t, ts.URL, "main")
-		if err != nil || !strings.Contains(out, "http://abc1234.demo.preview.localhost:8080/") {
+		if err != nil || !strings.Contains(out, "http://abc1234-demo.preview.localhost:8080/") {
 			t.Fatalf("out = %q, err = %v", out, err)
 		}
 	})
@@ -79,7 +79,7 @@ func TestOpenCommand(t *testing.T) {
 		// "abc" is a substring of newer branch feature/abc, but a sha prefix
 		// of deploy 2 — the sha match wins.
 		out, err := runOpenCmd(t, ts.URL, "abc")
-		if err != nil || !strings.Contains(out, "http://abc1234.demo.preview.localhost:8080/") {
+		if err != nil || !strings.Contains(out, "http://abc1234-demo.preview.localhost:8080/") {
 			t.Fatalf("out = %q, err = %v", out, err)
 		}
 	})

@@ -340,10 +340,10 @@ func (d Deps) deployJSON(row db.DeployRow) deployJSON {
 	return out
 }
 
-// previewURL builds http://<short>.<repo>.<domain>[:port]/ from the listen
+// previewURL builds http://<short>-<repo>.<domain>[:port]/ from the listen
 // address.
 func (d Deps) previewURL(row db.DeployRow) string {
-	host := fmt.Sprintf("%s.%s.%s", row.ShortSHA, row.RepoName, d.Config.PreviewDomain)
+	host := fmt.Sprintf("%s-%s.%s", row.ShortSHA, row.RepoName, d.Config.PreviewDomain)
 	if _, port, err := net.SplitHostPort(d.Addr); err == nil && port != "" && port != "80" {
 		host += ":" + port
 	}

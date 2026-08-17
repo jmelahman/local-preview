@@ -84,8 +84,9 @@ func resolveGitDir(path string) (string, error) {
 	return filepath.Clean(path), nil
 }
 
-// nameRE restricts repo names to a single lowercase RFC 1035 DNS label so
-// Host-header parsing of <label>.<repo>.<domain> is unambiguous.
+// nameRE restricts repo names to a single lowercase RFC 1035 DNS label, so
+// that <label>-<repo> is a legal label too. Names may contain hyphens; the
+// proxy resolves that split against the registry.
 var nameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // ValidateName rejects repo names that can't serve as a DNS label.

@@ -527,8 +527,8 @@ function DeployDialog({
               : !repos.some((r) => r.status === "ready")
                 ? "Repositories are still cloning — deploy once one is ready."
                 : previewDomain
-                  ? `Served at <sha>.<repo>.${previewDomain}.`
-                  : "Served at <sha>.<repo> on the preview domain."
+                  ? `Served at <sha>-<repo>.${previewDomain}.`
+                  : "Served at <sha>-<repo> on the preview domain."
           }
         >
           <button

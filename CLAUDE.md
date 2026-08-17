@@ -2,7 +2,7 @@
 
 A local-first preview-deployment orchestrator: a Go backend (repo root) plus
 a React/Vite dashboard (`web/`). Registered git repos get a preview per
-commit at `<sha>.<repo>.preview.localhost:8080` — content-addressed builds,
+commit at `<sha>-<repo>.preview.localhost:8080` — content-addressed builds,
 on-demand backend processes, lineage-forked state. Architecture notes live in
 `docs/guide/concepts.md`; the target-repo contract in
 `docs/reference/preview-toml.md`.

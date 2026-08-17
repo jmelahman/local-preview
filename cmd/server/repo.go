@@ -27,7 +27,7 @@ func repoCmd() *cobra.Command {
 		Use:   "create <name>",
 		Short: "Register a repository for previews",
 		Long: "Register a repository: the server keeps a mirror clone of --source\n" +
-			"(a local path or clone URL) and serves previews at <sha>.<name>.<domain>.",
+			"(a local path or clone URL) and serves previews at <sha>-<name>.<domain>.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRepoCreate(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),

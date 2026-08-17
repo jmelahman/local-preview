@@ -135,7 +135,7 @@ repo, backed by [`GET /api/storage`](/reference/api#get-api-storage).
 
 ## The preview domain
 
-Previews are addressed as `http://<sha-prefix>.<repo>.<domain>[:port]/`. The
+Previews are addressed as `http://<sha-prefix>-<repo>.<domain>[:port]/`. The
 default `preview.localhost` needs no DNS setup: browsers resolve any
 `*.localhost` name to loopback. Requests whose Host doesn't match
 `*.<domain>` (plain `localhost`, raw IPs) are served the dashboard. To host

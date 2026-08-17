@@ -92,8 +92,8 @@ Once the build finishes, the row grows an **open** link:
 <img class="light-only" src="/quickstart-04-ready-light.png" alt="A ready deployment" />
 <img class="dark-only" src="/quickstart-04-ready-dark.png" alt="A ready deployment" />
 
-It leads to `http://d9ebf14.myapp.preview.localhost:8080/` — every commit
-gets a subdomain of the form `<sha>.<repo>`, and browsers resolve
+It leads to `http://d9ebf14-myapp.preview.localhost:8080/` — every commit
+gets a subdomain of the form `<sha>-<repo>`, and browsers resolve
 `*.localhost` names without any DNS setup.
 
 The frontend is served statically. The backend process is why the badge

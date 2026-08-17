@@ -85,11 +85,16 @@ an optimistic guess.
 
 ## Subdomain routing
 
-Every preview host is `<sha-prefix>.<repo>.<domain>`. Labels resolve by sha
+Every preview host is `<sha-prefix>-<repo>.<domain>`. Labels resolve by sha
 *prefix match*, and the router never guesses: an ambiguous prefix is refused
-with the candidate list, and stored short-shas grow until unique. Repo names
-are single DNS labels, which keeps parsing unambiguous even under a
-multi-label base domain.
+with the candidate list, and stored short-shas grow until unique.
+
+Both parts share **one** DNS label on purpose: a wildcard record — and a
+wildcard certificate — matches exactly one label, so a dotted
+`<sha>.<repo>.<domain>` would need a record and a cert per repo, while
+`*.<domain>` covers every repo at once. Repo names are themselves single DNS
+labels and may contain hyphens, so the router resolves the split against the
+repo registry rather than cutting at the first hyphen.
 
 ## Trigger adapters
 

@@ -1,7 +1,11 @@
 // Package proxy is the top-level request router. Hosts under the preview
-// domain (<label>.<repo>.<domain>) serve deployed previews — static frontend
+// domain (<label>-<repo>.<domain>) serve deployed previews — static frontend
 // files plus /api/* reverse-proxied to the supervised backend. Every other
 // host (the apex domain, localhost, raw IPs) gets the dashboard.
+//
+// Preview hosts must stay a single DNS label: a wildcard matches one label
+// only, so this is what lets one *.<domain> record and one wildcard
+// certificate cover every repo.
 //
 // Routing state is cached in memory with a short TTL so the single-connection
 // SQLite database isn't queried for every asset request.
@@ -54,6 +58,8 @@ type Router struct {
 
 type cacheEntry struct {
 	repoID    int64
+	repoName  string
+	label     string // sha prefix the host asked for
 	deploy    db.Deploy
 	err       string // non-empty: resolution failed with this message
 	ambiguous []string
@@ -79,17 +85,17 @@ func New(database *db.Store, files *store.Store, backends Backends, domain strin
 }
 
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	label, repoName, ok := rt.parseHost(r.Host)
+	sub, ok := rt.parseHost(r.Host)
 	if !ok {
 		rt.dashboard.ServeHTTP(w, r)
 		return
 	}
-	entry := rt.resolve(label, repoName)
+	entry := rt.resolve(sub)
 	switch {
 	case len(entry.ambiguous) > 0:
 		rt.errorPage(w, r, http.StatusNotFound, "Ambiguous preview address",
 			fmt.Sprintf("%q matches several deploys (%s) — use a longer sha prefix.",
-				label, strings.Join(entry.ambiguous, ", ")))
+				entry.label, strings.Join(entry.ambiguous, ", ")))
 	case entry.err != "":
 		rt.errorPage(w, r, http.StatusNotFound, "Unknown preview", entry.err)
 	default:
@@ -97,9 +103,10 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// parseHost splits a request host into (label, repo) if it's a preview
-// host. ok=false means "not a preview host" → dashboard.
-func (rt *Router) parseHost(hostport string) (label, repo string, ok bool) {
+// parseHost returns the single label below the preview domain, unsplit —
+// telling <label>-<repo> apart needs the repo registry, which lookup has.
+// ok=false means "not a preview host" → dashboard.
+func (rt *Router) parseHost(hostport string) (sub string, ok bool) {
 	host := hostport
 	if h, _, err := net.SplitHostPort(hostport); err == nil {
 		host = h
@@ -107,18 +114,18 @@ func (rt *Router) parseHost(hostport string) (label, repo string, ok bool) {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	rest, found := strings.CutSuffix(host, "."+rt.domain)
 	if !found {
-		return "", "", false
+		return "", false
 	}
-	parts := strings.Split(rest, ".")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
+	// One label only; a deeper host isn't ours.
+	if rest == "" || strings.Contains(rest, ".") {
+		return "", false
 	}
-	return parts[0], parts[1], true
+	return rest, true
 }
 
-// resolve maps (label, repo) to a deploy through the TTL cache.
-func (rt *Router) resolve(label, repoName string) cacheEntry {
-	key := repoName + "\x00" + label
+// resolve maps a preview label to a deploy through the TTL cache.
+func (rt *Router) resolve(sub string) cacheEntry {
+	key := sub
 	rt.mu.Lock()
 	if e, ok := rt.cache[key]; ok && time.Now().Before(e.expires) {
 		rt.mu.Unlock()
@@ -126,7 +133,7 @@ func (rt *Router) resolve(label, repoName string) cacheEntry {
 	}
 	rt.mu.Unlock()
 
-	e := rt.lookup(label, repoName)
+	e := rt.lookup(sub)
 	e.expires = time.Now().Add(cacheTTL)
 	rt.mu.Lock()
 	rt.cache[key] = e
@@ -134,15 +141,43 @@ func (rt *Router) resolve(label, repoName string) cacheEntry {
 	return e
 }
 
-func (rt *Router) lookup(label, repoName string) cacheEntry {
-	repo, err := rt.db.GetRepoByName(repoName)
-	if err != nil {
-		return cacheEntry{err: fmt.Sprintf("No repo named %q is registered.", repoName)}
+// splitSub resolves <label>-<repo> against the repo registry. Repo names may
+// themselves contain hyphens, so the first hyphen isn't necessarily the
+// separator: try every split whose left side is a sha prefix and take the
+// first one naming a registered repo. guess is the leftmost candidate's repo,
+// used only to word the error when nothing matches.
+func (rt *Router) splitSub(sub string) (label string, repo db.Repo, guess string, ok bool) {
+	for i, c := range sub {
+		if c != '-' {
+			continue
+		}
+		left, right := sub[:i], sub[i+1:]
+		if left == "" || right == "" || !isHex(left) {
+			continue
+		}
+		if guess == "" {
+			guess = right
+		}
+		r, err := rt.db.GetRepoByName(right)
+		if err != nil {
+			continue
+		}
+		return left, r, guess, true
 	}
-	if !isHex(label) {
-		// Branch aliases arrive in M2; today labels are sha prefixes.
-		return cacheEntry{err: fmt.Sprintf("%q is not a sha prefix.", label)}
+	return "", db.Repo{}, guess, false
+}
+
+func (rt *Router) lookup(sub string) cacheEntry {
+	label, repo, guess, ok := rt.splitSub(sub)
+	if !ok {
+		if guess == "" {
+			// No hyphen split had a sha prefix on the left, so the host is
+			// the wrong shape rather than naming an unknown repo.
+			return cacheEntry{err: fmt.Sprintf("%q is not a preview address (expected <sha>-<repo>).", sub)}
+		}
+		return cacheEntry{err: fmt.Sprintf("No repo named %q is registered.", guess)}
 	}
+	repoName := repo.Name
 	matches, err := rt.db.DeploysBySHAPrefix(repo.ID, label)
 	if err != nil || len(matches) == 0 {
 		return cacheEntry{err: fmt.Sprintf("No deploy of %s matches %q. Deploy it with: preview deploy %s", repoName, label, label)}
@@ -153,9 +188,9 @@ func (rt *Router) lookup(label, repoName string) cacheEntry {
 		for i, m := range matches {
 			shorts[i] = m.ShortSHA
 		}
-		return cacheEntry{ambiguous: shorts}
+		return cacheEntry{repoName: repoName, label: label, ambiguous: shorts}
 	}
-	e := cacheEntry{repoID: repo.ID, deploy: matches[0]}
+	e := cacheEntry{repoID: repo.ID, repoName: repoName, label: label, deploy: matches[0]}
 	if e.deploy.Status == db.DeployReady {
 		if e.deploy.FeHash != "" {
 			if _, err := rt.db.GetFrontendArtifact(repo.ID, e.deploy.FeHash); err == nil {
@@ -178,7 +213,7 @@ func (rt *Router) lookup(label, repoName string) cacheEntry {
 
 func (rt *Router) servePreview(w http.ResponseWriter, r *http.Request, e cacheEntry) {
 	d := e.deploy
-	repoName := rt.repoNameFromHost(r.Host)
+	repoName := e.repoName
 	switch d.Status {
 	case db.DeployQueued, db.DeployBuilding:
 		rt.refreshPage(w, r, http.StatusServiceUnavailable, "Building preview…",
@@ -202,11 +237,6 @@ func (rt *Router) servePreview(w http.ResponseWriter, r *http.Request, e cacheEn
 	default:
 		rt.errorPage(w, r, http.StatusInternalServerError, "Unknown state", d.Status)
 	}
-}
-
-func (rt *Router) repoNameFromHost(host string) string {
-	_, repo, _ := rt.parseHost(host)
-	return repo
 }
 
 // proxyAPI routes backend traffic, stripping the /api prefix when the

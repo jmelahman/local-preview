@@ -342,7 +342,7 @@ func (o *Orchestrator) Close() error {
 }
 
 // WrapHost returns the top-level handler: requests whose Host is a preview
-// subdomain (<sha>.<repo>.<domain>) are served by the orchestrator;
+// subdomain (<sha>-<repo>.<domain>) are served by the orchestrator;
 // everything else falls through to next.
 func (o *Orchestrator) WrapHost(next http.Handler) http.Handler {
 	return proxy.New(o.database, o.files, o.super, o.opts.PreviewDomain, next)
@@ -622,7 +622,7 @@ func (o *Orchestrator) ArtifactFilePath(deployID int64, artifact, file string) (
 }
 
 func (o *Orchestrator) previewURL(row db.DeployRow) string {
-	host := fmt.Sprintf("%s.%s.%s", row.ShortSHA, row.RepoName, o.opts.PreviewDomain)
+	host := fmt.Sprintf("%s-%s.%s", row.ShortSHA, row.RepoName, o.opts.PreviewDomain)
 	if _, port, err := net.SplitHostPort(o.opts.Addr); err == nil && port != "" && port != "80" {
 		host += ":" + port
 	}

@@ -30,7 +30,7 @@ playwright`.
 - `wgo` restarts the backend on any Go file save; with `--in-memory` that
   resets all state mid-session. Re-register fixtures after editing Go code.
 - Preview subdomains work through curl with a Host header:
-  `curl http://localhost:8080/ -H "Host: <sha>.<repo>.preview.localhost:8080"`.
+  `curl http://localhost:8080/ -H "Host: <sha>-<repo>.preview.localhost:8080"`.
 
 ## Deployable fixture repo
 
