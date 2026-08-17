@@ -81,6 +81,7 @@ retention holds bytes flat — so any UI that polls it should page instead:
 page, _ := orch.DeploysPage(orchestrator.DeployQuery{
     Repo:   "myapp",              // optional
     Status: orchestrator.StatusReady, // optional; omit for every status
+    Query:  "fix-login",          // optional free-text search
     Limit:  25,
     Offset: 50,
 })
@@ -92,6 +93,13 @@ Paging is by descending deploy id, so a deploy created between two page
 fetches shifts the window rather than corrupting it. Filtering out
 `StatusEvicted` is how a caller shows only deploys that still have artifacts
 on disk.
+
+`Query` is what a search box sends: it matches a case-insensitive prefix of
+the commit sha — so a short sha copied off a listing row finds its deploy —
+or a case-insensitive substring of the repo name, branch, ref, author name,
+or author email. Wildcard characters match themselves, so user input needs
+no escaping. Every field narrows the same result set, so `Query` composes
+with `Repo` and `Status` rather than overriding them.
 
 ## Custom manifest locations
 

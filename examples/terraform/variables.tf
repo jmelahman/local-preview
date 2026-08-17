@@ -177,6 +177,37 @@ variable "local_manifests" {
   default     = {}
 }
 
+variable "compose_stacks" {
+  description = <<-EOT
+    Auxiliary dependency stacks, keyed by compose project name: the contents
+    of a compose file, brought up by systemd at boot and left running. This is
+    where a target repo's shared Postgres/search/cache lives — previews build
+    per commit, their dependencies do not.
+
+    The project name is the key, so a stack named "onyx" gives the docker
+    network "onyx_default" — the name a manifest's `networks` joins, and the
+    namespace its compose service names resolve in.
+
+    Each stack gets ${data_dir}/stacks/<name> as its working directory, on the
+    data volume and preserved across instance rebuilds. Bind-mount persistent
+    data under it (./data/...) rather than using named volumes, which land on
+    the root disk.
+
+    Written by user_data, so changing a stack rebuilds the instance (the data
+    volume survives). Stack contents land in the cloud-init log — put
+    credentials in an SSM parameter and reference it from the compose file,
+    not inline.
+  EOT
+  type        = map(string)
+  default     = {}
+}
+
+variable "docker_compose_version" {
+  description = "Compose plugin release to install, needed only when compose_stacks is set (Amazon Linux ships docker without it)."
+  type        = string
+  default     = "v2.39.1"
+}
+
 variable "extra_server_args" {
   description = "Additional `preview serve` flags, e.g. [\"--max-warm\", \"16\"]."
   type        = list(string)

@@ -1,12 +1,17 @@
 package orchestrator
 
 import (
-	"fmt"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jmelahman/local-preview/internal/db"
 )
+
+// sha builds a 40-char hex sha whose every digit is n, so no two fixtures
+// share a prefix.
+func sha(n int) string { return strings.Repeat(strconv.FormatInt(int64(n), 16), 40) }
 
 // The SQL behind paging is covered in internal/db; this checks the facade's
 // own contract — that DeployQuery maps onto the filter and that Total counts
@@ -31,7 +36,8 @@ func TestDeploysPage(t *testing.T) {
 	}
 	ids := make([]int64, 6)
 	for i := range ids {
-		d, err := o.database.CreateDeploy(repo.ID, fmt.Sprintf("%040x", i+1), db.DeployMeta{})
+		// Distinct in every position, so a prefix search picks out exactly one.
+		d, err := o.database.CreateDeploy(repo.ID, sha(i+1), db.DeployMeta{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -80,6 +86,27 @@ func TestDeploysPage(t *testing.T) {
 	if evicted.Total != 4 || len(evicted.Deploys) != 1 {
 		t.Fatalf("evicted page = %d rows / total %d, want 1 / 4",
 			len(evicted.Deploys), evicted.Total)
+	}
+
+	// Query reaches the free-text predicate: shas match by prefix, so a
+	// short sha off a listing row finds the deploy it came from.
+	short := sha(3)[:7]
+	hit, err := o.DeploysPage(DeployQuery{Query: short})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hit.Total != 1 || len(hit.Deploys) != 1 || hit.Deploys[0].ID != ids[2] {
+		t.Fatalf("query %q = %+v, want the one deploy %d", short, hit, ids[2])
+	}
+
+	// Query narrows the same result set the other knobs page through, rather
+	// than replacing them.
+	narrowed, err := o.DeploysPage(DeployQuery{Query: "demo", Status: StatusEvicted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrowed.Total != 4 {
+		t.Errorf("query+status total = %d, want 4", narrowed.Total)
 	}
 
 	// Unknown repo: an empty page, not an error.

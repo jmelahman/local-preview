@@ -520,6 +520,11 @@ type DeployQuery struct {
 	// Evicted deploys stay listed as history, so filtering them out is how a
 	// caller shows only deploys that still have artifacts on disk.
 	Status string
+	// Query is free text from a search box: a case-insensitive prefix of the
+	// commit sha, or a case-insensitive substring of the repo name, branch,
+	// ref, author name, or author email. Wildcard characters match
+	// themselves, so a query is safe to pass through unescaped.
+	Query string
 	// Limit caps the page size; 0 means every match.
 	Limit int
 	// Offset skips that many matches. Rows are ordered by descending id.
@@ -539,7 +544,13 @@ type DeployPage struct {
 // are kept as history, so a long-lived instance accumulates rows even while
 // retention holds bytes in check.
 func (o *Orchestrator) DeploysPage(q DeployQuery) (DeployPage, error) {
-	f := db.DeployFilter{Repo: q.Repo, Status: q.Status, Limit: q.Limit, Offset: q.Offset}
+	f := db.DeployFilter{
+		Repo:   q.Repo,
+		Status: q.Status,
+		Query:  q.Query,
+		Limit:  q.Limit,
+		Offset: q.Offset,
+	}
 	total, err := o.database.CountDeploys(f)
 	if err != nil {
 		return DeployPage{}, err
