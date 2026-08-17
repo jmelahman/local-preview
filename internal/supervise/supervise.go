@@ -28,7 +28,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/db"
@@ -479,7 +478,7 @@ func (m *Manager) start(k Key, p *process) {
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
 		cmd.Env = append(os.Environ(), envPairs...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		newProcessGroup(cmd)
 		if err := cmd.Start(); err != nil {
 			logFile.Close()
 			fail("start_attempt", fmt.Errorf("start %s: %w", k.Side, err))
@@ -667,9 +666,9 @@ func (m *Manager) runInit(k Key, repoName string, spec runSpec, rt runtimeEnv, l
 			cmd.Stdout = logFile
 			cmd.Stderr = logFile
 			cmd.Env = append(os.Environ(), env...)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			newProcessGroup(cmd)
 			cmd.Cancel = func() error {
-				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				return killGroup(cmd.Process.Pid)
 			}
 			err = cmd.Run()
 		}
@@ -769,7 +768,7 @@ func (m *Manager) stopLocked(k Key, reason string) {
 	case p.cmd != nil && p.cmd.Process != nil:
 		p.intentional = true
 		pid := p.cmd.Process.Pid
-		syscall.Kill(-pid, syscall.SIGTERM)
+		terminateGroup(pid) //nolint:errcheck
 		select {
 		case <-p.done:
 		case <-time.After(stopGrace):
@@ -794,7 +793,7 @@ func (m *Manager) killProcess(p *process) {
 		return
 	}
 	if p.cmd != nil && p.cmd.Process != nil {
-		syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+		killGroup(p.cmd.Process.Pid) //nolint:errcheck
 	}
 }
 
@@ -978,10 +977,10 @@ func (m *Manager) ReclaimOrphans() {
 	records, err := m.db.ListProcessRecords()
 	if err == nil {
 		for _, r := range records {
-			if pgid, err := syscall.Getpgid(r.PID); err == nil && pgid == r.PGID {
-				syscall.Kill(-r.PGID, syscall.SIGTERM)
+			if pgid, err := processGroupOf(r.PID); err == nil && pgid == r.PGID {
+				terminateGroup(r.PGID) //nolint:errcheck
 				time.Sleep(200 * time.Millisecond)
-				syscall.Kill(-r.PGID, syscall.SIGKILL)
+				killGroup(r.PGID) //nolint:errcheck
 				m.db.AddProcessEvent(r.RepoID, r.BeHash, "exited", "reclaimed orphan after unclean shutdown")
 			}
 			m.db.DeleteProcessRecord(r.RepoID, r.BeHash)
