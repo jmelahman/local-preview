@@ -24,7 +24,7 @@ registered repo, artifact, and state dir intact.
 
 ```hcl
 module "local_preview" {
-  source = "github.com/jmelahman/local-preview//examples/terraform?ref=v0.3.0"
+  source = "github.com/jmelahman/local-preview//examples/terraform?ref=v0.4.0"
 
   preview_domain        = "preview.example.com"
   allowed_ingress_cidrs = ["10.0.0.0/8"] # VPN range — see below
@@ -143,7 +143,7 @@ repo, artifact, and state dir intact. Expect a few minutes of downtime while
 the replacement boots — the Elastic IP means DNS doesn't change.
 
 ```sh
-terraform apply -var 'image=lahmanja/local-preview:0.3.0'
+terraform apply -var 'image=lahmanja/local-preview:0.4.0'
 ```
 
 Note that Docker Hub tags carry no `v` prefix, unlike the git tags.

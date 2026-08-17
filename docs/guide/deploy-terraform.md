@@ -7,7 +7,7 @@ is a worked AWS deployment: one EC2 instance, one data volume, one address.
 
 ```hcl
 module "local_preview" {
-  source = "github.com/jmelahman/local-preview//examples/terraform?ref=v0.3.0"
+  source = "github.com/jmelahman/local-preview//examples/terraform?ref=v0.4.0"
 
   preview_domain        = "preview.example.com"
   allowed_ingress_cidrs = ["10.0.0.0/8"]
