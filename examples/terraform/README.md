@@ -22,7 +22,7 @@ registered repo, artifact, and state dir intact.
 
 ```hcl
 module "local_preview" {
-  source = "github.com/jmelahman/local-preview//examples/terraform?ref=v0.1.0"
+  source = "github.com/jmelahman/local-preview//examples/terraform?ref=v0.3.0"
 
   preview_domain        = "preview.example.com"
   allowed_ingress_cidrs = ["10.0.0.0/8"] # VPN range — see below
