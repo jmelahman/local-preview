@@ -164,6 +164,10 @@ Like manifests, stack files are written by user_data — editing one rebuilds
 the instance, and the contents reach the cloud-init log, so reference an SSM
 parameter rather than inlining a credential.
 
+Manifests and stacks share EC2's 16 KiB user-data budget. It is sent gzipped,
+which buys roughly a 4× margin, but a deployment with many large files will
+eventually hit the cap; fetch those from S3 at boot instead.
+
 ## Webhook secret
 
 Set `github_webhook_secret_ssm_parameter` to the name of a SecureString

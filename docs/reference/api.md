@@ -19,7 +19,9 @@ revalidation.
 
 `preview_domain` is the base domain previews are served under, as resolved at
 startup from [`--preview-domain`](/reference/cli#preview-serve) /
-`$PREVIEW_DOMAIN`.
+`$PREVIEW_DOMAIN`, or from the host of
+[`--preview-base-url`](/guide/configuration#hosting-behind-a-proxy) when
+that's set.
 
 ```json
 { "status": "ok", "version": "v0.1.0", "preview_domain": "preview.localhost" }
@@ -141,7 +143,9 @@ for an unresolvable ref.
 ```
 
 `status` is one of `queued`, `building`, `ready`, `failed`, `evicted`. Ready
-deploys additionally carry `preview_url` and `process` (the live backend
+deploys additionally carry `preview_url` (built from the server's public
+preview base — see [hosting behind a
+proxy](/guide/configuration#hosting-behind-a-proxy)) and `process` (the live backend
 state: `running` means warm, `starting` means a start is in flight, and
 `idle` means the process will start on the first request — processes start
 on demand), and `fe_process` (same states) when the frontend is a

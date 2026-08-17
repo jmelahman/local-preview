@@ -102,9 +102,12 @@ func newTestMux(t *testing.T) (*http.ServeMux, string) {
 	cloner.Start(ctx)
 
 	return NewMux(Deps{
-		Store:               database,
-		Build:               BuildInfo{Version: "test"},
-		Config:              config.Config{DataDir: root, PreviewDomain: "preview.localhost"},
+		Store: database,
+		Build: BuildInfo{Version: "test"},
+		Config: config.Config{
+			DataDir: root,
+			Preview: config.PreviewBase{Domain: "preview.localhost", Scheme: "http", Port: "8080"},
+		},
 		Git:                 gitMgr,
 		Queue:               queue,
 		Super:               super,
@@ -113,7 +116,6 @@ func newTestMux(t *testing.T) (*http.ServeMux, string) {
 		Sweeper:             retain.New(database, super, files),
 		DBPath:              ":memory:",
 		GitHubWebhookSecret: testWebhookSecret,
-		Addr:                ":8080",
 	}), root
 }
 

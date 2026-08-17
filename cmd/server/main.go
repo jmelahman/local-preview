@@ -75,6 +75,7 @@ type serveOptions struct {
 	dataDir          string
 	inMemory         bool
 	previewDomain    string
+	previewBaseURL   string
 	buildConcurrency int
 	maxWarm          int
 	pollInterval     time.Duration
@@ -101,6 +102,7 @@ func Root() *cobra.Command {
 	serve.Flags().StringVar(&opts.dataDir, "data-dir", "", "Override data directory (default: $PREVIEW_DATA_DIR or XDG)")
 	serve.Flags().BoolVar(&opts.inMemory, "in-memory", false, "Use an ephemeral in-memory SQLite database; all data is discarded on shutdown")
 	serve.Flags().StringVar(&opts.previewDomain, "preview-domain", "", "Base domain previews are served under (default: $PREVIEW_DOMAIN or preview.localhost)")
+	serve.Flags().StringVar(&opts.previewBaseURL, "preview-base-url", "", "Public base URL of previews, e.g. https://preview.example.com — sets the scheme, domain, and port of generated preview URLs when the server sits behind a proxy (default: $PREVIEW_BASE_URL)")
 	serve.Flags().IntVar(&opts.buildConcurrency, "build-concurrency", 2, "Number of deploys built in parallel")
 	serve.Flags().IntVar(&opts.maxWarm, "max-warm", 8, "Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (0 = unlimited)")
 	serve.Flags().DurationVar(&opts.pollInterval, "poll-interval", watch.DefaultInterval, "How often watched repos are fetched for new commits (0 disables watching)")
@@ -116,7 +118,12 @@ func run(opts serveOptions) error {
 	if opts.githubSecret == "" {
 		opts.githubSecret = os.Getenv("PREVIEW_GITHUB_WEBHOOK_SECRET")
 	}
-	cfg, err := config.Load(opts.dataDir, opts.previewDomain)
+	cfg, err := config.Load(config.Options{
+		DataDir:        opts.dataDir,
+		PreviewDomain:  opts.previewDomain,
+		PreviewBaseURL: opts.previewBaseURL,
+		Addr:           opts.addr,
+	})
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -172,9 +179,8 @@ func run(opts serveOptions) error {
 		Sweeper:             sweeper,
 		DBPath:              dbPath,
 		GitHubWebhookSecret: opts.githubSecret,
-		Addr:                opts.addr,
 	})
-	router := proxy.New(database, files, super, cfg.PreviewDomain, apex)
+	router := proxy.New(database, files, super, cfg.Preview.Domain, apex)
 
 	srv := &http.Server{
 		Addr:              opts.addr,
@@ -183,7 +189,7 @@ func run(opts serveOptions) error {
 	}
 
 	go func() {
-		log.Printf("listening on %s (previews at *.%s)", opts.addr, cfg.PreviewDomain)
+		log.Printf("listening on %s (previews at %s)", opts.addr, cfg.Preview.URL("<sha>", "<repo>"))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}

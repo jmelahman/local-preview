@@ -176,7 +176,10 @@ resource "aws_instance" "server" {
   vpc_security_group_ids      = [aws_security_group.server.id]
   associate_public_ip_address = true
 
-  user_data = templatefile("${path.module}/user-data.sh.tftpl", {
+  # Gzipped, which cloud-init unpacks itself: EC2 caps user data at 16 KiB and
+  # local_manifests/compose_stacks are embedded in it, so plain text runs out
+  # of room after a couple of repos.
+  user_data_base64 = base64gzip(templatefile("${path.module}/user-data.sh.tftpl", {
     aws_region      = data.aws_region.current.name
     compose_stacks  = var.compose_stacks
     compose_version = var.docker_compose_version
@@ -189,7 +192,7 @@ resource "aws_instance" "server" {
     preview_domain  = var.preview_domain
     server_args     = join(" ", var.extra_server_args)
     webhook_ssm     = var.github_webhook_secret_ssm_parameter == null ? "" : var.github_webhook_secret_ssm_parameter
-  })
+  }))
 
   # The image is baked into the unit file that user_data writes, so an image
   # bump only takes effect if the instance is rebuilt. The data volume is a

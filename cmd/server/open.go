@@ -30,8 +30,11 @@ func openCmd() *cobra.Command {
 			if len(args) == 1 {
 				ref = args[0]
 			}
-			return runOpen(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
-				repoFlag, ref, printOnly)
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			return runOpen(cmd.Context(), url, cmd.OutOrStdout(), repoFlag, ref, printOnly)
 		},
 	}
 	addServerFlag(cmd, &serverURL)

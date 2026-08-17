@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,6 +31,7 @@ import (
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/build"
+	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/proxy"
@@ -103,6 +103,13 @@ type Options struct {
 	// PreviewDomain is the base domain previews are served under. Defaults
 	// to "preview.localhost".
 	PreviewDomain string
+	// PreviewBaseURL is the public base URL of previews, e.g.
+	// "https://preview.example.com". Set it when the embedding server sits
+	// behind a TLS-terminating proxy: its scheme, host, and port replace the
+	// http:// and the listen port that Addr and PreviewDomain imply, which
+	// are only right when clients reach the server directly. It supersedes
+	// PreviewDomain; setting both to different hosts is an error. Optional.
+	PreviewBaseURL string
 	// DBPath overrides the SQLite location; ":memory:" is allowed (deploy
 	// history becomes ephemeral; artifacts still use DataDir).
 	DBPath string
@@ -223,6 +230,9 @@ type Orchestrator struct {
 	watcher  *watch.Watcher
 	sweeper  *retain.Sweeper
 	stop     context.CancelFunc
+	// previewBase is the resolved public address space of previews, from
+	// Options' PreviewDomain/PreviewBaseURL/Addr.
+	previewBase config.PreviewBase
 	// dbPath is the SQLite location actually opened, so storage reporting
 	// sizes the real database rather than a default that may not exist.
 	dbPath string
@@ -257,9 +267,11 @@ func New(opts Options) (*Orchestrator, error) {
 	if opts.DataDir == "" {
 		return nil, fmt.Errorf("orchestrator: DataDir is required")
 	}
-	if opts.PreviewDomain == "" {
-		opts.PreviewDomain = "preview.localhost"
+	previewBase, err := config.ResolvePreviewBase(opts.PreviewDomain, opts.PreviewBaseURL, opts.Addr)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: %w", err)
 	}
+	opts.PreviewDomain = previewBase.Domain
 	if opts.BuildConcurrency <= 0 {
 		opts.BuildConcurrency = 2
 	}
@@ -320,16 +332,17 @@ func New(opts Options) (*Orchestrator, error) {
 	}
 
 	return &Orchestrator{
-		opts:     opts,
-		database: database,
-		files:    files,
-		git:      gitMgr,
-		super:    super,
-		queue:    queue,
-		watcher:  watcher,
-		sweeper:  sweeper,
-		stop:     cancel,
-		dbPath:   dbPath,
+		opts:        opts,
+		database:    database,
+		files:       files,
+		git:         gitMgr,
+		super:       super,
+		queue:       queue,
+		watcher:     watcher,
+		sweeper:     sweeper,
+		stop:        cancel,
+		dbPath:      dbPath,
+		previewBase: previewBase,
 	}, nil
 }
 
@@ -688,9 +701,5 @@ func (o *Orchestrator) ArtifactFilePath(deployID int64, artifact, file string) (
 }
 
 func (o *Orchestrator) previewURL(row db.DeployRow) string {
-	host := fmt.Sprintf("%s-%s.%s", row.ShortSHA, row.RepoName, o.opts.PreviewDomain)
-	if _, port, err := net.SplitHostPort(o.opts.Addr); err == nil && port != "" && port != "80" {
-		host += ":" + port
-	}
-	return "http://" + host + "/"
+	return o.previewBase.URL(row.ShortSHA, row.RepoName)
 }

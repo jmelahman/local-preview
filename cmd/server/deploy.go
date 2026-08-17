@@ -33,7 +33,11 @@ func deployCmd() *cobra.Command {
 			if len(args) == 1 {
 				ref = args[0]
 			}
-			return runDeploy(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			return runDeploy(cmd.Context(), url, cmd.OutOrStdout(),
 				repoFlag, ref, rebuild, noWait, asJSON)
 		},
 	}
@@ -55,7 +59,11 @@ func deployCmd() *cobra.Command {
 			if len(args) == 1 {
 				listFilter.Query = args[0]
 			}
-			return runDeployList(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(), listFilter)
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			return runDeployList(cmd.Context(), url, cmd.OutOrStdout(), listFilter)
 		},
 	}
 	list.Flags().StringVar(&listFilter.Repo, "repo", "", "Only deploys of this repo")
@@ -72,7 +80,11 @@ func deployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			d, err := client.New(resolveURL(cmd, serverURL), nil).GetDeploy(cmd.Context(), id)
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			d, err := client.New(url, nil).GetDeploy(cmd.Context(), id)
 			if err != nil {
 				return err
 			}
@@ -91,7 +103,11 @@ func deployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c := client.New(resolveURL(cmd, serverURL), nil)
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			c := client.New(url, nil)
 			if !runLog {
 				if follow || cmd.Flags().Changed("side") {
 					return fmt.Errorf("--follow and --side apply to the run log; add --run")
@@ -119,7 +135,11 @@ func deployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDeployStats(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(), id)
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			return runDeployStats(cmd.Context(), url, cmd.OutOrStdout(), id)
 		},
 	}
 
@@ -135,7 +155,11 @@ func deployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			d, err := client.New(resolveURL(cmd, serverURL), nil).StopDeploy(cmd.Context(), id)
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			d, err := client.New(url, nil).StopDeploy(cmd.Context(), id)
 			if err != nil {
 				return err
 			}
@@ -156,7 +180,11 @@ func deployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := client.New(resolveURL(cmd, serverURL), nil).DeleteDeploy(cmd.Context(), id); err != nil {
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			if err := client.New(url, nil).DeleteDeploy(cmd.Context(), id); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "deleted deploy %d\n", id)

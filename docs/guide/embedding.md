@@ -41,6 +41,13 @@ Notes:
 - Worktree branches of a registered repo are deployable with no extra
   plumbing: worktrees share the repo's object store, so the orchestrator's
   mirror fetches them like any branch.
+- `Deploy.PreviewURL` is built from `Options.Addr` and
+  `Options.PreviewDomain`, which assumes clients reach your server directly.
+  If it sits behind a TLS-terminating proxy, set
+  `Options.PreviewBaseURL: "https://preview.example.com"` — its scheme, host,
+  and port replace the `http://` and listen port that would otherwise be
+  guessed. It supersedes `PreviewDomain`; setting both to different hosts is
+  an error from `New`.
 - `Close()` stops build workers and every supervised backend; previews
   never outlive the embedding process.
 

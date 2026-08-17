@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jmelahman/local-preview/internal/db"
 )
 
 const fixtureManifest = `
@@ -214,5 +216,41 @@ func TestEmbeddedLifecycle(t *testing.T) {
 func TestNewValidation(t *testing.T) {
 	if _, err := New(Options{}); err == nil {
 		t.Fatal("missing DataDir should error")
+	}
+	// Two different answers to "what host are previews on?".
+	_, err := New(Options{
+		DataDir:        t.TempDir(),
+		DBPath:         ":memory:",
+		PreviewDomain:  "preview.example.com",
+		PreviewBaseURL: "https://previews.other.com",
+	})
+	if err == nil {
+		t.Fatal("conflicting PreviewDomain and PreviewBaseURL should error")
+	}
+}
+
+// PreviewBaseURL replaces the scheme and port that Addr implies — the case
+// of an embedding server behind a TLS-terminating proxy.
+func TestPreviewBaseURLOption(t *testing.T) {
+	o, err := New(Options{
+		DataDir:           filepath.Join(t.TempDir(), "previews"),
+		DBPath:            ":memory:",
+		Addr:              ":8080",
+		PreviewBaseURL:    "https://preview.example.com",
+		PollInterval:      -1,
+		RetentionInterval: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { o.Close() })
+
+	got := o.previewURL(db.DeployRow{Deploy: db.Deploy{ShortSHA: "abc1234"}, RepoName: "demo"})
+	if want := "https://abc1234-demo.preview.example.com/"; got != want {
+		t.Errorf("previewURL = %q, want %q", got, want)
+	}
+	// The same host must route: WrapHost matches on the derived domain.
+	if o.opts.PreviewDomain != "preview.example.com" {
+		t.Errorf("PreviewDomain = %q, want the base URL's host", o.opts.PreviewDomain)
 	}
 }

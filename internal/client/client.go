@@ -86,6 +86,26 @@ func New(base string, hc *http.Client) *Client {
 	return &Client{base: strings.TrimRight(base, "/"), http: hc}
 }
 
+// Health mirrors the API's health shape.
+type Health struct {
+	Status        string `json:"status"`
+	Version       string `json:"version"`
+	PreviewDomain string `json:"preview_domain"`
+}
+
+// GetHealth pings the server and returns what it reports about itself.
+func (c *Client) GetHealth(ctx context.Context) (Health, error) {
+	raw, err := c.do(ctx, http.MethodGet, "/api/health", nil)
+	if err != nil {
+		return Health{}, err
+	}
+	var h Health
+	if err := json.Unmarshal(raw, &h); err != nil {
+		return Health{}, fmt.Errorf("decode health: %w", err)
+	}
+	return h, nil
+}
+
 // CreateRepo registers a repo, optionally watched from the start. backfill
 // deploys the branch tips it already has, rather than only what moves after
 // registration.

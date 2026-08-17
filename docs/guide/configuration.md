@@ -1,7 +1,8 @@
 # Configuration
 
 There isn't much to configure. `preview serve` takes a few flags, each with
-an environment-variable fallback.
+an environment-variable fallback; the client subcommands need to know which
+server to talk to.
 
 ## Data directory
 
@@ -24,6 +25,45 @@ Inside it:
 | `logs/<repo>/` | Build logs (per artifact hash) and process run logs |
 | `tmp/` | Build scratch space; swept at startup |
 
+## CLI configuration
+
+The client subcommands (`preview open`, `preview deploy`, `preview repo`, …)
+default to a server at `http://localhost:8080`. Point them somewhere else
+persistently with:
+
+```bash
+preview configure https://preview.example.com
+```
+
+That writes `<config>/config.toml` (same `<config>` as [local
+manifests](#local-manifests) below):
+
+```toml
+server = "https://preview.example.com"
+```
+
+`preview configure --show` prints the file's path, the stored server, and
+which source actually wins; `preview configure --unset` clears it. The file
+holds client settings only — the server's own configuration is the flags and
+environment variables above, not this file.
+
+Each subcommand resolves its server in this order:
+
+1. `--server`
+2. `$PREVIEW_URL`
+3. `server` in `<config>/config.toml`
+4. `http://localhost:8080`
+
+The config file is what makes a remote instance work from a git hook:
+`preview install-hook` writes a hook that runs a bare `preview deploy`, which
+picks up the configured server without depending on the environment of
+whatever shell or GUI client made the commit.
+
+Unknown keys and a `server` without an `http://`/`https://` scheme are
+startup errors rather than ignored settings — a config file that quietly
+falls back to localhost would let commands "succeed" against the wrong
+instance.
+
 ## Local manifests
 
 Repos that can't carry a `preview.toml` upstream can be onboarded with an
@@ -45,6 +85,7 @@ for lookup order and caching semantics.
 | `--data-dir` | (XDG) | Override the data directory |
 | `--in-memory` | `false` | Ephemeral in-memory SQLite; deploy history is discarded on shutdown (artifacts still use the data directory) |
 | `--preview-domain` | `preview.localhost` | Base domain previews are served under |
+| `--preview-base-url` | (derived from `--preview-domain` and `--addr`) | Public base URL of previews, e.g. `https://preview.example.com`. Sets the scheme, domain, and port of the URLs the server hands out — see [hosting behind a proxy](#hosting-behind-a-proxy) |
 | `--build-concurrency` | `2` | Number of deploys built in parallel |
 | `--max-warm` | `8` | Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (`0` = unlimited) |
 | `--poll-interval` | `1m` | How often [watched repos](/guide/triggers#watched-repos) are fetched for new commits (`0` disables watching) |
@@ -55,10 +96,11 @@ for lookup order and caching semantics.
 | Variable | Used by | Description |
 | --- | --- | --- |
 | `PREVIEW_DATA_DIR` | `preview serve` | Data directory override |
-| `PREVIEW_CONFIG_DIR` | `preview serve` | Config directory override (local manifests live in `manifests/` under it) |
+| `PREVIEW_CONFIG_DIR` | `preview serve`, CLI subcommands | Config directory override (`config.toml` sits directly under it, local manifests in `manifests/`) |
 | `PREVIEW_DOMAIN` | `preview serve` | Preview base domain (an explicit `--preview-domain` flag wins) |
+| `PREVIEW_BASE_URL` | `preview serve` | Public base URL of previews (an explicit `--preview-base-url` flag wins). Not to be confused with `PREVIEW_URL`, which is a client setting |
 | `PREVIEW_GITHUB_WEBHOOK_SECRET` | `preview serve` | GitHub webhook shared secret (an explicit `--github-webhook-secret` flag wins) |
-| `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins) |
+| `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins; this in turn beats the config file) |
 | `PREVIEW_BACKEND` | `web/` dev server | Backend `host:port` the Vite proxy targets |
 
 ## Docker requirements
@@ -141,3 +183,44 @@ default `preview.localhost` needs no DNS setup: browsers resolve any
 `*.<domain>` (plain `localhost`, raw IPs) are served the dashboard. To host
 previews under a real domain, point a wildcard DNS record at the server and
 set `--preview-domain` accordingly.
+
+## Hosting behind a proxy
+
+The server hands out preview URLs — in `preview open`, `preview deploy`, the
+dashboard, and the API's `preview_url` field. By default it builds them from
+its own listen address: scheme `http`, port from `--addr`. That's right only
+when browsers reach the server directly. Behind a TLS-terminating reverse
+proxy the guess is wrong twice over: the scheme is really `https`, and the
+public port is the proxy's, not `:8080`.
+
+`--preview-base-url` states the public answer directly:
+
+```bash
+preview serve --addr :8080 --preview-base-url https://preview.example.com
+```
+
+Previews are then `https://<sha-prefix>-<repo>.preview.example.com/`, whatever
+the server listens on. The URL supplies all three parts — scheme, domain, and
+port (omitted when it's the scheme's default) — so it supersedes
+`--preview-domain`; setting both to different hosts is a startup error rather
+than a silent winner.
+
+The full checklist for a hosted instance:
+
+- a wildcard DNS record for `*.preview.example.com` pointing at the proxy,
+  plus the apex `preview.example.com` for the dashboard;
+- a wildcard TLS certificate covering `*.preview.example.com` (previews are
+  one label deep, so a single wildcard is enough);
+- the proxy forwarding the original `Host` header — preview routing is
+  entirely Host-based;
+- `--preview-base-url` on the server, so generated URLs match what the proxy
+  actually serves;
+- `preview configure https://preview.example.com` on each client, so the CLI
+  talks to it.
+
+::: warning
+The API has no authentication. Anything that can reach it can register
+repositories and run their build and run commands on the host. A
+publicly-routable instance needs authentication at the proxy — SSO, mTLS, or
+an IP allowlist — in front of both the dashboard and `/api/`.
+:::

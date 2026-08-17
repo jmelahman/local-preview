@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"maps"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -63,8 +62,6 @@ type Deps struct {
 	// GitHubWebhookSecret validates X-Hub-Signature-256 on webhook
 	// deliveries; empty disables POST /api/webhooks/github.
 	GitHubWebhookSecret string
-	// Addr is the server's listen address, used to construct preview URLs.
-	Addr string
 }
 
 // NewMux returns the apex-host handler: API routes plus the dashboard SPA.
@@ -96,12 +93,12 @@ func NewMux(d Deps) *http.ServeMux {
 
 // handleHealth reports liveness plus the runtime facts the dashboard can't
 // know on its own — notably the preview base domain, which is fixed at
-// startup by --preview-domain/$PREVIEW_DOMAIN.
+// startup by --preview-domain/--preview-base-url.
 func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":         "ok",
 		"version":        d.Build.Version,
-		"preview_domain": d.Config.PreviewDomain,
+		"preview_domain": d.Config.Preview.Domain,
 	})
 }
 
@@ -344,14 +341,9 @@ func (d Deps) deployJSON(row db.DeployRow) deployJSON {
 	return out
 }
 
-// previewURL builds http://<short>-<repo>.<domain>[:port]/ from the listen
-// address.
+// previewURL builds the public URL of a deploy's preview.
 func (d Deps) previewURL(row db.DeployRow) string {
-	host := fmt.Sprintf("%s-%s.%s", row.ShortSHA, row.RepoName, d.Config.PreviewDomain)
-	if _, port, err := net.SplitHostPort(d.Addr); err == nil && port != "" && port != "80" {
-		host += ":" + port
-	}
-	return "http://" + host + "/"
+	return d.Config.Preview.URL(row.ShortSHA, row.RepoName)
 }
 
 func (d Deps) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {

@@ -2,7 +2,8 @@
 
 The binary is both the server and a client for it. Client subcommands talk to
 a running `preview serve` over HTTP; point them at a non-default server with
-`--server` or `$PREVIEW_URL`.
+`--server`, `$PREVIEW_URL`, or — persistently — [`preview
+configure`](#preview-configure).
 
 ## `preview serve`
 
@@ -14,6 +15,7 @@ Start the orchestrator.
 | `--data-dir` | (XDG) | Override the data directory |
 | `--in-memory` | `false` | Ephemeral in-memory SQLite |
 | `--preview-domain` | `preview.localhost` | Base domain previews are served under |
+| `--preview-base-url` | (derived) | Public base URL of previews, e.g. `https://preview.example.com` — sets the scheme, domain, and port of generated preview URLs when the server sits behind a proxy |
 | `--build-concurrency` | `2` | Number of deploys built in parallel |
 | `--poll-interval` | `1m` | How often watched repos are fetched for new commits (`0` disables watching) |
 | `--github-webhook-secret` | `$PREVIEW_GITHUB_WEBHOOK_SECRET` | Shared secret validating GitHub webhook deliveries (empty disables the endpoint) |
@@ -70,6 +72,37 @@ command composes with scripts even when no browser is around.
 Exits non-zero when the matched deploy isn't ready — still building, failed,
 or evicted — with a hint at the follow-up command (`preview deploy`,
 `preview deploy logs`).
+
+## `preview configure`
+
+Store which server the client subcommands talk to, so `preview open`,
+`preview deploy`, and friends reach a remote instance without `--server` on
+every invocation:
+
+```bash
+preview configure https://preview.example.com
+```
+
+The setting is written to the [CLI config
+file](/guide/configuration#cli-configuration) and applies to every shell —
+including the git hooks installed by `preview install-hook`, which run
+`preview deploy` with no flags of their own. With no URL argument the
+command prompts for one, offering the current value as the default. After
+saving, it pings the server and reports its version and preview domain; an
+unreachable server is a warning, not a failure, so you can configure the CLI
+before the server is up.
+
+| Flag | Description |
+| --- | --- |
+| `--show` | Print the config file's path, the stored server, and which source the effective server comes from |
+| `--unset` | Remove the stored server, falling back to `http://localhost:8080` |
+
+Resolution order for every client subcommand, first match winning:
+
+1. `--server`
+2. `$PREVIEW_URL`
+3. the config file's `server`
+4. `http://localhost:8080`
 
 ## `preview install-hook`
 

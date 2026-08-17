@@ -31,7 +31,11 @@ func repoCmd() *cobra.Command {
 			"(a local path or clone URL) and serves previews at <sha>-<name>.<domain>.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoCreate(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			return runRepoCreate(cmd.Context(), url, cmd.OutOrStdout(),
 				args[0], source, createWatch, createBranches, createBackfill)
 		},
 	}
@@ -57,7 +61,11 @@ func repoCmd() *cobra.Command {
 			if cmd.Flags().Changed("branches") {
 				branches = &watchBranches
 			}
-			return runRepoWatch(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			return runRepoWatch(cmd.Context(), url, cmd.OutOrStdout(),
 				args[0], true, branches, watchBackfill)
 		},
 	}
@@ -69,7 +77,11 @@ func repoCmd() *cobra.Command {
 		Short: "Stop watching a repository",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoWatch(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			return runRepoWatch(cmd.Context(), url, cmd.OutOrStdout(),
 				args[0], false, nil, false)
 		},
 	}
@@ -78,7 +90,11 @@ func repoCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List registered repositories",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoList(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout())
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			return runRepoList(cmd.Context(), url, cmd.OutOrStdout())
 		},
 	}
 
@@ -89,7 +105,11 @@ func repoCmd() *cobra.Command {
 			"deploys, artifacts, state directories, build logs, and mirror clone.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoDelete(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(), args[0])
+			url, err := resolveURL(cmd, serverURL)
+			if err != nil {
+				return err
+			}
+			return runRepoDelete(cmd.Context(), url, cmd.OutOrStdout(), args[0])
 		},
 	}
 
