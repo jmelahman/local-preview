@@ -63,3 +63,11 @@ __pycache__/
 # release artifacts
 /app
 bun.lock
+
+# Terraform. The lock file stays out too: examples/terraform is consumed as a
+# module, so consumers' own lock files are what apply.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars

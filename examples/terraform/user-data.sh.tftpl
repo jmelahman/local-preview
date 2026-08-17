@@ -1,0 +1,84 @@
+#!/bin/bash
+# Boots the local-preview orchestrator as a docker-managed systemd service.
+# Rendered by Terraform: $${...} is shell, $${} escapes template interpolation.
+set -euxo pipefail
+
+dnf install -y docker
+systemctl enable --now docker
+
+# --- data volume -----------------------------------------------------------
+# Nitro instances remap device names, so address the volume by its stable
+# by-id symlink (the volume id with the dash stripped) rather than /dev/sdf.
+DEVICE="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${replace(data_volume_id, "-", "")}"
+for _ in $(seq 1 60); do
+  [ -e "$DEVICE" ] && break
+  sleep 2
+done
+
+# Format only when there is no filesystem — this script re-runs on rebuild,
+# and reformatting would discard every artifact and state dir.
+if ! blkid "$DEVICE"; then
+  mkfs -t xfs "$DEVICE"
+fi
+
+mkdir -p "${data_dir}"
+UUID=$(blkid -s UUID -o value "$DEVICE")
+if ! grep -q "$UUID" /etc/fstab; then
+  echo "UUID=$UUID ${data_dir} xfs defaults,nofail 0 2" >>/etc/fstab
+fi
+mount -a
+
+# --- webhook secret --------------------------------------------------------
+# Pulled at boot instead of being passed as a Terraform variable, which would
+# persist it in state; the env file keeps it out of `ps` too.
+touch /etc/local-preview.env
+chmod 600 /etc/local-preview.env
+%{ if webhook_ssm != "" ~}
+SECRET=$(aws ssm get-parameter --region ${aws_region} \
+  --name '${webhook_ssm}' --with-decryption --query Parameter.Value --output text)
+printf 'PREVIEW_GITHUB_WEBHOOK_SECRET=%s\n' "$SECRET" >/etc/local-preview.env
+chmod 600 /etc/local-preview.env
+%{ endif ~}
+
+# --- service ---------------------------------------------------------------
+# Runs as container root: it needs the docker socket for manifest `image`
+# build steps (root-equivalent on the daemon regardless), and the image's
+# default nonroot user cannot bind a privileged port.
+#
+# Host networking, not a port publish: `run_image` preview processes publish
+# their ports on the docker HOST's loopback, which is only this server's
+# loopback while it shares the host network namespace.
+#
+# The data dir is bind-mounted at the same absolute path it has on the host,
+# because build containers are started through the host daemon and it
+# resolves bind sources against its own filesystem.
+cat >/etc/systemd/system/local-preview.service <<EOF
+[Unit]
+Description=local-preview orchestrator
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+ExecStartPre=-/usr/bin/docker rm -f local-preview
+ExecStartPre=/usr/bin/docker pull ${image}
+ExecStart=/usr/bin/docker run --rm --name local-preview \\
+  --network host \\
+  --user 0:0 \\
+  --env-file /etc/local-preview.env \\
+  -e PREVIEW_DATA_DIR=${data_dir} \\
+  -e PREVIEW_DOMAIN=${preview_domain} \\
+  -v /var/run/docker.sock:/var/run/docker.sock \\
+  -v ${data_dir}:${data_dir} \\
+  ${image} \\
+  --addr 0.0.0.0:${http_port} ${server_args}
+ExecStop=/usr/bin/docker stop local-preview
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now local-preview.service
