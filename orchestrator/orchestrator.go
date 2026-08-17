@@ -401,11 +401,21 @@ func (o *Orchestrator) DeleteRepo(name string) error {
 }
 
 // SetRepoWatch enables or disables watching for a registered repo: watched
-// repos are polled every PollInterval and new branch tips deploy
+// repos are polled every PollInterval and branch tips that move deploy
 // automatically. branches narrows which branches with comma-separated globs
-// ("" = all). Enabling deploys the current tip of every matched branch that
-// has no deploy yet.
+// ("" = all). Enabling records the tips that already exist without deploying
+// them; SetRepoWatchBackfill deploys those too.
 func (o *Orchestrator) SetRepoWatch(name string, watchOn bool, branches string) (Repo, error) {
+	return o.setRepoWatch(name, watchOn, branches, false)
+}
+
+// SetRepoWatchBackfill is SetRepoWatch that also deploys every matching
+// branch tip the repo already has, not just the ones that move from here.
+func (o *Orchestrator) SetRepoWatchBackfill(name string, watchOn bool, branches string) (Repo, error) {
+	return o.setRepoWatch(name, watchOn, branches, true)
+}
+
+func (o *Orchestrator) setRepoWatch(name string, watchOn bool, branches string, backfill bool) (Repo, error) {
 	canon, err := watch.ValidatePatterns(branches)
 	if err != nil {
 		return Repo{}, err
@@ -417,7 +427,7 @@ func (o *Orchestrator) SetRepoWatch(name string, watchOn bool, branches string) 
 	if err != nil {
 		return Repo{}, err
 	}
-	row, err := o.database.SetRepoWatch(repo.ID, watchOn, canon)
+	row, err := o.database.SetRepoWatch(repo.ID, watchOn, canon, backfill)
 	if err != nil {
 		return Repo{}, err
 	}

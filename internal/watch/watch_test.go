@@ -41,9 +41,16 @@ func commitFile(t *testing.T, dir, name, content, msg string) string {
 
 // newWatchFixture builds a source repo with a main branch, registers it
 // (watched, with the given branch filter), and returns everything a poll
-// needs. The queue's workers are never started, so requested deploys stay
-// queued — these tests assert on rows, not builds.
+// needs. Watching is enabled with backfill, so the tips that already exist
+// are fair game — tests that care about the baseline turn it off. The
+// queue's workers are never started, so requested deploys stay queued —
+// these tests assert on rows, not builds.
 func newWatchFixture(t *testing.T, branches string) (*Watcher, db.Repo, string) {
+	t.Helper()
+	return newWatchFixtureOpts(t, branches, true)
+}
+
+func newWatchFixtureOpts(t *testing.T, branches string, backfill bool) (*Watcher, db.Repo, string) {
 	t.Helper()
 	src := t.TempDir()
 	runTestGit(t, src, "init", "-q", "-b", "main")
@@ -72,7 +79,7 @@ func newWatchFixture(t *testing.T, branches string) (*Watcher, db.Repo, string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repo, err = database.SetRepoWatch(repo.ID, true, branches); err != nil {
+	if repo, err = database.SetRepoWatch(repo.ID, true, branches, backfill); err != nil {
 		t.Fatal(err)
 	}
 	return New(database, gitMgr, queue, DefaultInterval), repo, src
@@ -256,9 +263,52 @@ func TestPollHonorsBranchFilter(t *testing.T) {
 	}
 }
 
+func TestPollBaselinesExistingTips(t *testing.T) {
+	w, repo, src := newWatchFixtureOpts(t, "", false)
+	ctx := context.Background()
+
+	// Branches that predate watching are recorded, not deployed.
+	runTestGit(t, src, "checkout", "-qb", "old-feature")
+	commitFile(t, src, "b.txt", "two", "old work")
+	runTestGit(t, src, "checkout", "-q", "main")
+	w.PollAll(ctx)
+	if rows, _ := w.db.ListDeploys(db.DeployFilter{}); len(rows) != 0 {
+		t.Fatalf("baseline poll deployed %d row(s): %+v", len(rows), rows)
+	}
+	base, err := w.db.WatchBaseline(repo.ID)
+	if err != nil || len(base) != 2 {
+		t.Fatalf("baseline = %v, %v; want both tips", base, err)
+	}
+
+	// A tip that moves afterwards is a change, and deploys.
+	sha := commitFile(t, src, "c.txt", "three", "new work")
+	w.PollAll(ctx)
+	got := deploysByBranch(t, w)
+	if len(got) != 1 || got["main"] != sha {
+		t.Fatalf("post-baseline deploys = %v, want main@%s alone", got, sha)
+	}
+
+	// main's old tip has left the baseline with it, so the entries drain as
+	// the repo moves on.
+	if base, _ = w.db.WatchBaseline(repo.ID); len(base) != 1 {
+		t.Fatalf("baseline = %v, want only the untouched branch", base)
+	}
+}
+
+func TestPollBackfillDeploysExistingTips(t *testing.T) {
+	w, repo, _ := newWatchFixtureOpts(t, "", true)
+	w.PollAll(context.Background())
+	if rows, _ := w.db.ListDeploys(db.DeployFilter{}); len(rows) != 1 {
+		t.Fatalf("backfill deployed %d row(s), want the existing tip", len(rows))
+	}
+	if base, _ := w.db.WatchBaseline(repo.ID); len(base) != 0 {
+		t.Fatalf("backfill recorded a baseline: %v", base)
+	}
+}
+
 func TestPollSkipsUnwatchedRepos(t *testing.T) {
 	w, repo, _ := newWatchFixture(t, "")
-	if _, err := w.db.SetRepoWatch(repo.ID, false, ""); err != nil {
+	if _, err := w.db.SetRepoWatch(repo.ID, false, "", false); err != nil {
 		t.Fatal(err)
 	}
 	w.PollAll(context.Background())

@@ -163,10 +163,32 @@ func (w *Watcher) pollRepo(ctx context.Context, repo db.Repo) error {
 // reconcile requests deploys for matching tips that lack one and, when
 // evict is set, evicts deploys unreachable from the tips. On success the
 // pass state is cached for quiet polls.
+//
+// A repo that has just started being watched is baselined instead: its
+// current tips are recorded and none of them deploy. "Has no deploy row" is
+// otherwise true of every branch a repo has ever had, so the first poll
+// would deploy the entire branch list at once.
 func (w *Watcher) reconcile(ctx context.Context, repo db.Repo, tips []gitrepo.BranchTip, evict bool) error {
+	if !repo.WatchBaselined {
+		// Every branch, not just the matched ones: widening the globs later
+		// must not deploy tips that were already there.
+		shas := make([]string, len(tips))
+		for i, tip := range tips {
+			shas[i] = tip.SHA
+		}
+		if err := w.db.SetWatchBaseline(repo.ID, shas); err != nil {
+			return err
+		}
+		log.Printf("watch: %s: baselined %d branch tip(s); deploying changes from here", repo.Name, len(tips))
+		repo.WatchBaselined = true
+	}
+	baseline, err := w.db.WatchBaseline(repo.ID)
+	if err != nil {
+		return err
+	}
 	patterns := SplitPatterns(repo.WatchBranches)
 	for _, tip := range tips {
-		if !MatchBranch(patterns, tip.Branch) {
+		if !MatchBranch(patterns, tip.Branch) || baseline[tip.SHA] {
 			continue
 		}
 		if _, err := w.db.GetDeployBySHA(repo.ID, tip.SHA); err == nil {
@@ -187,6 +209,11 @@ func (w *Watcher) reconcile(ctx context.Context, repo db.Repo, tips []gitrepo.Br
 		tipSHAs := make([]string, len(tips))
 		for i, tip := range tips {
 			tipSHAs[i] = tip.SHA
+		}
+		if len(baseline) > 0 {
+			if err := w.db.PruneWatchBaseline(repo.ID, tipSHAs); err != nil {
+				return err
+			}
 		}
 		n, err := w.queue.EvictUnreachable(ctx, repo, tipSHAs)
 		if err != nil {

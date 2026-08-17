@@ -86,11 +86,14 @@ func New(base string, hc *http.Client) *Client {
 	return &Client{base: strings.TrimRight(base, "/"), http: hc}
 }
 
-// CreateRepo registers a repo, optionally watched from the start.
-func (c *Client) CreateRepo(ctx context.Context, name, source string, watch bool, watchBranches string) (Repo, error) {
+// CreateRepo registers a repo, optionally watched from the start. backfill
+// deploys the branch tips it already has, rather than only what moves after
+// registration.
+func (c *Client) CreateRepo(ctx context.Context, name, source string, watch bool, watchBranches string, backfill bool) (Repo, error) {
 	body, err := json.Marshal(map[string]any{
 		"name": name, "source": source,
 		"watch": watch, "watch_branches": watchBranches,
+		"backfill": backfill,
 	})
 	if err != nil {
 		return Repo{}, err
@@ -120,11 +123,15 @@ func (c *Client) GetRepo(ctx context.Context, name string) (Repo, error) {
 }
 
 // SetRepoWatch enables or disables watching for a repo. branches == nil
-// leaves the stored branch filter unchanged.
-func (c *Client) SetRepoWatch(ctx context.Context, name string, watch bool, branches *string) (Repo, error) {
+// leaves the stored branch filter unchanged. backfill also deploys the
+// branch tips that already exist, rather than only what moves from here.
+func (c *Client) SetRepoWatch(ctx context.Context, name string, watch bool, branches *string, backfill bool) (Repo, error) {
 	payload := map[string]any{"watch": watch}
 	if branches != nil {
 		payload["watch_branches"] = *branches
+	}
+	if backfill {
+		payload["backfill"] = true
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

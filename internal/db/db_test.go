@@ -99,22 +99,73 @@ func TestRepoCRUD(t *testing.T) {
 	if r.Watch || r.WatchBranches != "" {
 		t.Fatalf("new repo should not be watched: %+v", r)
 	}
-	w, err := s.SetRepoWatch(r.ID, true, "main,release/*")
+	w, err := s.SetRepoWatch(r.ID, true, "main,release/*", false)
 	if err != nil || !w.Watch || w.WatchBranches != "main,release/*" {
 		t.Fatalf("SetRepoWatch = %+v, %v", w, err)
 	}
 	if got, _ := s.GetRepoByName("demo"); !got.Watch || got.WatchBranches != "main,release/*" {
 		t.Fatalf("watch not persisted: %+v", got)
 	}
-	if w, err = s.SetRepoWatch(r.ID, false, ""); err != nil || w.Watch || w.WatchBranches != "" {
+	if w, err = s.SetRepoWatch(r.ID, false, "", false); err != nil || w.Watch || w.WatchBranches != "" {
 		t.Fatalf("unwatch = %+v, %v", w, err)
 	}
-	if _, err := s.SetRepoWatch(999, true, ""); !errors.Is(err, ErrNotFound) {
+	if _, err := s.SetRepoWatch(999, true, "", false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("SetRepoWatch missing repo err = %v, want ErrNotFound", err)
 	}
 }
 
-const shaA = "aaaaaaa1111111111111111111111111111111111"
+func TestWatchBaseline(t *testing.T) {
+	s := newTestStore(t)
+	r, err := s.CreateRepo("demo", "/src", "/bare", RepoReady)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Switching watching on arms the baseline; backfill declines it.
+	if w, err := s.SetRepoWatch(r.ID, true, "", false); err != nil || w.WatchBaselined {
+		t.Fatalf("watch on = %+v, %v; want baseline armed", w, err)
+	}
+	if err := s.SetWatchBaseline(r.ID, []string{shaA, shaB}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetRepoByName("demo"); !got.WatchBaselined {
+		t.Fatalf("baseline capture not persisted: %+v", got)
+	}
+
+	// Editing the branch globs of an already-watched repo must not re-arm:
+	// tips it hasn't deployed yet would silently become unreachable.
+	if w, err := s.SetRepoWatch(r.ID, true, "main", false); err != nil || !w.WatchBaselined {
+		t.Fatalf("branch edit re-armed the baseline: %+v, %v", w, err)
+	}
+	if base, _ := s.WatchBaseline(r.ID); len(base) != 2 {
+		t.Fatalf("branch edit dropped the baseline: %v", base)
+	}
+
+	// A sha that is no longer a tip has done its job.
+	if err := s.PruneWatchBaseline(r.ID, []string{shaA}); err != nil {
+		t.Fatal(err)
+	}
+	if base, _ := s.WatchBaseline(r.ID); len(base) != 1 || !base[shaA] {
+		t.Fatalf("prune = %v, want %s alone", base, shaA)
+	}
+
+	// Unwatching drops it; watching again with backfill leaves nothing to
+	// hold deploys back.
+	if _, err := s.SetRepoWatch(r.ID, false, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if base, _ := s.WatchBaseline(r.ID); len(base) != 0 {
+		t.Fatalf("unwatch kept a baseline: %v", base)
+	}
+	if w, err := s.SetRepoWatch(r.ID, true, "", true); err != nil || !w.WatchBaselined {
+		t.Fatalf("backfill = %+v, %v; want no baseline armed", w, err)
+	}
+}
+
+const (
+	shaA = "aaaaaaa1111111111111111111111111111111111"
+	shaB = "bbbbbbb2222222222222222222222222222222222"
+)
 
 func TestDeployLifecycle(t *testing.T) {
 	s := newTestStore(t)
@@ -450,7 +501,7 @@ func TestMigrateAddsColumnsToExistingDB(t *testing.T) {
 	if d.Branch != "main" || d.AuthorName != "Ada" {
 		t.Fatalf("migrated columns not usable: %+v", d)
 	}
-	if r, err = s.SetRepoWatch(r.ID, true, "main"); err != nil || !r.Watch {
+	if r, err = s.SetRepoWatch(r.ID, true, "main", false); err != nil || !r.Watch {
 		t.Fatalf("migrated repos columns not usable: %+v, %v", r, err)
 	}
 }

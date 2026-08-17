@@ -63,6 +63,9 @@ func migrate(sqlDB *sql.DB) error {
 		{"backend_artifacts", "init_done_at", text},
 		{"repos", "watch", `INTEGER NOT NULL DEFAULT 0`},
 		{"repos", "watch_branches", text},
+		// 1, not 0: a repo watched before the column existed has already
+		// deployed every tip it was going to.
+		{"repos", "watch_baselined", `INTEGER NOT NULL DEFAULT 1`},
 		// 'ready', not 'cloning': rows that predate the column were created
 		// by the synchronous flow, which only inserted after a finished clone.
 		{"repos", "status", `TEXT NOT NULL DEFAULT 'ready'`},

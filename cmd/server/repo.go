@@ -23,6 +23,7 @@ func repoCmd() *cobra.Command {
 	var source string
 	var createWatch bool
 	var createBranches string
+	var createBackfill bool
 	create := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Register a repository for previews",
@@ -31,23 +32,25 @@ func repoCmd() *cobra.Command {
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRepoCreate(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
-				args[0], source, createWatch, createBranches)
+				args[0], source, createWatch, createBranches, createBackfill)
 		},
 	}
 	create.Flags().StringVar(&source, "source", "", "Local path or clone URL of the repository (required)")
 	create.Flags().BoolVar(&createWatch, "watch", false, "Watch the repo: poll for new commits and deploy them")
 	create.Flags().StringVar(&createBranches, "branches", "", "Branches to watch, as comma-separated globs (default: all)")
+	create.Flags().BoolVar(&createBackfill, "backfill", false, "Also deploy the branch tips that already exist, not just new commits")
 	_ = create.MarkFlagRequired("source")
 
 	var watchBranches string
+	var watchBackfill bool
 	watchCmd := &cobra.Command{
 		Use:   "watch <name>",
 		Short: "Poll a repository and deploy new branch tips automatically",
 		Long: "Enable watching: the server periodically fetches the repo and deploys\n" +
 			"the tip of every branch that gains commits. --branches narrows which\n" +
 			"branches with comma-separated globs (e.g. \"main,release/*\"); globs\n" +
-			"don't cross '/'. Enabling deploys the current tip of every matched\n" +
-			"branch that has no deploy yet.",
+			"don't cross '/'. Only commits pushed from here on deploy — pass\n" +
+			"--backfill to deploy the branch tips that already exist too.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var branches *string
@@ -55,10 +58,11 @@ func repoCmd() *cobra.Command {
 				branches = &watchBranches
 			}
 			return runRepoWatch(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
-				args[0], true, branches)
+				args[0], true, branches, watchBackfill)
 		},
 	}
 	watchCmd.Flags().StringVar(&watchBranches, "branches", "", "Branches to watch, as comma-separated globs (default: all)")
+	watchCmd.Flags().BoolVar(&watchBackfill, "backfill", false, "Also deploy the branch tips that already exist, not just new commits")
 
 	unwatch := &cobra.Command{
 		Use:   "unwatch <name>",
@@ -66,7 +70,7 @@ func repoCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRepoWatch(cmd.Context(), resolveURL(cmd, serverURL), cmd.OutOrStdout(),
-				args[0], false, nil)
+				args[0], false, nil, false)
 		},
 	}
 
@@ -101,9 +105,9 @@ func runRepoDelete(ctx context.Context, url string, out io.Writer, name string) 
 	return nil
 }
 
-func runRepoCreate(ctx context.Context, url string, out io.Writer, name, source string, watch bool, branches string) error {
+func runRepoCreate(ctx context.Context, url string, out io.Writer, name, source string, watch bool, branches string, backfill bool) error {
 	c := client.New(url, nil)
-	repo, err := c.CreateRepo(ctx, name, source, watch, branches)
+	repo, err := c.CreateRepo(ctx, name, source, watch, branches, backfill)
 	if err != nil {
 		return err
 	}
@@ -137,8 +141,8 @@ func runRepoCreate(ctx context.Context, url string, out io.Writer, name, source 
 	return nil
 }
 
-func runRepoWatch(ctx context.Context, url string, out io.Writer, name string, watch bool, branches *string) error {
-	repo, err := client.New(url, nil).SetRepoWatch(ctx, name, watch, branches)
+func runRepoWatch(ctx context.Context, url string, out io.Writer, name string, watch bool, branches *string, backfill bool) error {
+	repo, err := client.New(url, nil).SetRepoWatch(ctx, name, watch, branches, backfill)
 	if err != nil {
 		return err
 	}

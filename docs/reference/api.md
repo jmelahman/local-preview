@@ -33,7 +33,8 @@ Registers a repository: the server mirror-clones `source` (a local path or
 clone URL) **in the background** and responds immediately. `name` must be a
 lowercase DNS label — it becomes the subdomain segment. `watch` and
 `watch_branches` are optional and enable
-[watching](/guide/triggers#watched-repos) from the start.
+[watching](/guide/triggers#watched-repos) from the start; `backfill: true`
+additionally deploys the branch tips the repo already has.
 
 Request:
 
@@ -76,8 +77,13 @@ Returns all repos. `GET /api/repos/{name}` returns one (`404` if missing).
 
 Updates a repo's watch settings; fields absent from the body keep their
 current value. `watch: true` polls the repo every `--poll-interval` and
-deploys new branch tips; `watch_branches` narrows which branches as
+deploys branch tips as they move; `watch_branches` narrows which branches as
 comma-separated globs (`""` = all; globs don't cross `/`).
+
+Switching watching on starts from the repo's current state — the tips that
+already exist are recorded and not deployed. Send `backfill: true` to deploy
+those too. The field is ignored unless this request is what turns watching
+on, so changing `watch_branches` later never re-deploys existing tips.
 
 Request:
 

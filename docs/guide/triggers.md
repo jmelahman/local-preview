@@ -57,17 +57,22 @@ preview repo watch myapp --branches "main,release/*"
 preview repo create myapp --source <url> --watch    # watched from the start
 ```
 
-Watched repos are fetched every `--poll-interval` (default `1m`). Any
-matched branch tip without a deploy is deployed; a branch that advances gets
-a fresh preview while the old commits keep theirs. `--branches` takes
-comma-separated globs matched against the branch name (globs don't cross
-`/`, so `release/*` matches `release/1.0` but not `release/1.0/hotfix`).
+Watched repos are fetched every `--poll-interval` (default `1m`). A branch
+that advances gets a fresh preview while the old commits keep theirs.
+`--branches` takes comma-separated globs matched against the branch name
+(globs don't cross `/`, so `release/*` matches `release/1.0` but not
+`release/1.0/hotfix`).
 
-Note that enabling watch deploys the *current* tip of every matched branch
-that has no deploy yet — on a repo with many long-lived branches, narrow
-with `--branches` first. Content addressing keeps the cost down (unchanged
-sides of each commit are never rebuilt), but each distinct tip still builds
-once.
+Watching starts from where the repo is now: the first poll records the tips
+that already exist and deploys none of them, so a repo with hundreds of
+long-lived branches doesn't build hundreds of previews the moment you turn
+it on. Recorded tips deploy as soon as they move, like anything else.
+
+To deploy what's already there as well, ask for it:
+
+```bash
+preview repo watch myapp --backfill
+```
 
 The same poll cleans up in the other direction. Each fetch prunes branches
 deleted upstream, and any preview whose commit is no longer reachable from a

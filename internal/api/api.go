@@ -129,6 +129,9 @@ func (d Deps) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		Source        string `json:"source"`
 		Watch         bool   `json:"watch"`
 		WatchBranches string `json:"watch_branches"`
+		// Deploy the branch tips that already exist, rather than only what
+		// changes from now on.
+		Backfill bool `json:"backfill"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "invalid JSON body")
@@ -161,7 +164,7 @@ func (d Deps) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 	if req.Watch || branches != "" {
 		// Stored before the clone starts; the watcher skips non-ready repos
 		// and is kicked by the cloner once this one turns ready.
-		if repo, err = d.Store.SetRepoWatch(repo.ID, req.Watch, branches); err != nil {
+		if repo, err = d.Store.SetRepoWatch(repo.ID, req.Watch, branches, req.Backfill); err != nil {
 			internalError(w, "set repo watch", err)
 			return
 		}
@@ -185,6 +188,7 @@ func (d Deps) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Watch         *bool   `json:"watch"`
 		WatchBranches *string `json:"watch_branches"`
+		Backfill      bool    `json:"backfill"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "invalid JSON body")
@@ -204,7 +208,7 @@ func (d Deps) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	repo, err = d.Store.SetRepoWatch(repo.ID, watchOn, branches)
+	repo, err = d.Store.SetRepoWatch(repo.ID, watchOn, branches, req.Backfill)
 	if err != nil {
 		internalError(w, "set repo watch", err)
 		return

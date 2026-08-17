@@ -17,6 +17,11 @@ CREATE TABLE IF NOT EXISTS repos (
     -- branch tips deploy (comma-separated globs, empty = all branches).
     watch INTEGER NOT NULL DEFAULT 0,
     watch_branches TEXT NOT NULL DEFAULT '',
+    -- Whether watch_baselines holds this repo's pre-watch tips yet. Cleared
+    -- when watching is switched on, set by the poll that captures them. The
+    -- default suits rows that predate the column: their backfill already
+    -- happened, so there is nothing left to hold back.
+    watch_baselined INTEGER NOT NULL DEFAULT 1,
     -- Mirror-clone outcome: registration returns while the clone runs in the
     -- background, so a repo is deployable only once 'ready'. The default is
     -- 'ready' so rows migrated from before the column (always fully cloned)
@@ -59,6 +64,17 @@ CREATE TABLE IF NOT EXISTS deploys (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     UNIQUE (repo_id, sha),
     UNIQUE (repo_id, short_sha)
+);
+
+-- The branch tips a repo already had when watching was enabled. The watcher
+-- deploys a tip that has no deploy row, so without this the first poll would
+-- deploy every branch at once; a tip listed here is skipped until it moves.
+-- Rows are captured on the first poll (repos.watch_baselined) and dropped
+-- when watching is turned off.
+CREATE TABLE IF NOT EXISTS watch_baselines (
+    repo_id INTEGER NOT NULL REFERENCES repos(id),
+    sha TEXT NOT NULL,
+    PRIMARY KEY (repo_id, sha)
 );
 
 -- Used from M2 (branch alias routing); created now so the schema stays a

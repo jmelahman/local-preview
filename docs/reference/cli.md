@@ -24,7 +24,7 @@ Start the orchestrator.
 | --- | --- |
 | `preview repo create <name> --source <path-or-url>` | Register a repository (mirror clone); `--watch` and `--branches` enable [watching](/guide/triggers#watched-repos) from the start. The server clones in the background; the command reports clone progress and waits until the repo is ready (non-zero exit if the clone fails) |
 | `preview repo list` | List registered repositories with their clone status |
-| `preview repo watch <name>` | Poll the repo and deploy new branch tips automatically (`--branches` narrows which, as comma-separated globs) |
+| `preview repo watch <name>` | Poll the repo and deploy branch tips as they move (`--branches` narrows which, as comma-separated globs). Starts from the repo's current state; `--backfill` also deploys the tips it already has |
 | `preview repo unwatch <name>` | Stop watching |
 | `preview repo delete <name>` | Unregister a repository and delete its previews (deploys, artifacts, state, logs, mirror clone) |
 
