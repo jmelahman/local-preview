@@ -71,6 +71,28 @@ result, _ := orch.CollectGarbage() // sweep now; reports what it freed
 `Storage()` walks the data dir on each call, so surface it behind a user
 action rather than a poll.
 
+## Listing deploys
+
+`Deploys(repo)` returns everything. Because eviction keeps a deploy's row as
+history, that list grows for as long as the instance lives even while
+retention holds bytes flat — so any UI that polls it should page instead:
+
+```go
+page, _ := orch.DeploysPage(orchestrator.DeployQuery{
+    Repo:   "myapp",              // optional
+    Status: orchestrator.StatusReady, // optional; omit for every status
+    Limit:  25,
+    Offset: 50,
+})
+page.Deploys // this page, newest first
+page.Total   // every match, ignoring Limit/Offset
+```
+
+Paging is by descending deploy id, so a deploy created between two page
+fetches shifts the window rather than corrupting it. Filtering out
+`StatusEvicted` is how a caller shows only deploys that still have artifacts
+on disk.
+
 ## Custom manifest locations
 
 By default target repos declare themselves in `preview.toml`. Embedders can

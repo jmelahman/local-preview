@@ -181,6 +181,10 @@ type DeployFilter struct {
 	Query string
 	// Limit caps how many rows are returned (newest first); 0 means all.
 	Limit int
+	// Offset skips that many matching rows before returning any. Paging is
+	// by descending id, so a deploy created between two page fetches shifts
+	// the window rather than corrupting it.
+	Offset int
 }
 
 // IsDeployStatus reports whether s is one of the deploy build statuses.
@@ -192,10 +196,10 @@ func IsDeployStatus(s string) bool {
 	return false
 }
 
-// ListDeploys returns deploys newest first, narrowed by the filter.
-func (s *Store) ListDeploys(f DeployFilter) ([]DeployRow, error) {
-	q := `SELECT ` + deployColsD + `, r.name, ` + hasFeProcessExpr +
-		` FROM deploys d JOIN repos r ON r.id = d.repo_id`
+// deployWhere renders the filter's predicates. ListDeploys and CountDeploys
+// share it so a paged listing and its total can never disagree about what
+// the filter means.
+func deployWhere(f DeployFilter) (string, []any) {
 	where := []string{}
 	args := []any{}
 	if f.Repo != "" {
@@ -228,13 +232,42 @@ func (s *Store) ListDeploys(f DeployFilter) ([]DeployRow, error) {
 			OR instr(lower(d.author_email), lower(?)) > 0)`)
 		args = append(args, f.Query, f.Query, f.Query, f.Query, f.Query, f.Query)
 	}
-	if len(where) > 0 {
-		q += ` WHERE ` + strings.Join(where, ` AND `)
+	if len(where) == 0 {
+		return "", args
 	}
-	q += ` ORDER BY d.id DESC`
+	return ` WHERE ` + strings.Join(where, ` AND `), args
+}
+
+// CountDeploys returns how many deploys match the filter, ignoring Limit and
+// Offset — the total a paged listing pages through.
+func (s *Store) CountDeploys(f DeployFilter) (int, error) {
+	clause, args := deployWhere(f)
+	q := `SELECT COUNT(*) FROM deploys d JOIN repos r ON r.id = d.repo_id` + clause
+	var n int
+	if err := s.db.QueryRow(q, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// ListDeploys returns deploys newest first, narrowed by the filter.
+func (s *Store) ListDeploys(f DeployFilter) ([]DeployRow, error) {
+	clause, args := deployWhere(f)
+	q := `SELECT ` + deployColsD + `, r.name, ` + hasFeProcessExpr +
+		` FROM deploys d JOIN repos r ON r.id = d.repo_id` + clause +
+		` ORDER BY d.id DESC`
 	if f.Limit > 0 {
 		q += ` LIMIT ?`
 		args = append(args, f.Limit)
+	}
+	if f.Offset > 0 {
+		// SQLite only accepts OFFSET after a LIMIT; -1 is its idiom for
+		// "no limit", so an offset without one still skips correctly.
+		if f.Limit <= 0 {
+			q += ` LIMIT -1`
+		}
+		q += ` OFFSET ?`
+		args = append(args, f.Offset)
 	}
 	rows, err := s.db.Query(q, args...)
 	if err != nil {

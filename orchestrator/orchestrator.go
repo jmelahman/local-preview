@@ -501,7 +501,52 @@ func (o *Orchestrator) DeleteDeploy(id int64) error {
 	return nil
 }
 
-// Deploys lists deploys newest first, optionally filtered by repo name.
+// DeployQuery narrows and pages a deploy listing. The zero value matches
+// every deploy.
+type DeployQuery struct {
+	// Repo matches a registered repo name exactly.
+	Repo string
+	// Status matches a build status exactly — one of the Status* constants.
+	// Evicted deploys stay listed as history, so filtering them out is how a
+	// caller shows only deploys that still have artifacts on disk.
+	Status string
+	// Limit caps the page size; 0 means every match.
+	Limit int
+	// Offset skips that many matches. Rows are ordered by descending id.
+	Offset int
+}
+
+// DeployPage is one page of a listing plus the size of the whole result set,
+// so a caller can render "showing 1-25 of 118" without a second query.
+type DeployPage struct {
+	Deploys []Deploy
+	// Total counts every deploy matching the query, ignoring Limit/Offset.
+	Total int
+}
+
+// DeploysPage lists deploys newest first, narrowed and paged by q. Prefer it
+// over Deploys anywhere the deploy count grows without bound: evicted deploys
+// are kept as history, so a long-lived instance accumulates rows even while
+// retention holds bytes in check.
+func (o *Orchestrator) DeploysPage(q DeployQuery) (DeployPage, error) {
+	f := db.DeployFilter{Repo: q.Repo, Status: q.Status, Limit: q.Limit, Offset: q.Offset}
+	total, err := o.database.CountDeploys(f)
+	if err != nil {
+		return DeployPage{}, err
+	}
+	rows, err := o.database.ListDeploys(f)
+	if err != nil {
+		return DeployPage{}, err
+	}
+	out := make([]Deploy, len(rows))
+	for i, row := range rows {
+		out[i] = o.toDeploy(row)
+	}
+	return DeployPage{Deploys: out, Total: total}, nil
+}
+
+// Deploys lists every deploy newest first, optionally filtered by repo name.
+// DeploysPage is the paged form.
 func (o *Orchestrator) Deploys(repo string) ([]Deploy, error) {
 	rows, err := o.database.ListDeploys(db.DeployFilter{Repo: repo})
 	if err != nil {

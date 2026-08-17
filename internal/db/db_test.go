@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -289,6 +290,76 @@ func TestListDeploysLimit(t *testing.T) {
 	}
 	if got, err = s.ListDeploys(DeployFilter{}); err != nil || len(got) != 3 {
 		t.Fatalf("no limit = %d deploys (%v), want 3", len(got), err)
+	}
+}
+
+func TestListDeploysOffsetAndCount(t *testing.T) {
+	s := newTestStore(t)
+	r, err := s.CreateRepo("app", "/src/app", "/bare/app", RepoReady)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, 5)
+	for i := range ids {
+		d, err := s.CreateDeploy(r.ID, strings.Repeat(strconv.Itoa(i+1), 40), DeployMeta{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = d.ID
+		// Evict the oldest two so counts can be checked against a filter that
+		// doesn't match everything.
+		if i < 2 {
+			if err := s.SetDeployEvicted(d.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// Walking pages of 2 must cover every row exactly once, newest first.
+	var seen []int64
+	for off := 0; off < 5; off += 2 {
+		page, err := s.ListDeploys(DeployFilter{Limit: 2, Offset: off})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range page {
+			seen = append(seen, d.ID)
+		}
+	}
+	want := []int64{ids[4], ids[3], ids[2], ids[1], ids[0]}
+	if !slices.Equal(seen, want) {
+		t.Errorf("paged ids = %v, want %v", seen, want)
+	}
+
+	// An offset with no limit still skips — SQLite won't parse OFFSET without
+	// a LIMIT clause in front of it.
+	rest, err := s.ListDeploys(DeployFilter{Offset: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) != 2 || rest[0].ID != ids[1] {
+		t.Errorf("offset without limit = %d rows, want 2 starting at %d", len(rest), ids[1])
+	}
+
+	// Count ignores Limit/Offset but honors the predicates.
+	for name, tc := range map[string]struct {
+		f    DeployFilter
+		want int
+	}{
+		"all":           {DeployFilter{}, 5},
+		"paged":         {DeployFilter{Limit: 2, Offset: 2}, 5},
+		"evicted":       {DeployFilter{Status: DeployEvicted}, 2},
+		"evicted paged": {DeployFilter{Status: DeployEvicted, Limit: 1}, 2},
+		"other repo":    {DeployFilter{Repo: "nope"}, 0},
+		"queued":        {DeployFilter{Status: DeployQueued}, 3},
+	} {
+		got, err := s.CountDeploys(tc.f)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s: count = %d, want %d", name, got, tc.want)
+		}
 	}
 }
 
