@@ -64,6 +64,15 @@ server — the only way to widen access beyond a trusted range, given the server
 authenticates nothing itself. Non-browser clients (the CLI, webhook senders)
 can't complete a login redirect, so they need an exempted source range.
 
+## Manifests live on the server
+
+A [local manifest](/reference/preview-toml#local-manifests-repos-you-can-t-change)
+is read from the server's config dir, which on a shared host isn't a directory
+anyone edits by hand. The example takes them as a `local_manifests` map keyed
+by repo name and writes them out with the rest of the instance config, so
+onboarding a repo that can't carry a `preview.toml` is a Terraform change like
+any other.
+
 ## Toolchains on the server
 
 Build commands run on the server, not on the machine that triggered the

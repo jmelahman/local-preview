@@ -38,6 +38,9 @@ locals {
 
   scheme = var.enable_tls ? "https" : "http"
 
+  # $PREVIEW_CONFIG_DIR, bind-mounted read-only. Holds manifests/<repo>.toml.
+  config_dir = "/etc/local-preview"
+
   tags = merge({
     Name      = var.name
     ManagedBy = "terraform"
@@ -174,14 +177,16 @@ resource "aws_instance" "server" {
   associate_public_ip_address = true
 
   user_data = templatefile("${path.module}/user-data.sh.tftpl", {
-    aws_region     = data.aws_region.current.name
-    data_dir       = var.data_dir
-    data_volume_id = aws_ebs_volume.data.id
-    http_port      = var.http_port
-    image          = var.image
-    preview_domain = var.preview_domain
-    server_args    = join(" ", var.extra_server_args)
-    webhook_ssm    = var.github_webhook_secret_ssm_parameter == null ? "" : var.github_webhook_secret_ssm_parameter
+    aws_region      = data.aws_region.current.name
+    config_dir      = local.config_dir
+    data_dir        = var.data_dir
+    data_volume_id  = aws_ebs_volume.data.id
+    http_port       = var.http_port
+    image           = var.image
+    local_manifests = var.local_manifests
+    preview_domain  = var.preview_domain
+    server_args     = join(" ", var.extra_server_args)
+    webhook_ssm     = var.github_webhook_secret_ssm_parameter == null ? "" : var.github_webhook_secret_ssm_parameter
   })
 
   # The image is baked into the unit file that user_data writes, so an image

@@ -118,6 +118,26 @@ into the host, is the way to build real projects here. Backend `run` commands
 still execute inside the server's container unless the manifest sets
 `run_image`.
 
+## Manifests for repos that can't carry one
+
+A commit is normally built from its own `preview.toml`. When the upstream repo
+can't take one, put the manifest in `local_manifests` keyed by the registered
+repo name and the server falls back to it:
+
+```hcl
+local_manifests = {
+  my-app = file("${path.module}/manifests/my-app.toml")
+}
+```
+
+The file is the ordinary `preview.toml` schema. It is written to
+`/etc/local-preview/manifests/<name>.toml` by user_data, so editing one
+rebuilds the instance, and it appears in the cloud-init log — keep secrets out
+of it.
+
+An in-repo `preview.toml` always wins, so adding a manifest here is safe to
+leave in place after the repo grows its own.
+
 ## Webhook secret
 
 Set `github_webhook_secret_ssm_parameter` to the name of a SecureString

@@ -40,6 +40,20 @@ printf 'PREVIEW_GITHUB_WEBHOOK_SECRET=%s\n' "$SECRET" >/etc/local-preview.env
 chmod 600 /etc/local-preview.env
 %{ endif ~}
 
+# --- out-of-repo manifests -------------------------------------------------
+# Fallback manifests for repos whose commits carry no preview.toml. Terraform
+# owns this directory outright, so it is rewritten from scratch. Tracing is off
+# through the writes to keep manifest bodies out of the cloud-init log.
+rm -rf '${config_dir}/manifests'
+mkdir -p '${config_dir}/manifests'
+%{ for name, content in local_manifests ~}
+set +x
+base64 -d >'${config_dir}/manifests/${name}.toml' <<'MANIFEST_B64'
+${base64encode(content)}
+MANIFEST_B64
+set -x
+%{ endfor ~}
+
 # --- service ---------------------------------------------------------------
 # Runs as container root: it needs the docker socket for manifest `image`
 # build steps (root-equivalent on the daemon regardless), and the image's
@@ -69,9 +83,11 @@ ExecStart=/usr/bin/docker run --rm --name local-preview \\
   --user 0:0 \\
   --env-file /etc/local-preview.env \\
   -e PREVIEW_DATA_DIR=${data_dir} \\
+  -e PREVIEW_CONFIG_DIR=${config_dir} \\
   -e PREVIEW_DOMAIN=${preview_domain} \\
   -v /var/run/docker.sock:/var/run/docker.sock \\
   -v ${data_dir}:${data_dir} \\
+  -v ${config_dir}:${config_dir}:ro \\
   ${image} \\
   --addr 0.0.0.0:${http_port} ${server_args}
 ExecStop=/usr/bin/docker stop local-preview

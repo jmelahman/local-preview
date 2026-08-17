@@ -163,6 +163,20 @@ variable "github_webhook_secret_ssm_parameter" {
   default     = null
 }
 
+variable "local_manifests" {
+  description = <<-EOT
+    Out-of-repo preview manifests, keyed by registered repo name: the server
+    falls back to <name>.toml here when a deployed commit carries no
+    preview.toml of its own. For onboarding a repo whose upstream can't take
+    the manifest.
+
+    Written to the instance by user_data, so changing one rebuilds the
+    instance. They also land in the cloud-init log — don't put secrets here.
+  EOT
+  type        = map(string)
+  default     = {}
+}
+
 variable "extra_server_args" {
   description = "Additional `preview serve` flags, e.g. [\"--max-warm\", \"16\"]."
   type        = list(string)
