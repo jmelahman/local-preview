@@ -119,6 +119,15 @@ func New(database *db.Store, super *supervise.Manager, files *store.Store) *Swee
 	}
 }
 
+// SetInterval overrides how often Start's loop sweeps. Non-positive
+// durations are ignored — a caller disabling the sweep just doesn't Start
+// it. Call before Start.
+func (s *Sweeper) SetInterval(d time.Duration) {
+	if d > 0 {
+		s.interval = d
+	}
+}
+
 // Start launches the periodic sweep: once at startup (an instance that was
 // down past its limits catches up immediately), then every interval.
 func (s *Sweeper) Start(ctx context.Context) {

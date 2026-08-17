@@ -44,6 +44,33 @@ Notes:
 - `Close()` stops build workers and every supervised backend; previews
   never outlive the embedding process.
 
+## Storage and retention
+
+Every commit previewed leaves artifacts, backend state, and logs behind, so
+an embedded instance grows without bound unless something reclaims them. A
+retention sweep runs hourly (`Options.RetentionInterval`; negative disables
+the background pass), but it evicts nothing until you set a policy:
+
+```go
+orch.SetRetentionPolicy(orchestrator.RetentionPolicy{
+    MaxDeploysPerRepo: 10, // 0 = unlimited
+    MaxAgeDays:        30, // 0 = unlimited
+})
+```
+
+Eviction reclaims a deploy's bytes and keeps its row as history — a
+redeploy revives it. Never evicted: queued and building deploys, each
+repo's newest ready deploy, and branch-alias targets. Even with retention
+disabled, every sweep collects stale staging leftovers.
+
+```go
+report, _ := orch.Storage()      // bytes by category and by repo
+result, _ := orch.CollectGarbage() // sweep now; reports what it freed
+```
+
+`Storage()` walks the data dir on each call, so surface it behind a user
+action rather than a poll.
+
 ## Custom manifest locations
 
 By default target repos declare themselves in `preview.toml`. Embedders can

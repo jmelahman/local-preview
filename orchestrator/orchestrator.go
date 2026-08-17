@@ -35,6 +35,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/proxy"
+	"github.com/jmelahman/local-preview/internal/retain"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
 	"github.com/jmelahman/local-preview/internal/watch"
@@ -131,6 +132,11 @@ type Options struct {
 	// PollInterval is how often watched repos (SetRepoWatch) are fetched
 	// for new commits. 0 defaults to 1 minute; negative disables watching.
 	PollInterval time.Duration
+	// RetentionInterval is how often the retention sweep runs. 0 defaults
+	// to 1 hour; negative disables the background sweep (CollectGarbage
+	// still works). The sweep evicts nothing until a policy is set with
+	// SetRetentionPolicy, but it always collects stale staging leftovers.
+	RetentionInterval time.Duration
 }
 
 // ManifestSource locates a preview manifest: a TOML file at the target
@@ -215,7 +221,11 @@ type Orchestrator struct {
 	super    *supervise.Manager
 	queue    *build.Queue
 	watcher  *watch.Watcher
+	sweeper  *retain.Sweeper
 	stop     context.CancelFunc
+	// dbPath is the SQLite location actually opened, so storage reporting
+	// sizes the real database rather than a default that may not exist.
+	dbPath string
 }
 
 // runnerAdapter bridges the public Runner onto the internal interface.
@@ -301,6 +311,14 @@ func New(opts Options) (*Orchestrator, error) {
 	watcher := watch.New(database, gitMgr, queue, opts.PollInterval)
 	watcher.Start(ctx)
 
+	sweeper := retain.New(database, super, files)
+	if opts.RetentionInterval > 0 {
+		sweeper.SetInterval(opts.RetentionInterval)
+	}
+	if opts.RetentionInterval >= 0 {
+		sweeper.Start(ctx)
+	}
+
 	return &Orchestrator{
 		opts:     opts,
 		database: database,
@@ -309,7 +327,9 @@ func New(opts Options) (*Orchestrator, error) {
 		super:    super,
 		queue:    queue,
 		watcher:  watcher,
+		sweeper:  sweeper,
 		stop:     cancel,
+		dbPath:   dbPath,
 	}, nil
 }
 
