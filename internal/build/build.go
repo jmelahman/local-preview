@@ -138,14 +138,25 @@ func (q *Queue) SetAutoStart(v bool) {
 // Start launches n build workers and re-enqueues deploys interrupted by a
 // previous shutdown.
 func (q *Queue) Start(ctx context.Context, n int) {
-	if ids, err := q.db.ListUnfinishedDeployIDs(); err == nil {
-		for _, id := range ids {
-			q.enqueue(id)
-		}
-	}
 	for range n {
 		go q.worker(ctx)
 	}
+	// A backlog larger than the work buffer would block the caller — which at
+	// startup is the goroutine that still has to bring up the HTTP server — so
+	// hand the resume to a goroutine the workers can drain behind.
+	go func() {
+		ids, err := q.db.ListUnfinishedDeployIDs()
+		if err != nil {
+			return
+		}
+		for _, id := range ids {
+			select {
+			case q.work <- id:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 func (q *Queue) worker(ctx context.Context) {

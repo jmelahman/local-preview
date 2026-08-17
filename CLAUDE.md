@@ -98,6 +98,8 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   focuses after opening) instead.
 - On-disk leftovers must never gate DB-owned decisions — deletes clean disk
   best-effort, so creates replace orphaned dirs; only DB rows may conflict.
+- A startup backlog must not be enqueued from the goroutine that serves HTTP —
+  a bounded-channel send before `ListenAndServe` wedges the whole server.
 
 ## Documentation upkeep
 

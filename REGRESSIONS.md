@@ -118,3 +118,26 @@ destroys a healthy mirror). The `409` conflict comes only from the DB check.
 disk (mirror clones, artifact/state/log dirs) as proof of registration, or
 that errors instead of overwriting when creating a resource whose uniqueness
 the DB already enforces. Disk contents are a cache; rows are the truth.
+
+## A startup backlog must not be enqueued from the goroutine that serves HTTP
+
+**Symptom.** After an instance replacement the orchestrator container ran with
+zero CPU, printed nothing, never listened on its port, and the load balancer
+returned 502 indefinitely. `SIGQUIT` showed goroutine 1 parked in `[chan send]`
+at `build.(*Queue).enqueue`, called from `Queue.Start`.
+
+**Root cause.** `Start` re-enqueued every unfinished deploy *before* launching
+its workers. `work` is buffered at 256, so a data volume carrying more than 256
+`queued`/`building` rows — trivially reached by a repo-wide backfill that was
+interrupted — filled the buffer and blocked the caller. That caller is `run()`,
+which had not yet reached `ListenAndServe`. Nothing could drain the channel and
+nothing could accept the request that would have cancelled the work.
+
+**Fix.** `Start` launches its workers first, then resumes the backlog from a
+goroutine whose send selects on `ctx.Done()`. Workers drain behind it, and a
+backlog of any size delays only its own resume.
+
+**What would reintroduce it.** Any bounded-channel send on the startup path
+before the server listens, or a `Start`-time loop that assumes the DB holds
+fewer rows than a buffer. Startup work that can be proportional to accumulated
+state belongs in a goroutine, and its sends need a cancellation arm.
