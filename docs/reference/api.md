@@ -190,10 +190,19 @@ Returns deploys, newest first. Narrow the list with any combination of:
 | `?status=<status>` | exact build status — `queued`, `building`, `ready`, `failed`, or `evicted` (anything else is `400`) |
 | `?q=<text>` | free-text search: a commit-sha prefix, or a case-insensitive substring of the repo, branch, ref, or author |
 | `?limit=<n>` | at most the newest `n` deploys, applied after the other filters (a non-positive or non-integer value is `400`) |
+| `?offset=<n>` | skip the newest `n` matches before returning any (a negative or non-integer value is `400`) |
+
+Every response carries an **`X-Total-Count`** header: how many deploys match
+the filter in total, ignoring `limit` and `offset`. That's what a pager needs
+to know whether another page exists.
 
 `?author=ada@example.com` is the "only my deployments" filter; `?q=` is the
-search box behind the dashboard's deployments list, which also passes
-`?limit=` so its poll stays bounded as deploys accumulate.
+search box behind the dashboard's deployments list, which pages through the
+results with `?limit=` and `?offset=` so its poll stays bounded as deploys
+accumulate.
+
+Paging is by descending id, so a deploy created between two page fetches
+shifts the window rather than corrupting it.
 
 ### `GET /api/deploys/{id}`
 

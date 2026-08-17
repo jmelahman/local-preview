@@ -1453,11 +1453,11 @@ function StorageDialog({ onClose }: { onClose: () => void }) {
 
 const deployStatuses: DeployStatus[] = ["queued", "building", "ready", "failed", "evicted"];
 
-// The list fetches only the newest slice — deploys accumulate per commit,
-// and the 5s poll shouldn't grow with a repo's whole history. Older deploys
-// stay reachable through search and the status filter, which query the
-// server.
-const deploysLimit = 100;
+// The list fetches one page at a time — deploys accumulate per commit, and
+// the 5s poll shouldn't grow with a repo's whole history. Older deploys are
+// a page away; search and the status filter narrow the whole history, not
+// just the page on screen.
+const pageSize = 50;
 
 export default function App() {
   const [dialog, setDialog] = useState<"register" | "deploy" | "repos" | "storage" | null>(null);
@@ -1466,6 +1466,11 @@ export default function App() {
   const [statusFilter, setStatusFilter] = useState<DeployStatus | "">("");
   const query = useDebounced(search.trim(), 200);
   const filtersActive = query !== "" || statusFilter !== "";
+  const [offset, setOffset] = useState(0);
+  // A narrower filter can leave the current page past the end of the results,
+  // so every filter change starts over at the first page.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resetting on filter change is the point
+  useEffect(() => setOffset(0), [query, statusFilter]);
 
   const health = useQuery({
     queryKey: ["health"],
@@ -1482,15 +1487,15 @@ export default function App() {
       query.state.data?.some((r) => r.status === "cloning") ? 1000 : false,
   });
   const deploys = useQuery({
-    queryKey: ["deploys", query, statusFilter],
-    queryFn: () => api.listDeploys({ q: query, status: statusFilter, limit: deploysLimit }),
-    // Keep the previous page while a filter change refetches, so the list
-    // doesn't blank out between keystrokes.
+    queryKey: ["deploys", query, statusFilter, offset],
+    queryFn: () => api.listDeploys({ q: query, status: statusFilter, limit: pageSize, offset }),
+    // Keep the previous page while a filter or page change refetches, so the
+    // list doesn't blank out between keystrokes.
     placeholderData: keepPreviousData,
     // Poll while anything is in flight (builds, post-ready artifact builds,
     // or cold starts) so state flips surface promptly.
     refetchInterval: (query) =>
-      query.state.data?.some(
+      query.state.data?.deploys.some(
         (d) =>
           d.status === "queued" ||
           d.status === "building" ||
@@ -1503,9 +1508,17 @@ export default function App() {
   });
 
   const hasRepos = (repos.data?.length ?? 0) > 0;
+  const rows = deploys.data?.deploys;
+  const total = deploys.data?.total ?? 0;
+  // Deletion and eviction can shrink the list out from under the current
+  // page; step back to the last one that still has rows instead of stranding
+  // the user on an empty page with no way forward.
+  useEffect(() => {
+    if (offset > 0 && rows?.length === 0) setOffset(Math.max(0, total - pageSize));
+  }, [offset, rows, total]);
   // Resolve from the live list each render so the dialog tracks state
   // changes (build finishing, processes warming) instead of a snapshot.
-  const detail = detailId != null ? deploys.data?.find((d) => d.id === detailId) : undefined;
+  const detail = detailId != null ? rows?.find((d) => d.id === detailId) : undefined;
 
   return (
     <div className="flex min-h-screen flex-col bg-bg text-fg">
@@ -1565,9 +1578,7 @@ export default function App() {
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <div className="flex items-baseline gap-2">
               <h2 className="text-sm font-semibold uppercase tracking-wide">Deployments</h2>
-              {deploys.data && deploys.data.length > 0 && (
-                <span className="text-xs text-fg-muted tabular-nums">{deploys.data.length}</span>
-              )}
+              {total > 0 && <span className="text-xs text-fg-muted tabular-nums">{total}</span>}
             </div>
             <div className="ml-auto flex flex-wrap items-center gap-2">
               <div className="relative">
@@ -1611,7 +1622,7 @@ export default function App() {
                 ))}
               </div>
             )}
-            {deploys.data?.length === 0 && filtersActive && (
+            {rows?.length === 0 && filtersActive && (
               <div className="flex flex-col items-center gap-1 px-6 py-16 text-center">
                 <IconSearch className="mb-2 h-8 w-8 text-fg-muted/50" />
                 <p className="text-sm font-medium">No matching deployments</p>
@@ -1630,7 +1641,7 @@ export default function App() {
                 </button>
               </div>
             )}
-            {deploys.data?.length === 0 && !filtersActive && (
+            {rows?.length === 0 && !filtersActive && (
               <div className="flex flex-col items-center gap-1 px-6 py-16 text-center">
                 <IconDeploy className="mb-2 h-8 w-8 text-fg-muted/50" />
                 <p className="text-sm font-medium">No deployments yet</p>
@@ -1649,7 +1660,7 @@ export default function App() {
               </div>
             )}
             <ul className="divide-y divide-border">
-              {deploys.data?.map((d) => {
+              {rows?.map((d) => {
                 // Per-service content hashes live in the commit sha's hover
                 // instead of taking up a row of their own.
                 const shaTitle = [
@@ -1747,10 +1758,30 @@ export default function App() {
                 );
               })}
             </ul>
-            {deploys.data?.length === deploysLimit && (
-              <p className="border-t border-border px-3 py-2 text-xs text-fg-muted">
-                Showing the newest {deploysLimit} deploys — search or filter to find older ones.
-              </p>
+            {total > pageSize && rows && rows.length > 0 && (
+              <div className="flex items-center gap-2 border-t border-border px-3 py-2 text-xs text-fg-muted">
+                <span className="tabular-nums">
+                  {offset + 1}–{offset + rows.length} of {total}
+                </span>
+                <div className="ml-auto flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setOffset(Math.max(0, offset - pageSize))}
+                    disabled={offset === 0}
+                    className={`${neutralButtonClass} px-2 py-0.5 disabled:opacity-40`}
+                  >
+                    Newer
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOffset(offset + pageSize)}
+                    disabled={offset + rows.length >= total}
+                    className={`${neutralButtonClass} px-2 py-0.5 disabled:opacity-40`}
+                  >
+                    Older
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </section>

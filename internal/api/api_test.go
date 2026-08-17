@@ -216,7 +216,7 @@ func TestRepoEndpoints(t *testing.T) {
 	for body, want := range map[string]int{
 		`{"name":"demo","source":` + jsonQuote(src) + `}`: http.StatusConflict,
 		`{"name":"Bad.Name","source":"/x"}`:               http.StatusBadRequest,
-		`{`: http.StatusBadRequest,
+		`{`:                                               http.StatusBadRequest,
 	} {
 		if rec := doJSON(t, mux, "POST", "/api/repos", body); rec.Code != want {
 			t.Errorf("POST %s: %d, want %d", body, rec.Code, want)
@@ -350,6 +350,27 @@ func TestDeployEndpoints(t *testing.T) {
 	}
 	if rec := doJSON(t, mux, "GET", "/api/deploys?status=bogus", ""); rec.Code != http.StatusBadRequest {
 		t.Fatalf("list deploys with unknown status: %d %s", rec.Code, rec.Body)
+	}
+
+	// X-Total-Count counts the filter's matches, not the page's rows: it is
+	// what tells a pager another page exists.
+	for _, tc := range []struct {
+		query, total string
+		rows         int
+	}{
+		{"", "1", 1},
+		{"?limit=1", "1", 1},
+		{"?offset=1", "1", 0},
+		{"?status=failed", "0", 0},
+	} {
+		rec = doJSON(t, mux, "GET", "/api/deploys"+tc.query, "")
+		var list []json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list) != tc.rows {
+			t.Fatalf("list deploys %q: got %d rows (%v), want %d", tc.query, len(list), err, tc.rows)
+		}
+		if got := rec.Header().Get("X-Total-Count"); got != tc.total {
+			t.Errorf("list deploys %q: X-Total-Count = %q, want %q", tc.query, got, tc.total)
+		}
 	}
 
 	rec = doJSON(t, mux, "GET", "/api/deploys/1/logs", "")
@@ -845,7 +866,12 @@ func TestListDeploysLimitParam(t *testing.T) {
 			t.Errorf("limit=%s: %d, want 400", bad, rec.Code)
 		}
 	}
-	rec := doJSON(t, mux, "GET", "/api/deploys?limit=5", "")
+	for _, bad := range []string{"abc", "-1", "1.5"} {
+		if rec := doJSON(t, mux, "GET", "/api/deploys?offset="+bad, ""); rec.Code != http.StatusBadRequest {
+			t.Errorf("offset=%s: %d, want 400", bad, rec.Code)
+		}
+	}
+	rec := doJSON(t, mux, "GET", "/api/deploys?limit=5&offset=0", "")
 	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
 		t.Fatalf("limit=5 on empty instance: %d %s, want 200 []", rec.Code, rec.Body)
 	}

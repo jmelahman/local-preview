@@ -171,14 +171,22 @@ export type GCResult = {
 // Narrows GET /api/deploys; empty fields don't filter. q is a free-text
 // search matching a commit-sha prefix or a substring of the repo, branch,
 // ref, or author (case-insensitive); status matches the build status
-// exactly; limit caps the response to the newest n deploys.
+// exactly; limit and offset take one page of the newest-first order.
 export type DeployFilter = {
   q?: string;
   status?: DeployStatus | "";
   limit?: number;
+  offset?: number;
 };
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// One page of deploys plus how many match the filter in total, so a pager
+// knows whether another page exists without fetching it.
+export type DeployPage = {
+  deploys: Deploy[];
+  total: number;
+};
+
+async function send(path: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...init,
@@ -193,6 +201,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(res.status, message);
   }
+  return res;
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await send(path, init);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -217,13 +230,18 @@ export const api = {
     }),
   deleteRepo: (name: string) =>
     request<void>(`/api/repos/${encodeURIComponent(name)}`, { method: "DELETE" }),
-  listDeploys: (filter?: DeployFilter) => {
+  listDeploys: async (filter?: DeployFilter): Promise<DeployPage> => {
     const params = new URLSearchParams();
     if (filter?.q) params.set("q", filter.q);
     if (filter?.status) params.set("status", filter.status);
     if (filter?.limit) params.set("limit", String(filter.limit));
+    if (filter?.offset) params.set("offset", String(filter.offset));
     const qs = params.toString();
-    return request<Deploy[]>(`/api/deploys${qs ? `?${qs}` : ""}`);
+    const res = await send(`/api/deploys${qs ? `?${qs}` : ""}`);
+    const deploys = (await res.json()) as Deploy[];
+    // The count of everything matching the filter, not just this page.
+    const total = res.headers.get("X-Total-Count");
+    return { deploys, total: total === null ? deploys.length : Number(total) };
   },
   createDeploy: (repo: string, ref: string) =>
     request<Deploy>("/api/deploys", { method: "POST", body: JSON.stringify({ repo, ref }) }),

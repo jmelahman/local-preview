@@ -400,18 +400,37 @@ func (d Deps) handleListDeploys(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	rows, err := d.Store.ListDeploys(db.DeployFilter{
+	offset := 0
+	if s := q.Get("offset"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			httpError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		}
+		offset = n
+	}
+	filter := db.DeployFilter{
 		Repo:   q.Get("repo"),
 		Branch: q.Get("branch"),
 		Author: q.Get("author"),
 		Status: q.Get("status"),
 		Query:  q.Get("q"),
 		Limit:  limit,
-	})
+		Offset: offset,
+	}
+	// The body stays a plain array, so the match count — what a pager needs to
+	// know how far it can go — rides along in a header.
+	total, err := d.Store.CountDeploys(filter)
+	if err != nil {
+		internalError(w, "count deploys", err)
+		return
+	}
+	rows, err := d.Store.ListDeploys(filter)
 	if err != nil {
 		internalError(w, "list deploys", err)
 		return
 	}
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	out := make([]deployJSON, len(rows))
 	for i, row := range rows {
 		out[i] = d.deployJSON(row)
