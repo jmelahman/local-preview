@@ -6,12 +6,23 @@
 package usage
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jmelahman/local-preview/internal/db"
 )
+
+// DurableTier optionally reports the byte footprint of the durable artifact
+// tier (S3/MinIO). When a tier backs the instance, local artifact directories
+// are a cache — evicted while their deploys stay live — so the on-disk number
+// alone understates what is retained and can read as data loss. Implemented by
+// *s3store.Tier; nil on a single-node instance with no tier.
+type DurableTier interface {
+	UsageBytes(ctx context.Context) (int64, error)
+}
 
 // Dirs locates the trees a report covers. DBPath is the SQLite location
 // actually opened (":memory:" for an ephemeral instance), not a default —
@@ -28,9 +39,10 @@ type Dirs struct {
 // RepoUsage is one repo's slice of the report.
 type RepoUsage struct {
 	Repo string `json:"repo"`
-	// ArtifactsBytes covers published fe/be/dl artifacts; StateBytes the
-	// mutable backend state dirs; LogsBytes build and run logs; MirrorBytes
-	// the bare git clone.
+	// ArtifactsBytes covers published fe/be/dl artifacts *resident on local
+	// disk* — with a durable tier configured this is a cache, not the
+	// authoritative copy; StateBytes the mutable backend state dirs; LogsBytes
+	// build and run logs; MirrorBytes the bare git clone.
 	ArtifactsBytes int64 `json:"artifacts_bytes"`
 	StateBytes     int64 `json:"state_bytes"`
 	LogsBytes      int64 `json:"logs_bytes"`
@@ -44,18 +56,30 @@ type RepoUsage struct {
 
 // Report is the instance's disk usage, by category and by repo.
 type Report struct {
-	TotalBytes     int64       `json:"total_bytes"`
-	ArtifactsBytes int64       `json:"artifacts_bytes"`
-	StateBytes     int64       `json:"state_bytes"`
-	LogsBytes      int64       `json:"logs_bytes"`
-	MirrorBytes    int64       `json:"mirror_bytes"`
-	TmpBytes       int64       `json:"tmp_bytes"`
-	DBBytes        int64       `json:"db_bytes"`
-	Repos          []RepoUsage `json:"repos"`
+	TotalBytes int64 `json:"total_bytes"`
+	// ArtifactsBytes is the local-disk (resident) artifact footprint. With a
+	// durable tier configured it is a cache of DurableBytes, not the whole
+	// retained set — DurableTierConfigured says which regime is in effect so a
+	// shrinking ArtifactsBytes reads as eviction-from-cache, not data loss.
+	ArtifactsBytes int64 `json:"artifacts_bytes"`
+	StateBytes     int64 `json:"state_bytes"`
+	LogsBytes      int64 `json:"logs_bytes"`
+	MirrorBytes    int64 `json:"mirror_bytes"`
+	TmpBytes       int64 `json:"tmp_bytes"`
+	DBBytes        int64 `json:"db_bytes"`
+	// DurableTierConfigured reports whether a durable artifact tier backs local
+	// disk. DurableBytes is the tier's total footprint, or 0 when no tier is
+	// configured or its size could not be read (best-effort — never fails the
+	// report). DurableBytes is not added into TotalBytes, which measures this
+	// instance's local disk.
+	DurableTierConfigured bool        `json:"durable_tier_configured"`
+	DurableBytes          int64       `json:"durable_bytes"`
+	Repos                 []RepoUsage `json:"repos"`
 }
 
-// Compute walks dirs and totals the instance's usage.
-func Compute(database *db.Store, dirs Dirs) (Report, error) {
+// Compute walks dirs and totals the instance's usage. durable may be nil (no
+// tier); when set, its total footprint is reported alongside the local one.
+func Compute(database *db.Store, dirs Dirs, durable DurableTier) (Report, error) {
 	repos, err := database.ListRepos()
 	if err != nil {
 		return Report{}, err
@@ -98,6 +122,18 @@ func Compute(database *db.Store, dirs Dirs) (Report, error) {
 	}
 	rep.TotalBytes = rep.ArtifactsBytes + rep.StateBytes + rep.LogsBytes +
 		rep.MirrorBytes + rep.TmpBytes + rep.DBBytes
+
+	// Best-effort: a durable tier's size is informational, so a slow or failing
+	// object store must never fail the storage report. A short timeout bounds
+	// the network call.
+	if durable != nil {
+		rep.DurableTierConfigured = true
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if n, err := durable.UsageBytes(ctx); err == nil {
+			rep.DurableBytes = n
+		}
+	}
 	return rep, nil
 }
 

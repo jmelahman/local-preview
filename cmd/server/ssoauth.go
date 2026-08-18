@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,19 @@ import (
 func envDefault(p *string, key string) {
 	if *p == "" {
 		*p = os.Getenv(key)
+	}
+}
+
+// envDefaultInt64 fills *p from the environment variable key when *p is zero,
+// the int64 analogue of envDefault. A malformed value is ignored (leaves *p).
+func envDefaultInt64(p *int64, key string) {
+	if *p != 0 {
+		return
+	}
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			*p = n
+		}
 	}
 }
 

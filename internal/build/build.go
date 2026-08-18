@@ -87,23 +87,14 @@ type Queue struct {
 	mu      sync.Mutex
 	rebuild map[int64]bool
 
-	// Optional durable artifact tier (S3/MinIO). nil disables persist/hydrate.
-	tier        ArtifactTier
+	// Optional durable artifact tier (S3/MinIO), owned by the store. nil
+	// disables persist/hydrate. Cached here from q.files at Start so the
+	// persist pool's nil checks and enqueue guards don't reach through the
+	// store on every published side.
+	tier        store.ArtifactTier
 	persistJobs chan persistJob
 	persistQuit chan struct{}
 	persistWG   sync.WaitGroup
-}
-
-// ArtifactTier is the durable content-addressed artifact store the queue
-// persists builds to and hydrates from. Implemented by *s3store.Tier; an
-// interface so tests can substitute a fake.
-type ArtifactTier interface {
-	// Save uploads srcDir's contents under the (repo, side, hash) key,
-	// idempotently. side is "fe", "be", or "dl".
-	Save(ctx context.Context, repo, side, hash, srcDir string) error
-	// Open returns a reader over the artifact's decompressed tar bytes, or
-	// found=false when absent. Close verifies integrity.
-	Open(ctx context.Context, repo, side, hash string) (rc io.ReadCloser, found bool, err error)
 }
 
 // NewQueue wires the pipeline. runner may be nil for the default runner.

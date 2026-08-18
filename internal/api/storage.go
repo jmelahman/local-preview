@@ -21,12 +21,26 @@ func (d Deps) usageDirs() usage.Dirs {
 
 // handleStorage reports the instance's disk usage, by category and by repo.
 func (d Deps) handleStorage(w http.ResponseWriter, r *http.Request) {
-	rep, err := usage.Compute(d.Store, d.usageDirs())
+	rep, err := usage.Compute(d.Store, d.usageDirs(), d.durableTier())
 	if err != nil {
 		internalError(w, "compute storage usage", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, rep)
+}
+
+// durableTier returns the durable artifact tier as a usage reporter, or nil
+// when none is configured. The tier is owned by the store; storage reporting
+// only needs its size accessor.
+func (d Deps) durableTier() usage.DurableTier {
+	t := d.Files.ArtifactTier()
+	if t == nil {
+		return nil
+	}
+	if dt, ok := t.(usage.DurableTier); ok {
+		return dt
+	}
+	return nil
 }
 
 func (d Deps) handleGetRetention(w http.ResponseWriter, r *http.Request) {

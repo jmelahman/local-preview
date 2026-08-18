@@ -172,6 +172,21 @@ func (m *Manager) LastFailure(k Key) (Failure, bool) {
 	return f, ok
 }
 
+// LiveArtifacts returns the set of artifact sides with a tracked process
+// (starting or running), keyed as "<repoName>\x00<side>\x00<hash>". Cache
+// eviction consults it to avoid reclaiming a resident artifact whose files a
+// live process may still depend on (a containered preview bind-mounts them at
+// start). Keyed by repo name to match the store's on-disk layout.
+func (m *Manager) LiveArtifacts() map[string]struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]struct{}, len(m.procs))
+	for k, p := range m.procs {
+		out[p.repoName+"\x00"+string(k.Side)+"\x00"+k.Hash] = struct{}{}
+	}
+	return out
+}
+
 // CrashedKeys returns every key Status would currently report as
 // "crashed" — a recorded failure with no process since started under it.
 // Runtime state lives only here, so a listing that wants to filter on it
@@ -193,6 +208,18 @@ func (m *Manager) CrashedKeys() []Key {
 // before StartReaper.
 func (m *Manager) SetMaxWarm(n int) {
 	m.maxWarm = max(n, 0)
+}
+
+// MaxWarm returns the warm-process cap (0 = unlimited). Reported in the worker
+// heartbeat so the control node can size fleet-wide capacity.
+func (m *Manager) MaxWarm() int { return m.maxWarm }
+
+// Running returns the number of tracked processes (starting or running) — the
+// worker's committed warm slots, reported in the heartbeat.
+func (m *Manager) Running() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.procs)
 }
 
 // StartReaper launches the loop enforcing idle timeouts and the warm cap.
@@ -317,6 +344,23 @@ func (m *Manager) EnsureRunning(ctx context.Context, k Key, repoName string) (in
 		}
 	}
 	return 0, fmt.Errorf("%s %s: process exited immediately after start", k.Side, k.Hash[:12])
+}
+
+// LocalBackends adapts a Manager to the proxy's address-based Backends
+// interface: a process supervised here runs on this host, so its address is
+// loopback. This is the transport for single-node (--role=all) serving and for
+// a worker serving its own local processes; the remote transport
+// (workerapi.Client) satisfies the same interface across a network hop.
+type LocalBackends struct{ M *Manager }
+
+// EnsureRunning starts (or reuses) the keyed process and returns its loopback
+// address.
+func (l LocalBackends) EnsureRunning(ctx context.Context, k Key, repoName string) (string, error) {
+	port, err := l.M.EnsureRunning(ctx, k, repoName)
+	if err != nil {
+		return "", err
+	}
+	return "127.0.0.1:" + strconv.Itoa(port), nil
 }
 
 // forget removes p from the table if it's still the tracked entry.
@@ -489,9 +533,17 @@ func (m *Manager) start(k Key, p *process) {
 	}
 	p.idleAfter = spec.idleTimeout
 	if _, err := os.Stat(spec.dir); err != nil {
-		fail("start_attempt", fmt.Errorf("%s artifact files missing (evicted?): %w", k.Side, err))
-		return
+		// Local disk is a cache of the durable tier. A missing artifact is not
+		// necessarily an eviction: it may simply not be resident on this node.
+		// Try to hydrate it back before concluding it is gone. With no tier
+		// configured (single-node default) Hydrate fails immediately and this
+		// stays the original evicted failure.
+		if herr := m.files.Hydrate(context.Background(), p.repoName, string(k.Side), k.Hash); herr != nil {
+			fail("start_attempt", fmt.Errorf("%s artifact files missing (evicted?): %w", k.Side, herr))
+			return
+		}
 	}
+	m.files.NoteAccess(p.repoName, string(k.Side), k.Hash)
 	rt, rtNote := m.resolveRuntime(spec)
 
 	// A frontend whose env references {backend_url} needs its peer backend

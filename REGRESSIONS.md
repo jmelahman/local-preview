@@ -349,3 +349,40 @@ pass assert only `StatObject != nil` instead of checking the size metadata.
 Also: a serve-only second node is a correctness (not efficiency) dependency on
 that reconcile pass — it can't rebuild a missing artifact, so no artifact may
 be missing before one exists.
+
+## Absence of on-disk files must not be read as eviction
+
+**Symptom (latent).** Once local disk is a *cache* of the durable tier
+(`--cache-max-artifact-bytes`), two very different states look identical on
+disk — the artifact directory is simply absent:
+
+| | Decided by | Correct user-facing outcome |
+|---|---|---|
+| **Evicted** | DB (`retain` policy marked the deploy evicted) | proxy 410 "cleaned up" page |
+| **Not resident** | cache watermark swept a *live* deploy's artifact | nothing — hydrate and serve |
+
+If a `HasFrontend`/`HasBackend`/`HasArtifact` call site treats "absent" as
+"evicted", a live deploy whose artifact was swept for space serves a 410
+instead of transparently re-hydrating. This is the exact inverse of the older
+rule *"on-disk leftovers must never gate DB-owned decisions"* — here a DB-owned
+decision (evicted) must not be inferred from disk absence.
+
+**Root cause / fix.** Eviction is a DB fact; residency is a cache fact. The
+serving path (`supervise.Manager.start`) no longer fails when `spec.dir` is
+missing — it calls `store.Hydrate` first and only reports the artifact gone if
+the *tier* also lacks it. `store.Hydrate` returns `ErrNotInTier` for a genuine
+miss (distinct from "no tier configured"), so callers can tell a reconcile gap
+from a plain single-node instance. Cache eviction uses a dedicated
+`EvictCacheToWatermark` — **not** `RemoveBackend`, whose doc invariant ("confirm
+no surviving deploy still uses the hash first") deliberately does not apply when
+the deploy stays live and only the local copy goes away. Eviction is a no-op
+when no tier is configured (local disk is then the only copy), skips artifacts
+younger than a grace period (their background persist may still be in flight),
+and skips artifacts with a live process (a container may have them bind-mounted).
+
+**What would reintroduce it.** A new `Has*`-then-410 path on the serving side
+that skips the hydrate attempt; wiring cache eviction through `RemoveBackend`
+(which also nukes the mutable state dir — never in the tier); evicting when
+`tier == nil`; or a reconcile pass that lets an artifact leave disk before it is
+known to exist durably (a serve-only node cannot rebuild — Phase 1b is the
+correctness net, not an optimization).

@@ -1,0 +1,144 @@
+package fleet
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/jmelahman/local-preview/internal/supervise"
+	"github.com/jmelahman/local-preview/internal/workerapi"
+)
+
+type fakeBackend struct {
+	id      string
+	ensured []supervise.Key
+}
+
+func (f *fakeBackend) EnsureRunning(_ context.Context, k supervise.Key, _ string) (string, error) {
+	f.ensured = append(f.ensured, k)
+	return f.id + ":8000", nil
+}
+func (f *fakeBackend) Heartbeat(context.Context) (workerapi.Heartbeat, error) {
+	return workerapi.Heartbeat{}, nil
+}
+
+// regFresh registers workers with the given heartbeats, all beating "now".
+func regFresh(t *testing.T, hbs map[string]workerapi.Heartbeat) (*Registry, map[string]*fakeBackend) {
+	t.Helper()
+	r := New(time.Minute)
+	bes := map[string]*fakeBackend{}
+	for id, hb := range hbs {
+		be := &fakeBackend{id: id}
+		bes[id] = be
+		r.Add(id, be)
+		r.recordHeartbeat(id, hb, time.Now(), true)
+	}
+	return r, bes
+}
+
+func TestCoPlacesFrontendWithBackend(t *testing.T) {
+	r, _ := regFresh(t, map[string]workerapi.Heartbeat{
+		"w1": {Running: 0, MaxWarm: 10},
+		"w2": {Running: 0, MaxWarm: 10},
+		"w3": {Running: 0, MaxWarm: 10},
+	})
+	be := r.place(supervise.BackendKey(42, "beHASH"))
+	fe := r.place(supervise.FrontendKey(42, "feHASH", "beHASH"))
+	if be == nil || fe == nil {
+		t.Fatal("expected placements")
+	}
+	if be.id != fe.id {
+		t.Fatalf("frontend placed on %s but its backend on %s — must co-locate", fe.id, be.id)
+	}
+	// And placement is deterministic.
+	if again := r.place(supervise.BackendKey(42, "beHASH")); again.id != be.id {
+		t.Fatalf("non-deterministic placement: %s then %s", be.id, again.id)
+	}
+}
+
+func TestDrainingExcluded(t *testing.T) {
+	r, _ := regFresh(t, map[string]workerapi.Heartbeat{
+		"only": {Running: 0, MaxWarm: 10, Draining: true},
+	})
+	if w := r.place(supervise.BackendKey(1, "h")); w != nil {
+		t.Fatalf("placed on a draining worker %s", w.id)
+	}
+	if _, err := r.EnsureRunning(context.Background(), supervise.BackendKey(1, "h"), "demo"); !errors.Is(err, ErrNoWorker) {
+		t.Fatalf("err = %v, want ErrNoWorker", err)
+	}
+}
+
+func TestFullFallsBackToLeastLoaded(t *testing.T) {
+	// Both workers are at capacity; placement must still pick one (soft cap).
+	r, _ := regFresh(t, map[string]workerapi.Heartbeat{
+		"busy":   {Running: 10, MaxWarm: 10},
+		"busier": {Running: 20, MaxWarm: 10},
+	})
+	w := r.place(supervise.BackendKey(1, "h"))
+	if w == nil {
+		t.Fatal("expected a fallback placement when all are full")
+	}
+	if w.id != "busy" {
+		t.Fatalf("fallback chose %s, want the least-loaded 'busy'", w.id)
+	}
+}
+
+func TestPrefersWorkerWithFreeCapacity(t *testing.T) {
+	// "free" has a slot; "full" does not — regardless of hash, the eligible one wins.
+	r, _ := regFresh(t, map[string]workerapi.Heartbeat{
+		"free": {Running: 1, MaxWarm: 10},
+		"full": {Running: 10, MaxWarm: 10},
+	})
+	for i := 0; i < 5; i++ {
+		if w := r.place(supervise.BackendKey(int64(i), "h")); w.id != "free" {
+			t.Fatalf("placed on %s, want the only worker with capacity", w.id)
+		}
+	}
+}
+
+func TestNoWorkersOrAllStale(t *testing.T) {
+	r := New(time.Minute)
+	if _, err := r.EnsureRunning(context.Background(), supervise.BackendKey(1, "h"), "demo"); !errors.Is(err, ErrNoWorker) {
+		t.Fatalf("empty registry err = %v, want ErrNoWorker", err)
+	}
+	// A stale heartbeat is as good as gone.
+	r.Add("w", &fakeBackend{id: "w"})
+	r.recordHeartbeat("w", workerapi.Heartbeat{MaxWarm: 10}, time.Now().Add(-time.Hour), true)
+	if w := r.place(supervise.BackendKey(1, "h")); w != nil {
+		t.Fatalf("placed on stale worker %s", w.id)
+	}
+}
+
+func TestCapacityAndLoad(t *testing.T) {
+	r, _ := regFresh(t, map[string]workerapi.Heartbeat{
+		"a": {Running: 3, MaxWarm: 10},
+		"b": {Running: 5, MaxWarm: 10},
+	})
+	running, capacity := r.Capacity()
+	if running != 8 || capacity != 20 {
+		t.Fatalf("capacity = %d/%d, want 8/20", running, capacity)
+	}
+	if got := r.LoadRatio(); got != 0.4 {
+		t.Fatalf("load ratio = %v, want 0.4", got)
+	}
+}
+
+func TestEnsureRoutesToPlacedWorker(t *testing.T) {
+	r, bes := regFresh(t, map[string]workerapi.Heartbeat{
+		"w1": {Running: 0, MaxWarm: 10},
+		"w2": {Running: 0, MaxWarm: 10},
+	})
+	k := supervise.BackendKey(9, "hh")
+	placed := r.place(k)
+	addr, err := r.EnsureRunning(context.Background(), k, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr != placed.id+":8000" {
+		t.Fatalf("routed to %q, expected worker %s", addr, placed.id)
+	}
+	if len(bes[placed.id].ensured) != 1 {
+		t.Fatalf("placed worker %s was not asked to ensure", placed.id)
+	}
+}

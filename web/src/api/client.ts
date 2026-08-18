@@ -158,12 +158,20 @@ export type RepoUsage = {
 // GET /api/storage: how much disk the instance uses, by category and by repo.
 export type StorageReport = {
   total_bytes: number;
+  // Local-disk (resident) artifact bytes. With a durable tier configured this
+  // is a cache of durable_bytes, not the whole retained set.
   artifacts_bytes: number;
   state_bytes: number;
   logs_bytes: number;
   mirror_bytes: number;
   tmp_bytes: number;
   db_bytes: number;
+  // Whether a durable artifact tier backs local disk. When true, a shrinking
+  // artifacts_bytes reflects cache eviction (artifacts re-hydrate on serve),
+  // not data loss. durable_bytes is the tier's total footprint (0 if unknown);
+  // it is not included in total_bytes, which measures local disk.
+  durable_tier_configured: boolean;
+  durable_bytes: number;
   repos: RepoUsage[];
 };
 

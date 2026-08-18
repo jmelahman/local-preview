@@ -120,6 +120,21 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - A truncated artifact must never land under a content-addressed key — the S3
   tier's skip-if-exists would make it permanent; compress to a temp file (abort
   before put), record the size, and verify it on hydrate.
+- Absence of on-disk artifact files must not be read as eviction — once local
+  disk is a cache, a swept-but-live deploy must hydrate-and-serve, not 410;
+  eviction is a DB fact, residency a cache fact (use `EvictCacheToWatermark`,
+  never `RemoveBackend`, and hydrate on serve before failing).
+- The proxy routes to a `Backends` interface returning `host:port`, not a bare
+  port — one orchestrator, two transports (loopback `LocalBackends` and remote
+  `workerapi.Client`); don't reintroduce a port-only assumption or a second
+  orchestrator path.
+- The worker API (`internal/workerapi`) starts arbitrary preview processes — a
+  remote-code-execution surface. It must stay shared-secret authed and bound to
+  a private listener only; never expose it via the ALB/apex router.
+- Fleet placement must co-place a process-mode frontend with its backend — the
+  pair shares a per-deploy docker network that lives on one node, so a frontend
+  hashes on its backend's hash (`Peer`), never its own. Splitting them across
+  workers breaks `{backend_url}` and the deploy network.
 
 ## Documentation upkeep
 

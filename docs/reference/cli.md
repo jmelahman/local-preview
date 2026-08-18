@@ -28,6 +28,13 @@ Start the orchestrator.
 | `--s3-prefix` / `--s3-region` | `$PREVIEW_S3_PREFIX` / `$PREVIEW_S3_REGION` | Optional key prefix and bucket region |
 | `--s3-access-key` / `--s3-secret-key` | `$PREVIEW_S3_ACCESS_KEY` / `$PREVIEW_S3_SECRET_KEY` | Artifact-tier credentials (fall back to `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) |
 | `--s3-use-ssl` | `true` | Use TLS for the endpoint (set `false` for local MinIO over http) |
+| `--cache-max-artifact-bytes` | `$PREVIEW_CACHE_MAX_ARTIFACT_BYTES` (`0`) | Soft cap on resident (local-disk) artifact bytes; above it the coldest artifacts are swept back to the durable tier and re-hydrated on serve. Requires the artifact tier; `0` disables cache eviction and keeps every artifact resident |
+| `--role` | `all` | Serving role: `all` (single node), `control` (route previews to a worker tier), or `worker` (supervise processes for a control node) |
+| `--worker-secret` | `$PREVIEW_WORKER_SECRET` | Shared secret authenticating the internal worker API in both directions |
+| `--worker-listen` | — | Private address to expose the internal worker API on, e.g. `:9100` (roles `worker`/`all`). **Must not be internet/ALB-reachable.** Requires `--worker-secret` |
+| `--worker-endpoint` | `$PREVIEW_WORKER_ENDPOINT` | Control node only: a worker's private worker-API base URL, e.g. `http://10.0.1.5:9100` |
+| `--worker-endpoints` | `$PREVIEW_WORKER_ENDPOINTS` | Control node only: comma-separated worker-API base URLs forming the fleet; combined with `--worker-endpoint` |
+| `--worker-host` | (the endpoint host) | Control node only: the routable host a single worker's preview processes are reached on (per-endpoint host is derived from the URL when several are given) |
 
 ## `preview repo`
 

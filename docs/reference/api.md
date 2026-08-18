@@ -489,6 +489,8 @@ measured by walking the data directory on each call.
   "mirror_bytes": 20000000,
   "tmp_bytes": 0,
   "db_bytes": 1056789,
+  "durable_tier_configured": true,
+  "durable_bytes": 340000000,
   "repos": [
     {
       "repo": "myapp",
@@ -507,6 +509,14 @@ measured by walking the data directory on each call.
 `deploys` counts a repo's non-evicted deploys; `evicted_deploys` the rows
 kept as history after their artifacts were reclaimed. `db_bytes` is `0` for
 `--in-memory` instances.
+
+`artifacts_bytes` measures artifacts **resident on local disk**. With the
+[artifact tier](/guide/configuration#artifact-tier-s3) configured,
+`durable_tier_configured` is `true` and local disk is a cache: artifacts are
+swept off it above the resident cap and re-hydrated on the next request, so a
+falling `artifacts_bytes` is cache eviction, not data loss. `durable_bytes` is
+the tier's total footprint (`0` if unknown or no tier is configured) and is
+**not** included in `total_bytes`, which measures only local disk.
 
 ### `GET /api/retention`
 

@@ -28,16 +28,16 @@ type fakeBackends struct {
 	lastKey supervise.Key
 }
 
-func (f *fakeBackends) EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (int, error) {
+func (f *fakeBackends) EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (string, error) {
 	f.lastKey = k
 	if f.slow {
 		<-ctx.Done()
-		return 0, ctx.Err()
+		return "", ctx.Err()
 	}
 	if f.err != nil {
-		return 0, f.err
+		return "", f.err
 	}
-	return f.port, nil
+	return "127.0.0.1:" + strconv.Itoa(f.port), nil
 }
 
 type testEnv struct {

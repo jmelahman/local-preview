@@ -62,7 +62,13 @@ func (o *Orchestrator) SetRetentionPolicy(p RetentionPolicy) error {
 // walking the data dir on every call, so this is a live number, not a
 // cached one.
 func (o *Orchestrator) Storage() (StorageReport, error) {
-	return usage.Compute(o.database, o.usageDirs())
+	var durable usage.DurableTier
+	if t := o.files.ArtifactTier(); t != nil {
+		if dt, ok := t.(usage.DurableTier); ok {
+			durable = dt
+		}
+	}
+	return usage.Compute(o.database, o.usageDirs(), durable)
 }
 
 // CollectGarbage runs one retention sweep immediately and reports what it

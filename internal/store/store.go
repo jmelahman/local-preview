@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // artifactListTTL bounds staleness of cached artifact listings. A published
@@ -31,8 +33,19 @@ type Store struct {
 	stateDir     string
 	tmpDir       string
 
+	// tier is the optional durable artifact backend. nil keeps local disk
+	// authoritative (today's single-node default); non-nil makes local disk a
+	// cache that Hydrate refills and EvictCacheToWatermark reclaims.
+	tier ArtifactTier
+	// sf deduplicates concurrent hydrations of the same content-address.
+	sf singleflight.Group
+
 	mu       sync.Mutex
 	artLists map[string]artListEntry
+	// accessed records the last time a resident artifact side was served or
+	// hydrated, so cache eviction can reclaim the coldest first. Keyed by
+	// cacheKey(repo, side, hash). Absent entries fall back to directory mtime.
+	accessed map[string]time.Time
 }
 
 type artListEntry struct {
@@ -47,6 +60,7 @@ func New(artifactsDir, stateDir, tmpDir string) *Store {
 		stateDir:     stateDir,
 		tmpDir:       tmpDir,
 		artLists:     map[string]artListEntry{},
+		accessed:     map[string]time.Time{},
 	}
 }
 

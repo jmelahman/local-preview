@@ -55,9 +55,14 @@ const previewGrantCookieName = "preview_grant"
 // previewAuthParam is the one-time handoff code the apex redirects back with.
 const previewAuthParam = "preview_auth"
 
-// Backends is the slice of the supervisor the proxy needs.
+// Backends is the slice of the supervisor the proxy needs. EnsureRunning
+// returns the "host:port" the started process serves on — loopback for a
+// process on this node (single-node / worker-local), or a worker's address when
+// the control node routes to an elastic worker tier. The proxy is transport-
+// agnostic: the same interface is satisfied by a local Manager adapter and by a
+// remote worker-API client.
 type Backends interface {
-	EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (int, error)
+	EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (addr string, err error)
 }
 
 // Router routes by Host header. It wraps the dashboard handler and serves
@@ -428,7 +433,7 @@ func (rt *Router) proxyFrontend(w http.ResponseWriter, r *http.Request, e cacheE
 func (rt *Router) ensureAndProxy(w http.ResponseWriter, r *http.Request, e cacheEntry, repoName string, k supervise.Key, what string) {
 	ctx, cancel := context.WithTimeout(r.Context(), coldStartWait)
 	defer cancel()
-	port, err := rt.backends.EnsureRunning(ctx, k, repoName)
+	addr, err := rt.backends.EnsureRunning(ctx, k, repoName)
 	if err != nil {
 		if ctx.Err() != nil && r.Context().Err() == nil {
 			// Still starting — tell the client to come back shortly.
@@ -441,7 +446,7 @@ func (rt *Router) ensureAndProxy(w http.ResponseWriter, r *http.Request, e cache
 			fmt.Sprintf("The preview %s failed to start: %s (run logs: preview deploy logs %d)", what, err, e.deploy.ID))
 		return
 	}
-	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", port)}
+	target := &url.URL{Scheme: "http", Host: addr}
 	proxy := &httputil.ReverseProxy{
 		// SetURL also rewrites the outbound Host to the target: backends see
 		// themselves, not the preview subdomain (which would confuse any app

@@ -1406,10 +1406,21 @@ function StorageDialog({ onClose }: { onClose: () => void }) {
               <>
                 <Metric label="total" value={formatBytes(s.total_bytes)} />
                 <Metric
-                  label="artifacts"
+                  label={s.durable_tier_configured ? "artifacts (resident)" : "artifacts"}
                   value={formatBytes(s.artifacts_bytes)}
-                  title="Published builds (frontend, backend, downloadable artifacts)"
+                  title={
+                    s.durable_tier_configured
+                      ? "Published builds resident on local disk — a cache of the durable tier; evicted artifacts re-hydrate on serve"
+                      : "Published builds (frontend, backend, downloadable artifacts)"
+                  }
                 />
+                {s.durable_tier_configured && (
+                  <Metric
+                    label="artifacts (durable)"
+                    value={formatBytes(s.durable_bytes)}
+                    title="Total footprint of the durable artifact tier (S3/MinIO)"
+                  />
+                )}
                 <Metric
                   label="state"
                   value={formatBytes(s.state_bytes)}

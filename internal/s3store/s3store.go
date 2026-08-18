@@ -100,6 +100,24 @@ func (t *Tier) key(repo, side, hash string) string {
 	return path.Join(t.prefix, repo, side, hash+".tar.zst")
 }
 
+// UsageBytes sums the compressed size of every object under the tier's prefix —
+// the durable footprint of all persisted artifacts. Informational: callers
+// (storage reporting) treat an error as "unknown" rather than fatal, and never
+// let it fail the report.
+func (t *Tier) UsageBytes(ctx context.Context) (int64, error) {
+	var total int64
+	for obj := range t.client.ListObjects(ctx, t.bucket, minio.ListObjectsOptions{
+		Prefix:    t.prefix,
+		Recursive: true,
+	}) {
+		if obj.Err != nil {
+			return total, fmt.Errorf("s3 tier: list %q: %w", t.prefix, obj.Err)
+		}
+		total += obj.Size
+	}
+	return total, nil
+}
+
 // Save tars srcDir's contents, zstd-compresses them, and uploads the result
 // under the content-addressed key. It is a no-op if the object already exists
 // (content-addressing makes an identical key byte-identical). It returns
@@ -151,6 +169,47 @@ func (t *Tier) Save(ctx context.Context, repo, side, hash, srcDir string) error 
 	})
 	if err != nil {
 		return fmt.Errorf("s3 tier: put %s: %w", key, err)
+	}
+	return nil
+}
+
+// ObjectInfo is a stored artifact object's recorded integrity metadata: the
+// uncompressed tar's byte size and file count (both written at Save time) plus
+// the compressed object size. A reconcile pass compares these against a
+// resident local copy to verify integrity beyond mere existence.
+type ObjectInfo struct {
+	UncompressedSize int64
+	FileCount        int64
+	CompressedSize   int64
+}
+
+// Stat returns a stored artifact side's recorded metadata, or found=false when
+// the object is absent. It is a HEAD — no bytes are downloaded — so the
+// reconcile pass can check existence and metadata consistency cheaply.
+func (t *Tier) Stat(ctx context.Context, repo, side, hash string) (ObjectInfo, bool, error) {
+	key := t.key(repo, side, hash)
+	info, err := t.client.StatObject(ctx, t.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		if isNotFound(err) {
+			return ObjectInfo{}, false, nil
+		}
+		return ObjectInfo{}, false, fmt.Errorf("s3 tier: stat %s: %w", key, err)
+	}
+	return ObjectInfo{
+		UncompressedSize: metaInt(info.UserMetadata, metaUncompressedSize),
+		FileCount:        metaInt(info.UserMetadata, metaFileCount),
+		CompressedSize:   info.Size,
+	}, true, nil
+}
+
+// Delete removes a stored artifact object. The reconcile pass uses it to drop
+// an object whose recorded metadata is missing or inconsistent before
+// re-Saving it from a resident local copy (Save is skip-if-exists, so a bad
+// object must be deleted before it can be replaced). A no-op if already absent.
+func (t *Tier) Delete(ctx context.Context, repo, side, hash string) error {
+	key := t.key(repo, side, hash)
+	if err := t.client.RemoveObject(ctx, t.bucket, key, minio.RemoveObjectOptions{}); err != nil {
+		return fmt.Errorf("s3 tier: remove %s: %w", key, err)
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/s3store"
+	"github.com/jmelahman/local-preview/internal/store"
 )
 
 const (
@@ -29,9 +30,13 @@ type persistJob struct {
 }
 
 // SetArtifactTier attaches the durable artifact tier. nil (the default)
-// disables persist and hydrate. Call before Start.
-func (q *Queue) SetArtifactTier(t ArtifactTier) {
+// disables persist and hydrate. Call before Start. The tier is owned by the
+// store — the serving path hydrates through it without passing through build —
+// so this also hands it to the store; the queue keeps a copy only for the
+// persist pool's hot-path nil checks.
+func (q *Queue) SetArtifactTier(t store.ArtifactTier) {
 	q.tier = t
+	q.files.SetArtifactTier(t)
 }
 
 // startPersist launches the upload worker pool when a tier is configured.
@@ -113,66 +118,18 @@ func (q *Queue) runPersist(job persistJob) {
 }
 
 // hydrate makes an artifact side present locally by fetching it from the
-// durable tier, so a build can be skipped. No-op when no tier is configured or
-// the side is already present. Best-effort: any failure logs and falls through
-// to a rebuild. Concurrent hydrates of the same content-address are
-// deduplicated with singleflight (as builds are).
+// durable tier, so a build can be skipped. No-op when no tier is configured.
+// Best-effort on the build path: a failure (including the tier simply not
+// having the object) falls through to a rebuild, so only genuine errors —
+// not a plain miss — are logged. The heavy lifting, singleflighted against the
+// same fetch the serving path uses, lives in the store.
 func (q *Queue) hydrate(ctx context.Context, repo, side, hash string) {
-	if q.tier == nil || hash == "" || q.hasSide(repo, side, hash) {
+	if q.tier == nil {
 		return
 	}
-	key := repo + ":hydrate:" + side + ":" + hash
-	q.sf.Do(key, func() (any, error) {
-		// A sibling may have landed it while we waited on the singleflight.
-		if q.hasSide(repo, side, hash) {
-			return nil, nil
-		}
-		rc, found, err := q.tier.Open(ctx, repo, side, hash)
-		if err != nil {
-			log.Printf("build: hydrate %s %s/%s: %v", repo, side, hash, err)
-			return nil, nil
-		}
-		if !found {
-			return nil, nil
-		}
-		dir, cleanup, err := q.files.NewScratchDir("hydrate")
-		if err != nil {
-			rc.Close()
-			log.Printf("build: hydrate %s %s/%s: scratch: %v", repo, side, hash, err)
-			return nil, nil
-		}
-		defer cleanup()
-		extractErr := extractTar(rc, dir)
-		// Close both releases the connection and verifies the decompressed
-		// length against the size recorded at Save time.
-		closeErr := rc.Close()
-		if extractErr != nil {
-			log.Printf("build: hydrate %s %s/%s: extract: %v", repo, side, hash, extractErr)
-			return nil, nil
-		}
-		if closeErr != nil {
-			log.Printf("build: hydrate %s %s/%s: %v", repo, side, hash, closeErr)
-			return nil, nil
-		}
-		if err := q.publishSide(repo, side, hash, dir); err != nil {
-			log.Printf("build: hydrate %s %s/%s: publish: %v", repo, side, hash, err)
-			return nil, nil
-		}
-		log.Printf("build: hydrated %s %s/%s from durable tier", repo, side, hash)
-		return nil, nil
-	})
-}
-
-func (q *Queue) hasSide(repo, side, hash string) bool {
-	switch side {
-	case "fe":
-		return q.files.HasFrontend(repo, hash)
-	case "be":
-		return q.files.HasBackend(repo, hash)
-	case "dl":
-		return q.files.HasArtifact(repo, hash)
+	if err := q.files.Hydrate(ctx, repo, side, hash); err != nil && !errors.Is(err, store.ErrNotInTier) {
+		log.Printf("build: %v", err)
 	}
-	return false
 }
 
 func (q *Queue) artifactDir(repo, side, hash string) string {
@@ -185,19 +142,4 @@ func (q *Queue) artifactDir(repo, side, hash string) string {
 		return q.files.ArtifactDir(repo, hash)
 	}
 	return ""
-}
-
-// publishSide lands a hydrated side's extracted tree into the store via the
-// same atomic publish a build uses. overwrite is false: hydrate only fills a
-// missing artifact, never displaces a present one.
-func (q *Queue) publishSide(repo, side, hash, srcDir string) error {
-	switch side {
-	case "fe":
-		return q.files.PublishFrontend(repo, hash, srcDir, false)
-	case "be":
-		return q.files.PublishBackend(repo, hash, srcDir, false)
-	case "dl":
-		return q.files.PublishArtifactDir(repo, hash, srcDir, false)
-	}
-	return nil
 }

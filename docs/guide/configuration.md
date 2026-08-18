@@ -127,6 +127,10 @@ for lookup order and caching semantics.
 | `PREVIEW_S3_BUCKET` | `preview serve` | Artifact-tier bucket (an explicit `--s3-bucket` flag wins) |
 | `PREVIEW_S3_PREFIX` / `PREVIEW_S3_REGION` | `preview serve` | Key prefix and region (the matching flag wins) |
 | `PREVIEW_S3_ACCESS_KEY` / `PREVIEW_S3_SECRET_KEY` | `preview serve` | Artifact-tier credentials (the matching flag wins). Fall back to `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` |
+| `PREVIEW_CACHE_MAX_ARTIFACT_BYTES` | `preview serve` | Soft cap on resident (local-disk) artifact bytes; the coldest are swept to the durable tier above it (an explicit `--cache-max-artifact-bytes` flag wins). Requires the artifact tier; `0` (default) keeps every artifact resident |
+| `PREVIEW_WORKER_SECRET` | `preview serve` | Shared secret for the internal worker API (an explicit `--worker-secret` flag wins) |
+| `PREVIEW_WORKER_ENDPOINT` | `preview serve --role=control` | A worker's private worker-API base URL (an explicit `--worker-endpoint` flag wins) |
+| `PREVIEW_WORKER_ENDPOINTS` | `preview serve --role=control` | Comma-separated worker-API base URLs forming the fleet (an explicit `--worker-endpoints` flag wins) |
 | `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins; this in turn beats the config file) |
 | `PREVIEW_TOKEN` | CLI subcommands | Bearer token (a GitHub PAT) sent to an [SSO-protected](/guide/sso) server (wins over the config file's `token`) |
 | `PREVIEW_BACKEND` | `web/` dev server | Backend `host:port` the Vite proxy targets |
@@ -250,9 +254,63 @@ upload. How it works:
 - **Bucket growth.** Because every build is kept, set a bucket **lifecycle
   rule** to expire old objects if storage is a concern — a rebuild transparently
   re-creates anything that's been expired.
-- **Startup-only gaps.** An upload interrupted by a hard crash may be missing; a
-  redeploy simply rebuilds and re-uploads it. Uploads still in flight at a normal
-  shutdown are drained before the process exits.
+- **Reconcile pass.** On startup and hourly thereafter, the server reconciles
+  the bucket against its live (ready) deploys: any artifact missing or failing
+  its recorded integrity metadata is re-uploaded from the resident local copy.
+  This closes gaps from a hard crash that dropped an in-flight upload, a
+  cache-hit build that skipped the persist, and artifacts built before the tier
+  was enabled. An artifact that is *both* absent from the bucket and no longer
+  resident locally is logged as a gap — only a redeploy rebuilds it. Uploads
+  still in flight at a normal shutdown are drained before the process exits.
+- **Local disk as a cache.** With a tier configured, local disk becomes a cache
+  of it rather than the authoritative copy. Set `--cache-max-artifact-bytes`
+  (default `0`, disabled) to cap the resident footprint: above the cap the
+  coldest artifacts are swept off local disk while their deploys stay live, and
+  the **next request transparently re-hydrates** the artifact before serving —
+  the only difference the user sees is a one-time hydration latency. This lets
+  the data volume be sized to the *working* set rather than the whole retained
+  set, with retention depth becoming a bucket-lifecycle question. A freshly
+  built artifact is never swept before its background upload lands, and an
+  artifact with a running preview is never swept out from under it.
+
+## Split control / worker plane (experimental)
+
+By default (`--role=all`) one process does everything: API, dashboard, proxy,
+and local process supervision. For elastic scaling the plane can be split into a
+small always-on **control** node and a **worker** tier that supervises preview
+processes on its behalf. The proxy is address-based and transport-agnostic — it
+drives a local process over loopback or a remote worker over the internal worker
+API through the *same* interface, so there is only one orchestrator
+implementation, not two.
+
+- A **worker** (`--role=worker --worker-listen :9100 --worker-secret …`) exposes
+  the internal worker API and supervises processes for the control node.
+- The **control** node (`--role=control --worker-endpoints
+  http://<w1>:9100,http://<w2>:9100 --worker-secret …`) routes previews to the
+  worker **fleet** instead of running them locally.
+
+The control node tracks each worker by heartbeat (capacity and a draining flag)
+and **places** a preview on a worker by rendezvous hashing on `(repo, hash)`:
+the same artifact consistently lands on the same worker, so its local cache and
+any warm process are reused, and workers joining or leaving reshuffle a minimal
+set of keys. A process-mode frontend is **co-placed with its backend** (they
+share a per-deploy docker network that exists on only one node). A worker that
+is draining or at its warm cap is skipped for new placements, falling back to
+the least-loaded worker. The fleet-wide load ratio (committed warm slots ÷
+capacity) is logged as `fleet: load=…` — the signal an autoscaling policy
+target-tracks. A worker can be told to drain (stop taking new work while
+finishing what is warm) ahead of instance termination.
+
+The worker API starts arbitrary preview processes on request, so it is a
+remote-code-execution surface by design: it authenticates with a shared secret
+and **must live on a private listener that is never reachable from the ALB or
+the internet** — a private subnet with a security-group rule that admits only
+the control node.
+
+This is early scaffolding: the worker registry is static (endpoints from flags,
+not an ASG-driven registry), scale-out/in and warm pools are left to the
+infrastructure layer, and a worker still needs read access to the deploy
+database to resolve run configs.
 
 ## The preview domain
 
