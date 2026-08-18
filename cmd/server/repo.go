@@ -52,11 +52,12 @@ func repoCmd() *cobra.Command {
 		Short: "Poll a repository and deploy new branch tips automatically",
 		Long: "Enable watching: the server periodically fetches the repo and deploys\n" +
 			"the tip of every branch that gains commits. --branches narrows which\n" +
-			"branches with comma-separated globs (e.g. \"main,release/*\"); globs\n" +
-			"don't cross '/', and a ! prefix excludes (e.g. \"!main\" builds every\n" +
-			"branch but main). The same filter also gates webhook deploys. Only\n" +
-			"commits pushed from here on deploy — pass --backfill to deploy the\n" +
-			"branch tips that already exist too.",
+			"branches with comma-separated globs (e.g. \"main,release/*\"); a single\n" +
+			"* doesn't cross '/' but ** does, and a ! prefix excludes (e.g. \"!main\"\n" +
+			"builds every branch but main, \"!gh-readonly-queue/**\" drops merge-queue\n" +
+			"refs). The same filter also gates webhook deploys. Only commits pushed\n" +
+			"from here on deploy — pass --backfill to deploy the branch tips that\n" +
+			"already exist too.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var branches *string

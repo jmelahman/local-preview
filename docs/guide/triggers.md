@@ -60,14 +60,19 @@ preview repo create myapp --source <url> --watch    # watched from the start
 
 Watched repos are fetched every `--poll-interval` (default `1m`). A branch
 that advances gets a fresh preview while the old commits keep theirs.
-`--branches` takes comma-separated globs matched against the branch name
-(globs don't cross `/`, so `release/*` matches `release/1.0` but not
-`release/1.0/hotfix`). A `!` prefix turns a pattern into an exclusion, and an
-exclusion always wins over the includes: `!main` builds every branch but
-`main`, and `release/*,!release/experimental` builds the release branches
-except that one. With only exclusions (or no patterns at all) every branch
-builds except those excluded. This same filter gates [webhook](#github-webhooks)
-deploys too.
+`--branches` takes comma-separated globs matched against the branch name. A
+single `*` doesn't cross `/`, so `release/*` matches `release/1.0` but not
+`release/1.0/hotfix`; a `**` segment spans separators, so `docs/**` matches
+`docs`, `docs/api`, and `docs/api/v2` alike. A `!` prefix turns a pattern
+into an exclusion, and an exclusion always wins over the includes: `!main`
+builds every branch but `main`, and `release/*,!release/experimental` builds
+the release branches except that one. With only exclusions (or no patterns at
+all) every branch builds except those excluded. This same filter gates
+[webhook](#github-webhooks) deploys too.
+
+To skip GitHub merge-queue previews — whose refs look like
+`gh-readonly-queue/<base>/pr-<n>-<sha>` and so carry an extra path segment —
+exclude them with a `**`: `!gh-readonly-queue/**`.
 
 Watching starts from where the repo is now: the first poll records the tips
 that already exist and deploys none of them, so a repo with hundreds of

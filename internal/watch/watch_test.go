@@ -340,6 +340,16 @@ func TestMatchBranch(t *testing.T) {
 		{"release/*,!release/experimental", "release/1.0", true},
 		{"release/*,!release/experimental", "release/experimental", false}, // exclude beats include
 		{"release/*,!release/experimental", "main", false},                 // include present, no match
+		// `**` spans separators; a plain `*` does not.
+		{"gh-readonly-queue/*", "gh-readonly-queue/main/pr-42-abc", false},      // one `*` can't cross `/`
+		{"gh-readonly-queue/**", "gh-readonly-queue/main/pr-42-abc", true},      // base = main
+		{"gh-readonly-queue/**", "gh-readonly-queue/release/1.0/pr-7-de", true}, // base with a slash
+		{"gh-readonly-queue/**", "gh-readonly-queue", true},                     // ** matches zero segments
+		{"gh-readonly-queue/**", "feature/x", false},
+		{"!gh-readonly-queue/**", "gh-readonly-queue/main/pr-42-abc", false}, // the merge-queue exclusion
+		{"!gh-readonly-queue/**", "feature/x", true},
+		{"**/pr-*", "gh-readonly-queue/main/pr-42-abc", true}, // ** as a prefix
+		{"**", "anything/at/all", true},
 	}
 	for _, c := range cases {
 		if got := MatchBranch(SplitPatterns(c.patterns), c.branch); got != c.want {
@@ -366,5 +376,11 @@ func TestValidatePatterns(t *testing.T) {
 	}
 	if _, err := ValidatePatterns("!release/["); err == nil {
 		t.Error("bad negated pattern accepted")
+	}
+	if got, err := ValidatePatterns("!gh-readonly-queue/**"); err != nil || got != "!gh-readonly-queue/**" {
+		t.Errorf("ValidatePatterns(doublestar) = %q, %v", got, err)
+	}
+	if _, err := ValidatePatterns("gh-readonly-queue/**/["); err == nil {
+		t.Error("bad segment after ** accepted")
 	}
 }

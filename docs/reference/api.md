@@ -80,8 +80,9 @@ Returns all repos. `GET /api/repos/{name}` returns one (`404` if missing).
 Updates a repo's watch settings; fields absent from the body keep their
 current value. `watch: true` polls the repo every `--poll-interval` and
 deploys branch tips as they move; `watch_branches` narrows which branches as
-comma-separated globs (`""` = all; globs don't cross `/`; a `!` prefix
-excludes, so `"!main"` is every branch but `main`). The filter also gates
+comma-separated globs (`""` = all; a single `*` doesn't cross `/` but a `**`
+segment does; a `!` prefix excludes, so `"!main"` is every branch but `main`,
+and `"!gh-readonly-queue/**"` drops merge-queue refs). The filter also gates
 [webhook](#post-api-webhooks-github) deploys, regardless of `watch`.
 
 Switching watching on starts from the repo's current state — the tips that

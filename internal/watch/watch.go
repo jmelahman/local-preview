@@ -243,9 +243,9 @@ func SplitPatterns(s string) []string {
 	return out
 }
 
-// ValidatePatterns canonicalizes a comma-separated branch pattern list
-// (path.Match globs; `*` doesn't cross `/`). A `!` prefix negates a pattern
-// (see MatchBranch). Empty input is valid and means "all branches".
+// ValidatePatterns canonicalizes a comma-separated branch pattern list (glob
+// syntax; see matchGlob). A `!` prefix negates a pattern (see MatchBranch).
+// Empty input is valid and means "all branches".
 func ValidatePatterns(s string) (string, error) {
 	parts := SplitPatterns(s)
 	for _, p := range parts {
@@ -253,8 +253,13 @@ func ValidatePatterns(s string) (string, error) {
 		if glob == "" { // bare "!"
 			return "", fmt.Errorf("invalid branch pattern %q", p)
 		}
-		if _, err := path.Match(glob, "x"); err != nil {
-			return "", fmt.Errorf("invalid branch pattern %q", p)
+		for _, seg := range strings.Split(glob, "/") {
+			if seg == "**" {
+				continue
+			}
+			if _, err := path.Match(seg, "x"); err != nil {
+				return "", fmt.Errorf("invalid branch pattern %q", p)
+			}
 		}
 	}
 	return strings.Join(parts, ","), nil
@@ -269,15 +274,48 @@ func MatchBranch(patterns []string, branch string) bool {
 	hasInclude, included := false, false
 	for _, p := range patterns {
 		if neg, ok := strings.CutPrefix(p, "!"); ok {
-			if m, _ := path.Match(neg, branch); m {
+			if matchGlob(neg, branch) {
 				return false // exclude wins, regardless of includes
 			}
 			continue
 		}
 		hasInclude = true
-		if m, _ := path.Match(p, branch); m {
+		if matchGlob(p, branch) {
 			included = true
 		}
 	}
 	return !hasInclude || included
+}
+
+// matchGlob reports whether branch matches pattern. It extends path.Match
+// with a `**` segment that spans separators — matching zero or more
+// `/`-separated segments — so `gh-readonly-queue/**` covers the multi-segment
+// merge-queue refs (`gh-readonly-queue/<base>/pr-<n>-<sha>`) a plain `*`
+// can't. A single `*` still stops at `/`.
+func matchGlob(pattern, branch string) bool {
+	return matchSegments(strings.Split(pattern, "/"), strings.Split(branch, "/"))
+}
+
+// matchSegments matches the `/`-split pattern against the `/`-split branch. A
+// `**` pattern segment consumes zero or more branch segments; every other
+// segment matches exactly one, via path.Match.
+func matchSegments(pat, name []string) bool {
+	if len(pat) == 0 {
+		return len(name) == 0
+	}
+	if pat[0] == "**" {
+		for i := 0; i <= len(name); i++ {
+			if matchSegments(pat[1:], name[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(name) == 0 {
+		return false
+	}
+	if ok, _ := path.Match(pat[0], name[0]); !ok {
+		return false
+	}
+	return matchSegments(pat[1:], name[1:])
 }
