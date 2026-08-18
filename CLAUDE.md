@@ -131,6 +131,10 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - The worker API (`internal/workerapi`) starts arbitrary preview processes — a
   remote-code-execution surface. It must stay shared-secret authed and bound to
   a private listener only; never expose it via the ALB/apex router.
+- An unknown `user_data` silently defeats `user_data_replace_on_change` — a
+  bucket name read from a resource makes the rendered script `(known after
+  apply)`, so terraform plans an in-place update that cloud-init never re-runs;
+  keep every value reaching `user_data` known at plan time (a `locals` literal).
 - Fleet placement must co-place a process-mode frontend with its backend — the
   pair shares a per-deploy docker network that lives on one node, so a frontend
   hashes on its backend's hash (`Peer`), never its own. Splitting them across

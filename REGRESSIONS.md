@@ -415,3 +415,35 @@ without `RequiresMountsFor=`; dropping `nofail` from fstab and assuming
 ordering is therefore guaranteed (it makes a failed mount block boot instead,
 which is a different failure, not an equivalent one); or relying on
 `After=network-online.target` as a proxy for the volume being ready.
+
+## An unknown `user_data` silently defeats `user_data_replace_on_change`
+
+The example module sets `user_data_replace_on_change = true` on
+`aws_instance.server`, and that setting is the only thing that makes a config
+change reach a running box: `user_data` is a cloud-init script, cloud-init runs
+once per instance, and neither an in-place update nor a stop/start re-runs it.
+Replacing the instance is how the unit file gets rewritten.
+
+Terraform can only trigger that replacement if it can *compare* the new
+`user_data` to the old one at plan time. Feed the template a value that is
+unknown until apply — the classic case being a bucket name taken from a
+resource created in the same run, `aws_s3_bucket.artifacts.id` — and the whole
+rendered script becomes `(known after apply)`. There is nothing to compare, so
+the replacement is not planned. Terraform plans `will be updated in-place`
+instead, the apply succeeds, `user_data_base64` is faithfully updated in state
+and in the instance attribute, and *nothing on the machine changes*. The new
+image is never pulled and the new flags are never passed. The failure is
+entirely silent: a green apply, a clean plan afterwards, and a server still
+running the old configuration.
+
+This bit the S3 artifact-tier rollout, where `--s3-bucket` was wired straight to
+the bucket resource. The fix is to keep every value that lands in `user_data`
+known at plan time — put the bucket name in a `locals` literal and let the
+`aws_s3_bucket` resource take *its* name from the same local, rather than the
+other way round. The plan then reads `must be replaced`, which is both correct
+and visible.
+
+Watch for it whenever a new server arg is threaded through `extra_server_args`.
+The tell is in the plan: an instance whose `user_data_base64` shows
+`-> (known after apply)` under `will be updated in-place` is a no-op apply, not
+a config change.
