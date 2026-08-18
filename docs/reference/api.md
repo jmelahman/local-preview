@@ -271,10 +271,16 @@ Returns deploys, newest first. Narrow the list with any combination of:
 | `?repo=<name>` | exact repo name |
 | `?branch=<name>` | exact branch name |
 | `?author=<text>` | case-insensitive substring of the commit author's name or email |
-| `?status=<status>` | exact build status — `queued`, `building`, `ready`, `failed`, or `evicted` (anything else is `400`) |
+| `?status=<status>` | exact build status — `queued`, `building`, `ready`, `failed`, or `evicted` — plus `crashed` (anything else is `400`); see below |
 | `?q=<text>` | free-text search: a commit-sha prefix, or a case-insensitive substring of the repo, branch, ref, or author |
 | `?limit=<n>` | at most the newest `n` deploys, applied after the other filters (a non-positive or non-integer value is `400`) |
 | `?offset=<n>` | skip the newest `n` matches before returning any (a negative or non-integer value is `400`) |
+
+`?status=crashed` is the one value that isn't a stored build status: it
+matches ready deploys whose supervised process died (the state `process` /
+`fe_process` report as `"crashed"`), resolved against the live supervisor at
+request time. Those deploys are **excluded** from `?status=ready`, so the
+two are disjoint and "ready" means a preview that can still serve.
 
 Every response carries an **`X-Total-Count`** header: how many deploys match
 the filter in total, ignoring `limit` and `offset`. That's what a pager needs

@@ -40,7 +40,7 @@ Start the orchestrator.
 | Command | Description |
 | --- | --- |
 | `preview deploy [ref]` | Deploy a commit (default: HEAD of the current repo) and print its preview URL, plus a download URL per [artifact](/reference/preview-toml#artifacts-name) file |
-| `preview deploy list [query]` | List deploys. The optional query is a free-text search — a commit-sha prefix, or a substring of the repo, branch, ref, or author (case-insensitive); `--repo`, `--branch`, `--author`, `--status` each narrow by one field |
+| `preview deploy list [query]` | List deploys. The optional query is a free-text search — a commit-sha prefix, or a substring of the repo, branch, ref, or author (case-insensitive); `--repo`, `--branch`, `--author`, `--status` each narrow by one field (`--status crashed` lists the ready deploys whose process died, which `--status ready` leaves out) |
 | `preview deploy show <id>` | Print one deploy as JSON |
 | `preview deploy logs <id>` | Print a deploy's build logs |
 | `preview deploy logs <id> --run` | Print the process run log — the preview server's stdout+stderr, init output included. `--side fe` selects a process-mode frontend; `-f`/`--follow` keeps polling for new output until interrupted |

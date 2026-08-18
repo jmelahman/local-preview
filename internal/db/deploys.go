@@ -175,6 +175,14 @@ type DeployFilter struct {
 	Author string
 	// Status matches the build status exactly (queued/building/ready/...).
 	Status string
+	// Crashed narrows on runtime state, which no column holds: the caller
+	// passes the supervisor's currently-crashed process keys in
+	// CrashedProcs, and Crashed says whether to keep only the deploys they
+	// name (CrashedOnly) or drop them (CrashedNone). A crashed deploy is a
+	// ready one whose process died, so it would otherwise answer to
+	// status=ready.
+	Crashed      CrashedMode
+	CrashedProcs []ProcKey
 	// Query is a free-text search: a case-insensitive prefix of the commit
 	// sha, or a case-insensitive substring of the repo name, branch, ref,
 	// author name, or author email.
@@ -185,6 +193,25 @@ type DeployFilter struct {
 	// by descending id, so a deploy created between two page fetches shifts
 	// the window rather than corrupting it.
 	Offset int
+}
+
+// CrashedMode selects how a filter treats deploys with a crashed side.
+type CrashedMode int
+
+// Crashed filter modes.
+const (
+	CrashedAny  CrashedMode = iota // runtime state is ignored
+	CrashedOnly                    // only deploys with a crashed side
+	CrashedNone                    // only deploys with no crashed side
+)
+
+// ProcKey names one supervised process by the deploy columns that identify
+// it: a backend by its be_hash, a process-mode frontend by its fe_hash
+// paired with the backend it was started against.
+type ProcKey struct {
+	RepoID int64
+	FeHash string // empty for a backend process
+	BeHash string
 }
 
 // IsDeployStatus reports whether s is one of the deploy build statuses.
@@ -219,6 +246,29 @@ func deployWhere(f DeployFilter) (string, []any) {
 	if f.Status != "" {
 		where = append(where, `d.status = ?`)
 		args = append(args, f.Status)
+	}
+	if f.Crashed != CrashedAny {
+		procs := []string{}
+		for _, k := range f.CrashedProcs {
+			if k.FeHash == "" {
+				procs = append(procs, `(d.repo_id = ? AND d.be_hash = ?)`)
+				args = append(args, k.RepoID, k.BeHash)
+				continue
+			}
+			procs = append(procs, `(d.repo_id = ? AND d.fe_hash = ? AND d.be_hash = ?)`)
+			args = append(args, k.RepoID, k.FeHash, k.BeHash)
+		}
+		switch {
+		case len(procs) == 0:
+			// Nothing is crashed: "only" matches no row, "none" every row.
+			if f.Crashed == CrashedOnly {
+				where = append(where, `0`)
+			}
+		case f.Crashed == CrashedOnly:
+			where = append(where, `(`+strings.Join(procs, ` OR `)+`)`)
+		default:
+			where = append(where, `NOT (`+strings.Join(procs, ` OR `)+`)`)
+		}
 	}
 	if f.Query != "" {
 		// instr = 1 is a wildcard-safe prefix match (shas are stored

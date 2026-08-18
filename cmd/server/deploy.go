@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -69,7 +70,7 @@ func deployCmd() *cobra.Command {
 	list.Flags().StringVar(&listFilter.Repo, "repo", "", "Only deploys of this repo")
 	list.Flags().StringVar(&listFilter.Branch, "branch", "", "Only deploys of this branch")
 	list.Flags().StringVar(&listFilter.Author, "author", "", "Only deploys whose commit author name or email contains this (case-insensitive)")
-	list.Flags().StringVar(&listFilter.Status, "status", "", "Only deploys with this build status (queued, building, ready, failed, evicted)")
+	list.Flags().StringVar(&listFilter.Status, "status", "", "Only deploys with this status (queued, building, ready, crashed, failed, evicted)")
 
 	show := &cobra.Command{
 		Use:   "show <id>",
@@ -429,19 +430,26 @@ func runDeployList(ctx context.Context, url string, out io.Writer, f client.Depl
 
 // displayState is the state a human should see: the build status, or for
 // ready deploys with supervised processes the merged runtime state —
-// starting while any side warms up, running only once every side is warm,
-// idle otherwise (a cold start awaits the first request).
+// crashed if any side died, starting while any side warms up, running only
+// once every side is warm, idle otherwise (a cold start awaits the first
+// request). A dead side outranks a live one: half a deploy can't serve the
+// preview, and reporting it as "ready" hides the only state a user has to
+// act on.
 func displayState(d client.Deploy) string {
 	if d.Status != "ready" {
 		return d.Status
 	}
+	sides := []string{d.Process, d.FeProcess}
+	if slices.Contains(sides, "crashed") {
+		return "crashed"
+	}
+	if slices.Contains(sides, "starting") {
+		return "starting"
+	}
 	warm := true
 	seen := false
-	for _, p := range []string{d.Process, d.FeProcess} {
-		switch p {
-		case "starting":
-			return "starting"
-		case "idle", "running":
+	for _, p := range sides {
+		if p == "idle" || p == "running" {
 			seen = true
 			warm = warm && p == "running"
 		}

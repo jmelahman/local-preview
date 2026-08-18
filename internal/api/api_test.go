@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -567,6 +568,17 @@ func TestCrashedProcessSurfaces(t *testing.T) {
 		t.Fatalf("backend stats = %+v, want crashed with the same reason", stats.Backend)
 	}
 
+	// The crash is a runtime state, not a build outcome, so the listing has
+	// to resolve it against the supervisor: the deploy answers to
+	// status=crashed, and stays out of status=ready, which is what a user
+	// filters by to see the previews that can still serve.
+	if ids, total := listDeployIDs(t, mux, "crashed"); len(ids) != 1 || ids[0] != 1 || total != 1 {
+		t.Fatalf("status=crashed listed %v (total %d), want deploy 1", ids, total)
+	}
+	if ids, total := listDeployIDs(t, mux, "ready"); len(ids) != 0 || total != 0 {
+		t.Fatalf("status=ready listed %v (total %d), want nothing while it's crashed", ids, total)
+	}
+
 	// Stopping acknowledges the crash: nothing is running, and the deploy
 	// reads idle again — with no leftover reason (decoded fresh, since an
 	// empty process_error is omitted from the body).
@@ -584,6 +596,38 @@ func TestCrashedProcessSurfaces(t *testing.T) {
 	if after.Process != "idle" || after.ProcessError != "" {
 		t.Fatalf("process after stop = %q (%q), want idle", after.Process, after.ProcessError)
 	}
+	// ...and the listing follows: no longer crashed, ready again.
+	if ids, total := listDeployIDs(t, mux, "crashed"); len(ids) != 0 || total != 0 {
+		t.Fatalf("status=crashed after stop listed %v (total %d), want nothing", ids, total)
+	}
+	if ids, total := listDeployIDs(t, mux, "ready"); len(ids) != 1 || ids[0] != 1 || total != 1 {
+		t.Fatalf("status=ready after stop listed %v (total %d), want deploy 1", ids, total)
+	}
+}
+
+// listDeployIDs returns the deploy ids a status filter matches, plus the
+// X-Total-Count the pager reads — the two must agree about the filter.
+func listDeployIDs(t *testing.T, mux *http.ServeMux, status string) ([]int64, int) {
+	t.Helper()
+	rec := doJSON(t, mux, "GET", "/api/deploys?status="+status, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status=%s: %d %s", status, rec.Code, rec.Body)
+	}
+	var rows []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	total, err := strconv.Atoi(rec.Header().Get("X-Total-Count"))
+	if err != nil {
+		t.Fatalf("X-Total-Count %q: %v", rec.Header().Get("X-Total-Count"), err)
+	}
+	ids := make([]int64, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
+	}
+	return ids, total
 }
 
 // TestObservabilityEndpoints covers the run-log tail and stats endpoints

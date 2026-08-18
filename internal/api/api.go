@@ -403,6 +403,22 @@ func (d Deps) processState(k supervise.Key) (state, detail string) {
 	return state, f.Detail
 }
 
+// crashedProcs translates the supervisor's crashed keys into the deploy
+// columns that identify them, so a listing can filter on runtime state
+// without the DB knowing anything about processes.
+func (d Deps) crashedProcs() []db.ProcKey {
+	keys := d.Super.CrashedKeys()
+	procs := make([]db.ProcKey, 0, len(keys))
+	for _, k := range keys {
+		if k.Side == supervise.SideFrontend {
+			procs = append(procs, db.ProcKey{RepoID: k.RepoID, FeHash: k.Hash, BeHash: k.Peer})
+			continue
+		}
+		procs = append(procs, db.ProcKey{RepoID: k.RepoID, BeHash: k.Hash})
+	}
+	return procs
+}
+
 // previewURL builds the public URL of a deploy's preview.
 func (d Deps) previewURL(row db.DeployRow) string {
 	return d.Config.Preview.URL(row.ShortSHA, row.RepoName)
@@ -449,9 +465,17 @@ func (d Deps) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handleListDeploys(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if st := q.Get("status"); st != "" && !db.IsDeployStatus(st) {
+	status, crashed := q.Get("status"), db.CrashedAny
+	switch {
+	case status == supervise.StatusCrashed:
+		// A crashed deploy is a ready one whose process died, so it answers
+		// to its own status rather than hiding under "ready".
+		status, crashed = db.DeployReady, db.CrashedOnly
+	case status == db.DeployReady:
+		crashed = db.CrashedNone
+	case status != "" && !db.IsDeployStatus(status):
 		httpError(w, http.StatusBadRequest, fmt.Sprintf(
-			"unknown status %q (one of: queued, building, ready, failed, evicted)", st))
+			"unknown status %q (one of: queued, building, ready, crashed, failed, evicted)", status))
 		return
 	}
 	limit := 0
@@ -476,10 +500,13 @@ func (d Deps) handleListDeploys(w http.ResponseWriter, r *http.Request) {
 		Repo:   q.Get("repo"),
 		Branch: q.Get("branch"),
 		Author: q.Get("author"),
-		Status: q.Get("status"),
+		Status: status,
 		Query:  q.Get("q"),
 		Limit:  limit,
 		Offset: offset,
+	}
+	if crashed != db.CrashedAny {
+		filter.Crashed, filter.CrashedProcs = crashed, d.crashedProcs()
 	}
 	// The body stays a plain array, so the match count — what a pager needs to
 	// know how far it can go — rides along in a header.

@@ -37,6 +37,11 @@ export type Repo = {
 
 export type DeployStatus = "queued" | "building" | "ready" | "failed" | "evicted";
 
+// What GET /api/deploys accepts as `status`: a build status, or "crashed"
+// for the ready deploys whose supervised process died — a runtime state no
+// row carries, which the server resolves against the live supervisor.
+export type DeployStatusFilter = DeployStatus | "crashed";
+
 // Live runtime state of a supervised process, present on ready deploys:
 // `process` for the backend, `fe_process` for process-mode frontends.
 // "crashed" means the last run or start attempt ended unexpectedly — the
@@ -179,10 +184,12 @@ export type GCResult = {
 // Narrows GET /api/deploys; empty fields don't filter. q is a free-text
 // search matching a commit-sha prefix or a substring of the repo, branch,
 // ref, or author (case-insensitive); status matches the build status
-// exactly; limit and offset take one page of the newest-first order.
+// exactly, plus "crashed" for the ready deploys whose process died — those
+// are excluded from "ready"; limit and offset take one page of the
+// newest-first order.
 export type DeployFilter = {
   q?: string;
-  status?: DeployStatus | "";
+  status?: DeployStatusFilter | "";
   limit?: number;
   offset?: number;
 };

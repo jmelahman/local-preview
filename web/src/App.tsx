@@ -5,6 +5,7 @@ import {
   type Deploy,
   type DeployArtifact,
   type DeployStatus,
+  type DeployStatusFilter,
   type GCResult,
   type LogSide,
   type ProcessState,
@@ -1519,7 +1520,17 @@ function StorageDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-const deployStatuses: DeployStatus[] = ["queued", "building", "ready", "failed", "evicted"];
+// Filter options, in build-lifecycle order with "crashed" beside the
+// runtime state it names: a crashed deploy built fine, so it sorts after
+// "ready" — which no longer answers for it.
+const deployStatuses: DeployStatusFilter[] = [
+  "queued",
+  "building",
+  "ready",
+  "crashed",
+  "failed",
+  "evicted",
+];
 
 // The list fetches one page at a time — deploys accumulate per commit, and
 // the 5s poll shouldn't grow with a repo's whole history. Older deploys are
@@ -1531,7 +1542,7 @@ export default function App() {
   const [dialog, setDialog] = useState<"register" | "deploy" | "repos" | "storage" | null>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<DeployStatus | "">("");
+  const [statusFilter, setStatusFilter] = useState<DeployStatusFilter | "">("");
   const query = useDebounced(search.trim(), 200);
   const filtersActive = query !== "" || statusFilter !== "";
   const [offset, setOffset] = useState(0);
@@ -1663,7 +1674,7 @@ export default function App() {
               </div>
               <select
                 value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value as DeployStatus | "")}
+                onChange={(e) => setStatusFilter(e.target.value as DeployStatusFilter | "")}
                 aria-label="Filter by status"
                 className="h-7 cursor-pointer rounded border border-border bg-surface px-2 text-sm text-fg"
               >

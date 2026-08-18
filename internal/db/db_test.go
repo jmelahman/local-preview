@@ -314,6 +314,95 @@ func TestListDeploysFilter(t *testing.T) {
 	}
 }
 
+// TestListDeploysCrashedFilter: runtime state lives in the supervisor, not
+// in a column, so the caller hands in the crashed process keys and the
+// filter matches deploy rows against them — by be_hash for a backend (every
+// deploy sharing that artifact is served by the one process) and by the
+// fe_hash/be_hash pair for a process-mode frontend.
+func TestListDeploysCrashedFilter(t *testing.T) {
+	s := newTestStore(t)
+	r, _ := s.CreateRepo("app", "/src/app", "/bare/app", RepoReady)
+	shaB := "bbbbbbb2222222222222222222222222222222222"
+	shaC := "ccccccc3333333333333333333333333333333333"
+	hashes := map[string][2]string{
+		shaA: {"fe1", "be1"}, // shares be1 with shaB
+		shaB: {"fe2", "be1"},
+		shaC: {"fe3", "be2"},
+	}
+	byID := map[string]int64{}
+	for _, sha := range []string{shaA, shaB, shaC} {
+		d, err := s.CreateDeploy(r.ID, sha, DeployMeta{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := hashes[sha]
+		if err := s.SetDeployHashes(d.ID, h[0], h[1], "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetDeployReady(d.ID); err != nil {
+			t.Fatal(err)
+		}
+		byID[sha] = d.ID
+	}
+
+	deadBackend := ProcKey{RepoID: r.ID, BeHash: "be1"}
+	deadFrontend := ProcKey{RepoID: r.ID, FeHash: "fe3", BeHash: "be2"}
+	for name, tc := range map[string]struct {
+		f    DeployFilter
+		want []string
+	}{
+		"backend crash covers both deploys on it": {
+			DeployFilter{Status: DeployReady, Crashed: CrashedOnly, CrashedProcs: []ProcKey{deadBackend}},
+			[]string{shaB, shaA},
+		},
+		"ready excludes them": {
+			DeployFilter{Status: DeployReady, Crashed: CrashedNone, CrashedProcs: []ProcKey{deadBackend}},
+			[]string{shaC},
+		},
+		"frontend crash is keyed by its backend too": {
+			DeployFilter{Status: DeployReady, Crashed: CrashedOnly, CrashedProcs: []ProcKey{deadFrontend}},
+			[]string{shaC},
+		},
+		"a frontend key doesn't match its peer's other deploys": {
+			DeployFilter{Status: DeployReady, Crashed: CrashedOnly,
+				CrashedProcs: []ProcKey{{RepoID: r.ID, FeHash: "fe1", BeHash: "be1"}}},
+			[]string{shaA},
+		},
+		"another repo's crash matches nothing": {
+			DeployFilter{Status: DeployReady, Crashed: CrashedOnly,
+				CrashedProcs: []ProcKey{{RepoID: r.ID + 1, BeHash: "be1"}}},
+			nil,
+		},
+		"nothing crashed: only matches nothing": {
+			DeployFilter{Status: DeployReady, Crashed: CrashedOnly},
+			nil,
+		},
+		"nothing crashed: none matches everything": {
+			DeployFilter{Status: DeployReady, Crashed: CrashedNone},
+			[]string{shaC, shaB, shaA},
+		},
+	} {
+		got, err := s.ListDeploys(tc.f)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		shas := make([]string, len(got))
+		for i, d := range got {
+			shas[i] = d.SHA
+		}
+		if !slices.Equal(shas, tc.want) {
+			t.Errorf("%s: %v, want %v", name, shas, tc.want)
+		}
+		n, err := s.CountDeploys(tc.f)
+		if err != nil {
+			t.Fatalf("%s: count: %v", name, err)
+		}
+		if n != len(tc.want) {
+			t.Errorf("%s: count %d, want %d", name, n, len(tc.want))
+		}
+	}
+}
+
 func TestListDeploysLimit(t *testing.T) {
 	s := newTestStore(t)
 	r, err := s.CreateRepo("app", "/src/app", "/bare/app", RepoReady)

@@ -215,10 +215,11 @@ func (c *Client) CreateDeploy(ctx context.Context, repo, ref string, rebuild boo
 }
 
 // DeployFilter narrows ListDeploys; zero-value fields don't filter. It
-// mirrors the API's query params: repo, branch, and status match exactly,
-// author is a case-insensitive substring of the author name or email, and
-// query is a free-text search (sha prefix, or a substring of the repo,
-// branch, ref, or author).
+// mirrors the API's query params: repo, branch, and status match exactly
+// (status also takes "crashed", the ready deploys whose process died, which
+// "ready" excludes), author is a case-insensitive substring of the author
+// name or email, and query is a free-text search (sha prefix, or a
+// substring of the repo, branch, ref, or author).
 type DeployFilter struct {
 	Repo   string
 	Branch string

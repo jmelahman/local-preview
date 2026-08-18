@@ -172,6 +172,22 @@ func (m *Manager) LastFailure(k Key) (Failure, bool) {
 	return f, ok
 }
 
+// CrashedKeys returns every key Status would currently report as
+// "crashed" — a recorded failure with no process since started under it.
+// Runtime state lives only here, so a listing that wants to filter on it
+// has to ask for the set and match deploy rows against it.
+func (m *Manager) CrashedKeys() []Key {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	keys := make([]Key, 0, len(m.failures))
+	for k := range m.failures {
+		if m.procs[k] == nil {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
 // SetMaxWarm caps concurrently running processes: beyond it the
 // least-recently-used are stopped. Non-positive disables the cap. Call
 // before StartReaper.
