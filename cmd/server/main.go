@@ -153,8 +153,8 @@ func Root() *cobra.Command {
 	serve.Flags().StringVar(&opts.s3Bucket, "s3-bucket", "", "Bucket for the durable artifact tier (default: $PREVIEW_S3_BUCKET; required to enable it)")
 	serve.Flags().StringVar(&opts.s3Prefix, "s3-prefix", "", "Optional key prefix within the artifact-tier bucket (default: $PREVIEW_S3_PREFIX)")
 	serve.Flags().StringVar(&opts.s3Region, "s3-region", "", "Region for the artifact-tier bucket (default: $PREVIEW_S3_REGION)")
-	serve.Flags().StringVar(&opts.s3AccessKey, "s3-access-key", "", "Access key for the artifact tier (default: $PREVIEW_S3_ACCESS_KEY or $AWS_ACCESS_KEY_ID)")
-	serve.Flags().StringVar(&opts.s3SecretKey, "s3-secret-key", "", "Secret key for the artifact tier (default: $PREVIEW_S3_SECRET_KEY or $AWS_SECRET_ACCESS_KEY)")
+	serve.Flags().StringVar(&opts.s3AccessKey, "s3-access-key", "", "Access key for the artifact tier (default: $PREVIEW_S3_ACCESS_KEY; leave unset to use the ambient AWS environment or instance role)")
+	serve.Flags().StringVar(&opts.s3SecretKey, "s3-secret-key", "", "Secret key for the artifact tier (default: $PREVIEW_S3_SECRET_KEY; must be set together with --s3-access-key)")
 	serve.Flags().BoolVar(&opts.s3UseSSL, "s3-use-ssl", true, "Use TLS for the artifact-tier endpoint (set false for local MinIO over http)")
 	serve.Flags().Int64Var(&opts.cacheMaxArtifactBytes, "cache-max-artifact-bytes", 0, "Soft cap on resident (local-disk) artifact bytes; the coldest artifacts are swept back to the durable tier above it. Requires the artifact tier; 0 disables cache eviction and keeps every artifact resident (default: $PREVIEW_CACHE_MAX_ARTIFACT_BYTES)")
 	serve.Flags().StringVar(&opts.role, "role", "all", "Serving role: 'all' (single node — API, dashboard, proxy, and local process supervision), 'control' (route previews to a worker tier), or 'worker' (supervise processes on behalf of a control node)")
@@ -199,10 +199,14 @@ func run(opts serveOptions) error {
 	envDefault(&opts.s3Bucket, "PREVIEW_S3_BUCKET")
 	envDefault(&opts.s3Prefix, "PREVIEW_S3_PREFIX")
 	envDefault(&opts.s3Region, "PREVIEW_S3_REGION")
+	// Deliberately no AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY fallback here.
+	// Those two are only half of an AWS identity — temporary credentials also
+	// carry AWS_SESSION_TOKEN — so lifting the pair into an explicit keypair
+	// would build a signature the service rejects, and would shadow the
+	// instance role the deployed server actually authenticates as. Left unset,
+	// the tier resolves the whole environment itself (see s3store.credsFor).
 	envDefault(&opts.s3AccessKey, "PREVIEW_S3_ACCESS_KEY")
-	envDefault(&opts.s3AccessKey, "AWS_ACCESS_KEY_ID")
 	envDefault(&opts.s3SecretKey, "PREVIEW_S3_SECRET_KEY")
-	envDefault(&opts.s3SecretKey, "AWS_SECRET_ACCESS_KEY")
 	envDefaultInt64(&opts.cacheMaxArtifactBytes, "PREVIEW_CACHE_MAX_ARTIFACT_BYTES")
 	envDefault(&opts.workerSecret, "PREVIEW_WORKER_SECRET")
 	envDefault(&opts.workerEndpoint, "PREVIEW_WORKER_ENDPOINT")

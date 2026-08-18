@@ -53,6 +53,9 @@ type Config struct {
 	Bucket    string
 	Prefix    string // optional key prefix within the bucket
 	Region    string
+	// AccessKey and SecretKey are an explicit static keypair — MinIO, or any
+	// endpoint with no ambient identity. Leave both empty to resolve
+	// credentials from the environment instead; see credsFor.
 	AccessKey string
 	SecretKey string
 	UseSSL    bool
@@ -70,6 +73,32 @@ type Tier struct {
 	tmpDir string
 }
 
+// credsFor resolves how the tier authenticates.
+//
+// An explicit keypair wins, and is the only way to reach an endpoint with no
+// ambient identity (MinIO in compose, a dev bucket). Otherwise the tier falls
+// back to a chain, because the deployed orchestrator authenticates to S3 as its
+// EC2 instance role: there is no keypair to configure, and inventing one would
+// mean minting a long-lived IAM user and keeping its secret somewhere, to buy
+// nothing the instance profile does not already provide.
+//
+// The chain also fixes what a static keypair cannot express. Role credentials
+// are temporary and carry a session token, so lifting AWS_ACCESS_KEY_ID and
+// AWS_SECRET_ACCESS_KEY into a static V4 signer while dropping
+// AWS_SESSION_TOKEN produces a signature the service rejects. EnvAWS reads all
+// three together, and IAM refreshes from IMDS before expiry rather than
+// signing with a keypair that has gone stale.
+func credsFor(cfg Config) *credentials.Credentials {
+	if cfg.AccessKey != "" && cfg.SecretKey != "" {
+		return credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, "")
+	}
+	return credentials.NewChainCredentials([]credentials.Provider{
+		&credentials.EnvAWS{},
+		&credentials.EnvMinio{},
+		&credentials.IAM{},
+	})
+}
+
 // New dials the endpoint and verifies the bucket exists. It fails closed: a
 // misconfigured or unreachable bucket returns an error rather than a Tier that
 // would silently drop every artifact.
@@ -77,8 +106,14 @@ func New(cfg Config) (*Tier, error) {
 	if cfg.Endpoint == "" || cfg.Bucket == "" {
 		return nil, fmt.Errorf("s3 tier: endpoint and bucket are required")
 	}
+	// Half a keypair is a typo, not a request to fall back to the environment.
+	// Silently ignoring it would authenticate as something the operator did not
+	// ask for — or, with no ambient identity, fail with an opaque 403.
+	if (cfg.AccessKey == "") != (cfg.SecretKey == "") {
+		return nil, fmt.Errorf("s3 tier: access key and secret key must be set together (leave both empty to use the ambient AWS environment)")
+	}
 	client, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Creds:  credsFor(cfg),
 		Secure: cfg.UseSSL,
 		Region: cfg.Region,
 	})

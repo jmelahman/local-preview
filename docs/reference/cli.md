@@ -26,7 +26,7 @@ Start the orchestrator.
 | `--sso-allowed-logins` / `--sso-allowed-emails` | `$PREVIEW_SSO_ALLOWED_LOGINS` / `_EMAILS` | Comma-separated usernames / verified emails |
 | `--s3-endpoint` / `--s3-bucket` | `$PREVIEW_S3_ENDPOINT` / `$PREVIEW_S3_BUCKET` | S3/MinIO endpoint and bucket; both enable the [artifact tier](/guide/configuration#artifact-tier-s3) (built artifacts persist and hydrate instead of rebuilding after eviction) |
 | `--s3-prefix` / `--s3-region` | `$PREVIEW_S3_PREFIX` / `$PREVIEW_S3_REGION` | Optional key prefix and bucket region |
-| `--s3-access-key` / `--s3-secret-key` | `$PREVIEW_S3_ACCESS_KEY` / `$PREVIEW_S3_SECRET_KEY` | Artifact-tier credentials (fall back to `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) |
+| `--s3-access-key` / `--s3-secret-key` | `$PREVIEW_S3_ACCESS_KEY` / `$PREVIEW_S3_SECRET_KEY` | Static artifact-tier keypair, for an endpoint with no ambient identity. Set both or neither; unset resolves the AWS environment or instance role |
 | `--s3-use-ssl` | `true` | Use TLS for the endpoint (set `false` for local MinIO over http) |
 | `--cache-max-artifact-bytes` | `$PREVIEW_CACHE_MAX_ARTIFACT_BYTES` (`0`) | Soft cap on resident (local-disk) artifact bytes; above it the coldest artifacts are swept back to the durable tier and re-hydrated on serve. Requires the artifact tier; `0` disables cache eviction and keeps every artifact resident |
 | `--role` | `all` | Serving role: `all` (single node), `control` (route previews to a worker tier), or `worker` (supervise processes for a control node) |

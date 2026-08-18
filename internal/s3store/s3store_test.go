@@ -140,3 +140,60 @@ func extractTarTest(t *testing.T, r io.Reader, destDir string) error {
 		f.Close()
 	}
 }
+
+// The deployed orchestrator authenticates as its EC2 instance role, so an
+// unset keypair must resolve credentials from the environment rather than sign
+// with an empty static one. The session token is the part that matters: role
+// credentials are temporary, and a signature missing it is rejected.
+func TestCredsForFallsBackToEnvironment(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ASIAROLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "rolesecret")
+	t.Setenv("AWS_SESSION_TOKEN", "roletoken")
+
+	got, err := credsFor(Config{}).Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.AccessKeyID != "ASIAROLE" || got.SecretAccessKey != "rolesecret" {
+		t.Errorf("keypair = %q/%q, want ASIAROLE/rolesecret", got.AccessKeyID, got.SecretAccessKey)
+	}
+	if got.SessionToken != "roletoken" {
+		t.Errorf("session token = %q, want roletoken — a temporary credential signed without it is rejected", got.SessionToken)
+	}
+}
+
+// An explicit keypair still wins, so a MinIO endpoint with no ambient identity
+// is unaffected by the fallback above.
+func TestCredsForPrefersExplicitKeypair(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ASIAROLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "rolesecret")
+
+	got, err := credsFor(Config{AccessKey: "minio", SecretKey: "miniosecret"}).Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.AccessKeyID != "minio" || got.SecretAccessKey != "miniosecret" {
+		t.Errorf("keypair = %q/%q, want minio/miniosecret", got.AccessKeyID, got.SecretAccessKey)
+	}
+}
+
+// Half a keypair is a typo. Falling back to the environment would authenticate
+// as an identity the operator did not ask for, so it fails closed instead.
+func TestNewRejectsHalfKeypair(t *testing.T) {
+	for _, tc := range []struct{ name, access, secret string }{
+		{"secret only", "", "s"},
+		{"access only", "a", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(Config{
+				Endpoint:  "s3.example.com",
+				Bucket:    "b",
+				AccessKey: tc.access,
+				SecretKey: tc.secret,
+			})
+			if err == nil {
+				t.Fatal("New succeeded, want error")
+			}
+		})
+	}
+}

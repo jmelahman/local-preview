@@ -45,3 +45,13 @@ output "dns_records" {
     }
   ]
 }
+
+output "instance_role_name" {
+  description = <<-EOT
+    Name of the IAM role the server assumes. Attach an aws_iam_role_policy to
+    it to grant the orchestrator anything the module does not itself provide —
+    most usefully a bucket for the durable artifact tier, which the server
+    reaches through this role rather than a configured keypair.
+  EOT
+  value       = aws_iam_role.instance.name
+}

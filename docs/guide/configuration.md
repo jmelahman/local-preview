@@ -103,8 +103,8 @@ for lookup order and caching semantics.
 | `--s3-bucket` | (unset) | Bucket for the artifact tier (required to enable it) |
 | `--s3-prefix` | (unset) | Optional key prefix within the bucket |
 | `--s3-region` | (unset) | Region for the bucket |
-| `--s3-access-key` | (unset) | Access key. Prefer the environment variable — flags are visible in `ps` |
-| `--s3-secret-key` | (unset) | Secret key. Prefer the environment variable — flags are visible in `ps` |
+| `--s3-access-key` | (unset) | Static access key, for an endpoint with no ambient identity (MinIO). Leave unset to use the AWS environment or instance role. Prefer the environment variable — flags are visible in `ps` |
+| `--s3-secret-key` | (unset) | Matching secret key; must be set together with `--s3-access-key`. Prefer the environment variable — flags are visible in `ps` |
 | `--s3-use-ssl` | `true` | Use TLS for the endpoint; set `false` for a local MinIO over http |
 
 ## Environment variables
@@ -126,7 +126,7 @@ for lookup order and caching semantics.
 | `PREVIEW_S3_ENDPOINT` | `preview serve` | Artifact-tier endpoint `host:port` (an explicit `--s3-endpoint` flag wins) |
 | `PREVIEW_S3_BUCKET` | `preview serve` | Artifact-tier bucket (an explicit `--s3-bucket` flag wins) |
 | `PREVIEW_S3_PREFIX` / `PREVIEW_S3_REGION` | `preview serve` | Key prefix and region (the matching flag wins) |
-| `PREVIEW_S3_ACCESS_KEY` / `PREVIEW_S3_SECRET_KEY` | `preview serve` | Artifact-tier credentials (the matching flag wins). Fall back to `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` |
+| `PREVIEW_S3_ACCESS_KEY` / `PREVIEW_S3_SECRET_KEY` | `preview serve` | Static artifact-tier keypair (the matching flag wins). Unset both to resolve credentials from the AWS environment or instance role instead |
 | `PREVIEW_CACHE_MAX_ARTIFACT_BYTES` | `preview serve` | Soft cap on resident (local-disk) artifact bytes; the coldest are swept to the durable tier above it (an explicit `--cache-max-artifact-bytes` flag wins). Requires the artifact tier; `0` (default) keeps every artifact resident |
 | `PREVIEW_WORKER_SECRET` | `preview serve` | Shared secret for the internal worker API (an explicit `--worker-secret` flag wins) |
 | `PREVIEW_WORKER_ENDPOINT` | `preview serve --role=control` | A worker's private worker-API base URL (an explicit `--worker-endpoint` flag wins) |
@@ -223,9 +223,17 @@ preview serve \
   --s3-endpoint s3.amazonaws.com \
   --s3-bucket my-preview-artifacts \
   --s3-region us-east-1
-# credentials via env (preferred): PREVIEW_S3_ACCESS_KEY / PREVIEW_S3_SECRET_KEY,
-# or the standard AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
 ```
+
+No credentials are configured above, which is the intended shape on AWS: with
+the keypair left unset the tier resolves credentials from the environment —
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, then the
+EC2 instance role. Grant the role the bucket and there is no long-lived secret
+to store or rotate.
+
+Set `PREVIEW_S3_ACCESS_KEY` / `PREVIEW_S3_SECRET_KEY` only for an endpoint with
+no ambient identity, such as MinIO. Set both or neither — half a keypair is
+rejected at startup rather than silently falling back.
 
 For a local MinIO over plain http:
 
