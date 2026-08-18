@@ -51,7 +51,9 @@ preview --server https://preview.example.com repo add my-app https://github.com/
 An unconfigured server has none, and reaching it is equivalent to shell
 access on this host: anyone who can load the dashboard can register a repo
 and make the instance run that repo's build commands. The module therefore
-requires `allowed_ingress_cidrs` and rejects `0.0.0.0/0`.
+requires `allowed_ingress_cidrs`, and rejects `0.0.0.0/0` unless `sso` or
+`oidc` is configured — open ingress is a supported choice, but only once
+something is checking who is calling.
 
 There are three ways to add authentication, and they gate different things:
 
@@ -66,6 +68,13 @@ any path to the instance, and one allowlist covers browsers and the CLI
 alike. `oidc` stops requests earlier — before they reach the instance at all
 — but only browsers can complete its redirect. They compose; the security
 group stays closed either way unless you decide otherwise.
+
+Opening it is a real option once `sso` is on — it is what lets uploads run
+from hosted CI runners, whose addresses you do not control. What you give up
+is containment: the security group is what stops a bug in the session check
+from being reachable by everyone, so weigh how long the auth path has been
+in service. If you do open it, set `access_logs_bucket` — the load balancer
+is the only thing that records requests it turned away.
 
 ### Sign in with GitHub (`sso`)
 

@@ -367,7 +367,19 @@ resource "aws_lb" "server" {
   idle_timeout = 300
 
   drop_invalid_header_fields = true
-  tags                       = local.tags
+
+  # Only the ALB sees requests it turned away, so this is the sole record of
+  # traffic that never reached the server.
+  dynamic "access_logs" {
+    for_each = var.access_logs_bucket == null ? [] : [var.access_logs_bucket]
+    content {
+      bucket  = access_logs.value
+      prefix  = var.access_logs_prefix
+      enabled = true
+    }
+  }
+
+  tags = local.tags
 }
 
 resource "aws_lb_target_group" "server" {

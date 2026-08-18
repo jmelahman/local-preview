@@ -7,20 +7,25 @@ variable "name" {
 variable "allowed_ingress_cidrs" {
   description = <<-EOT
     CIDRs allowed to reach the dashboard and previews. Required, with no
-    default, on purpose: the server has no authentication, and anyone who
-    can reach the dashboard can register a repo and make the host run that
-    repo's build commands. Keep this to a VPN/office range.
+    default, on purpose: registering a repo makes the host run that repo's
+    build commands, so reaching an unauthenticated dashboard is equivalent
+    to shell access here. Keep this to a VPN/office range unless `sso` or
+    `oidc` is configured.
   EOT
   type        = list(string)
 
   validation {
     condition     = length(var.allowed_ingress_cidrs) > 0
-    error_message = "allowed_ingress_cidrs must not be empty — the server has no auth of its own."
+    error_message = "allowed_ingress_cidrs must not be empty — a server nothing can reach is not a security posture."
   }
 
+  # 0.0.0.0/0 is a decision, not a typo, so it is allowed — but only once
+  # something else is checking who is calling. Without sso or oidc the
+  # security group is the whole of the authentication, and opening it turns
+  # the dashboard's build-running into remote code execution for anyone.
   validation {
-    condition     = !contains(var.allowed_ingress_cidrs, "0.0.0.0/0")
-    error_message = "Refusing 0.0.0.0/0: an unauthenticated dashboard open to the internet is remote code execution. Front it with an authenticating proxy instead."
+    condition     = !contains(var.allowed_ingress_cidrs, "0.0.0.0/0") || var.sso != null || var.oidc != null
+    error_message = "Refusing 0.0.0.0/0 with no authentication: an open dashboard runs arbitrary build commands on this host. Set sso (or oidc) first."
   }
 }
 
@@ -41,6 +46,29 @@ variable "route53_zone_id" {
 
 variable "subnet_id" {
   description = "Public subnet for the instance. Defaults to a subnet of the region's default VPC."
+  type        = string
+  default     = null
+}
+
+variable "access_logs_bucket" {
+  description = <<-EOT
+    S3 bucket the ALB writes access logs to. Unset disables logging.
+
+    Worth setting whenever allowed_ingress_cidrs is open: the server's own
+    logs record what it served, but only the load balancer sees the requests
+    it rejected, and a rejected request is the interesting one. The bucket
+    must already carry a policy admitting the regional ELB log-delivery
+    principal — the module does not create it, since a log bucket usually
+    outlives and outscopes one server.
+
+    Ignored when enable_tls is false; without the ALB there is nothing to log.
+  EOT
+  type        = string
+  default     = null
+}
+
+variable "access_logs_prefix" {
+  description = "Key prefix within access_logs_bucket. Lets one bucket hold logs from several load balancers."
   type        = string
   default     = null
 }
