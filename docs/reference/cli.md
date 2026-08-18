@@ -54,6 +54,35 @@ Flags on `preview deploy`:
 
 The command exits non-zero if the deploy fails, so it can gate scripts.
 
+## `preview upload`
+
+Publish a CI-built side into the server's content-addressed store so a deploy
+of the commit serves it without rebuilding — see
+[uploading prebuilt artifacts](/guide/uploads). The server resolves the ref
+and computes the same hash a build would target, then lands the upload in that
+slot. Each `<path>` may be a directory (its **contents** are tarred, so the tar
+root maps to the published root) or an existing `.tar`/`.tar.gz` file. The ref
+defaults to HEAD of the current repo.
+
+| Command | Description |
+| --- | --- |
+| `preview upload frontend <path> [ref]` | Upload a prebuilt frontend — the `dist` tree for a static bundle, or the built `path` tree for a [process-mode frontend](/reference/preview-toml#process-mode-frontends) |
+| `preview upload backend <path> [ref]` | Upload a prebuilt backend tree (the built `backend.path` tree, run as-is) |
+| `preview upload artifact <name> <path> [ref]` | Upload a named [downloadable artifact](/reference/preview-toml#artifacts-name); the tree must contain the artifact's declared `files` at their `path`-relative locations |
+
+Flags (shared by every subcommand):
+
+| Flag | Description |
+| --- | --- |
+| `--repo` | Registered repo name; by default the current directory is matched against registered sources |
+| `--overwrite` | Replace the artifact if it is already present (an upload of an already-present hash is otherwise a no-op) |
+| `--deploy` | Deploy the commit after uploading and wait for its preview URL — the one-command CI flow |
+
+An upload primes the store independently of any deploy: order doesn't matter,
+and an uploaded side is shared by every commit with the same hash. Exits
+non-zero on an unresolvable ref, a manifest error, or a tar missing a declared
+artifact file.
+
 ## `preview open`
 
 Jump from a checkout to its preview: `preview open` finds the deploy of the

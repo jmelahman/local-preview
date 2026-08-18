@@ -141,3 +141,26 @@ backlog of any size delays only its own resume.
 before the server listens, or a `Start`-time loop that assumes the DB holds
 fewer rows than a buffer. Startup work that can be proportional to accumulated
 state belongs in a goroutine, and its sends need a cancellation arm.
+
+## Uploads must hash only the side being uploaded
+
+**Symptom.** `preview upload frontend …` (or backend, or one artifact) failed
+with an unrelated side's error — e.g. `artifacts.cli: artifact partition
+matches no files at this commit` — even though the frontend it was publishing
+was perfectly valid.
+
+**Root cause.** `Queue.Upload` computed the target slot by calling
+`resolveHashes`, which hashes *every* side of the commit (that's what
+`buildDeploy` needs — it decides what to build across all sides). Any side
+whose partition is empty or otherwise unhashable at that commit made the whole
+call fail, so uploading side A depended on sides B and C being valid.
+
+**Fix.** Split the per-commit `hashInputs` (devcontainer + `LsTree`) from the
+per-side computations (`feHashOf`/`beHashOf`/`artHashOf`). `resolveHashes`
+composes all three for the build; `Upload` calls only the one for the side it
+is publishing. Both paths share the same per-side funcs, so an upload still
+lands byte-for-byte in the slot a build would target.
+
+**What would reintroduce it.** Having `Upload` (or any single-side path) reach
+for `resolveHashes` again for convenience. Hash exactly the side you're
+touching — never the whole commit — unless you genuinely need every hash.

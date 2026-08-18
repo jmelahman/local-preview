@@ -349,19 +349,71 @@ func (c *Client) GetDeployStats(ctx context.Context, id int64) (DeployStats, err
 	return s, nil
 }
 
+// UploadResult mirrors the API's upload response: the resolved commit, the
+// content-address the upload targeted, and whether bytes actually landed
+// (false when the artifact was already present and overwrite wasn't set).
+type UploadResult struct {
+	SHA       string       `json:"sha"`
+	ShortSHA  string       `json:"short_sha"`
+	Side      string       `json:"side"`
+	Name      string       `json:"name,omitempty"`
+	Hash      string       `json:"hash"`
+	Published bool         `json:"published"`
+	Files     []UploadFile `json:"files,omitempty"`
+}
+
+// UploadFile is one published file of an uploaded downloadable artifact.
+type UploadFile struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+// Upload streams a CI-built side (a tar or tar.gz of the frontend bundle,
+// backend tree, or a named artifact's files) into the content-addressed store
+// for repo at ref. side is "frontend", "backend", or "artifact" (with name);
+// overwrite replaces an already-present artifact. The server resolves ref and
+// computes the hash — the same one a build would target.
+func (c *Client) Upload(ctx context.Context, repo, side, name, ref string, overwrite bool, body io.Reader) (UploadResult, error) {
+	var path string
+	switch side {
+	case "artifact":
+		path = fmt.Sprintf("/api/repos/%s/uploads/artifacts/%s", url.PathEscape(repo), url.PathEscape(name))
+	default:
+		path = fmt.Sprintf("/api/repos/%s/uploads/%s", url.PathEscape(repo), side)
+	}
+	q := url.Values{"ref": {ref}}
+	if overwrite {
+		q.Set("overwrite", "true")
+	}
+	raw, err := c.doStream(ctx, http.MethodPost, path+"?"+q.Encode(), "application/octet-stream", body)
+	if err != nil {
+		return UploadResult{}, err
+	}
+	var res UploadResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return UploadResult{}, fmt.Errorf("decode upload result: %w", err)
+	}
+	return res, nil
+}
+
 // do performs a request and returns the response body, converting non-2xx
 // responses into errors using the API's {"error": "..."} body when present.
 func (c *Client) do(ctx context.Context, method, path string, body []byte) (json.RawMessage, error) {
-	var reader io.Reader
-	if body != nil {
-		reader = bytes.NewReader(body)
+	if body == nil {
+		return c.doStream(ctx, method, path, "", nil)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
+	return c.doStream(ctx, method, path, "application/json", bytes.NewReader(body))
+}
+
+// doStream is do with a streaming body and explicit content type — used for
+// tar uploads, which must not be buffered whole into memory.
+func (c *Client) doStream(ctx context.Context, method, path, contentType string, body io.Reader) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
 		return nil, err
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

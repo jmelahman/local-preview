@@ -1,0 +1,303 @@
+package build
+
+import (
+	"archive/tar"
+	"bufio"
+	"compress/gzip"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/store"
+)
+
+// Upload sides — which content-addressed slot a prebuilt upload primes.
+const (
+	SideFrontend = "frontend"
+	SideBackend  = "backend"
+	SideArtifact = "artifact"
+)
+
+// ErrNoSuchArtifact marks an upload targeting a name the deployed commit's
+// manifest doesn't declare as an artifact; the API maps it to 404.
+var ErrNoSuchArtifact = errors.New("no such artifact")
+
+// UploadResult reports what an upload published (or would have): the resolved
+// commit, the content-address it targeted, and whether bytes actually landed
+// (false when the artifact was already present and overwrite wasn't set).
+type UploadResult struct {
+	SHA       string       `json:"sha"`
+	ShortSHA  string       `json:"short_sha"`
+	Side      string       `json:"side"`
+	Name      string       `json:"name,omitempty"`
+	Hash      string       `json:"hash"`
+	Published bool         `json:"published"`
+	Files     []UploadFile `json:"files,omitempty"`
+}
+
+// UploadFile is one published file of an uploaded downloadable artifact.
+type UploadFile struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+// Upload publishes a CI-built side (frontend bundle, backend tree, or a named
+// downloadable artifact) into the content-addressed store for a commit, so a
+// deploy of that commit — or any commit sharing the hash — serves it without
+// building. The server is the authority on the hash: it resolves ref → sha,
+// reads the manifest at that commit, and computes the side's content-address
+// exactly like a build (resolveHashes), then lands the uploaded tar in the same
+// slot buildDeploy would target. body is a tar stream, optionally gzip-compressed.
+//
+// It never touches deploy rows: an upload is a store-priming operation, ordered
+// independently of the deploy that eventually references it. Already-present and
+// not overwrite is a no-op (Published=false).
+func (q *Queue) Upload(ctx context.Context, repoName, ref, side, name string, body io.Reader, overwrite bool) (UploadResult, error) {
+	if side == SideArtifact && name == "" {
+		return UploadResult{}, fmt.Errorf("an artifact name is required")
+	}
+	_, gr, sha, err := q.resolveRepoRef(ctx, repoName, ref)
+	if err != nil {
+		return UploadResult{}, err
+	}
+	row := db.DeployRow{Deploy: db.Deploy{SHA: sha, ShortSHA: shortSHA(sha)}, RepoName: repoName}
+	m, err := q.loadManifest(ctx, gr, row)
+	if err != nil {
+		return UploadResult{}, err
+	}
+	// Only the uploaded side is hashed — an upload of one side must not depend
+	// on the others' partitions being valid.
+	env, entries, err := q.hashInputs(ctx, gr, sha, m)
+	if err != nil {
+		return UploadResult{}, err
+	}
+
+	res := UploadResult{SHA: sha, ShortSHA: row.ShortSHA, Side: side, Name: name}
+	switch side {
+	case SideFrontend:
+		if res.Hash, err = feHashOf(m.Frontend, env, entries); err != nil {
+			return UploadResult{}, err
+		}
+		if !overwrite && q.files.HasFrontend(repoName, res.Hash) {
+			return res, nil
+		}
+		dir, cleanup, err := q.stageUpload(body)
+		if err != nil {
+			return UploadResult{}, err
+		}
+		defer cleanup()
+		if err := q.files.PublishFrontend(repoName, res.Hash, dir, overwrite); err != nil {
+			return UploadResult{}, err
+		}
+		res.Published = true
+	case SideBackend:
+		if res.Hash, err = beHashOf(m, env, entries); err != nil {
+			return UploadResult{}, err
+		}
+		if !overwrite && q.files.HasBackend(repoName, res.Hash) {
+			return res, nil
+		}
+		dir, cleanup, err := q.stageUpload(body)
+		if err != nil {
+			return UploadResult{}, err
+		}
+		defer cleanup()
+		if err := q.files.PublishBackend(repoName, res.Hash, dir, overwrite); err != nil {
+			return UploadResult{}, err
+		}
+		res.Published = true
+	case SideArtifact:
+		spec, ok := m.Artifacts[name]
+		if !ok {
+			return UploadResult{}, fmt.Errorf("%w %q at %s", ErrNoSuchArtifact, name, res.ShortSHA)
+		}
+		if res.Hash, err = artHashOf(m, spec, env, entries); err != nil {
+			return UploadResult{}, err
+		}
+		if !overwrite && q.files.HasArtifact(repoName, res.Hash) {
+			res.Files = toUploadFiles(q.files.ListArtifactFiles(repoName, res.Hash))
+			return res, nil
+		}
+		dir, cleanup, err := q.stageUpload(body)
+		if err != nil {
+			return UploadResult{}, err
+		}
+		defer cleanup()
+		// Reuses the build's publish: each declared file is copied out flat by
+		// base name, and a missing one fails the upload ("was not produced by
+		// the build") — so the tar must carry the declared files at their
+		// path-relative locations, exactly as the build produces them.
+		if err := q.files.PublishArtifactFiles(repoName, res.Hash, dir, spec.Files, overwrite); err != nil {
+			return UploadResult{}, err
+		}
+		res.Published = true
+		res.Files = toUploadFiles(q.files.ListArtifactFiles(repoName, res.Hash))
+	default:
+		return UploadResult{}, fmt.Errorf("unknown upload side %q", side)
+	}
+	return res, nil
+}
+
+// stageUpload extracts the uploaded tar(.gz) into a fresh scratch dir whose
+// contents become the published artifact (frontend/backend) or the tree the
+// declared files are copied out of (artifact). The cleanup is safe after a
+// successful publish, whose rename moves the dir out from under it.
+func (q *Queue) stageUpload(body io.Reader) (string, func(), error) {
+	dir, cleanup, err := q.files.NewScratchDir("upload")
+	if err != nil {
+		return "", nil, err
+	}
+	if err := extractTar(body, dir); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("extract upload: %w", err)
+	}
+	return dir, cleanup, nil
+}
+
+func toUploadFiles(fs []store.ArtifactFile) []UploadFile {
+	out := make([]UploadFile, len(fs))
+	for i, f := range fs {
+		out[i] = UploadFile{Name: f.Name, Size: f.Size}
+	}
+	return out
+}
+
+func shortSHA(sha string) string {
+	if len(sha) <= 7 {
+		return sha
+	}
+	return sha[:7]
+}
+
+// extractTar extracts a tar stream — gzip-compressed or raw — into destDir. It
+// is hardened against archives crafted to escape destDir: entry names that are
+// absolute or contain ".." are rejected, and symlink/hardlink targets that
+// resolve outside destDir are refused. Only regular files, directories, and
+// in-tree symlinks/hardlinks are extracted; other entry types are skipped.
+func extractTar(r io.Reader, destDir string) error {
+	br := bufio.NewReader(r)
+	// Sniff the gzip magic so raw .tar and .tar.gz both work.
+	if magic, err := br.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
+		gz, err := gzip.NewReader(br)
+		if err != nil {
+			return fmt.Errorf("gzip: %w", err)
+		}
+		defer gz.Close()
+		return extractTarStream(gz, destDir)
+	}
+	return extractTarStream(br, destDir)
+}
+
+func extractTarStream(r io.Reader, destDir string) error {
+	root, err := filepath.Abs(destDir)
+	if err != nil {
+		return err
+	}
+	tr := tar.NewReader(r)
+	seen := false
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		target, err := safeJoin(root, hdr.Name)
+		if err != nil {
+			return err
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := writeFileFrom(tr, target, hdr.FileInfo().Mode().Perm()); err != nil {
+				return err
+			}
+			seen = true
+		case tar.TypeSymlink, tar.TypeLink:
+			// Symlink targets are relative to the link's own directory;
+			// hardlink targets are archive paths relative to root. Either way
+			// the resolved target must stay inside destDir — and an absolute
+			// target always escapes, so reject it before it becomes a symlink
+			// literally pointing outside the tree.
+			if filepath.IsAbs(hdr.Linkname) || strings.HasPrefix(hdr.Linkname, "/") {
+				return fmt.Errorf("absolute link target %q in upload", hdr.Name)
+			}
+			var resolved string
+			if hdr.Typeflag == tar.TypeSymlink {
+				resolved = filepath.Join(filepath.Dir(target), filepath.FromSlash(hdr.Linkname))
+			} else if resolved, err = safeJoin(root, hdr.Linkname); err != nil {
+				return err
+			}
+			if !withinRoot(root, resolved) {
+				return fmt.Errorf("unsafe link target %q in upload", hdr.Name)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			os.Remove(target) // tolerate a re-extraction over an existing entry
+			if hdr.Typeflag == tar.TypeSymlink {
+				err = os.Symlink(hdr.Linkname, target)
+			} else {
+				err = os.Link(resolved, target)
+			}
+			if err != nil {
+				return err
+			}
+			seen = true
+		default:
+			// Skip devices, fifos, and other unsupported entry types.
+		}
+	}
+	if !seen {
+		return fmt.Errorf("upload archive contained no files")
+	}
+	return nil
+}
+
+// safeJoin joins a tar entry name onto root, rejecting absolute paths and ".."
+// escapes so a crafted archive can't write outside the extraction root.
+func safeJoin(root, name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("empty path in upload")
+	}
+	if filepath.IsAbs(name) || strings.HasPrefix(name, "/") {
+		return "", fmt.Errorf("absolute path %q in upload", name)
+	}
+	clean := filepath.Clean(filepath.FromSlash(name))
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path %q escapes the upload root", name)
+	}
+	joined := filepath.Join(root, clean)
+	if !withinRoot(root, joined) {
+		return "", fmt.Errorf("unsafe path %q in upload", name)
+	}
+	return joined, nil
+}
+
+func withinRoot(root, p string) bool {
+	return p == root || strings.HasPrefix(p, root+string(os.PathSeparator))
+}
+
+func writeFileFrom(r io.Reader, dst string, perm os.FileMode) error {
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}

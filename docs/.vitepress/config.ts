@@ -42,6 +42,7 @@ export default defineConfig({
             { text: 'Quickstart', link: '/guide/quickstart' },
             { text: 'Concepts', link: '/guide/concepts' },
             { text: 'Deployment triggers', link: '/guide/triggers' },
+            { text: 'Uploading prebuilt artifacts', link: '/guide/uploads' },
             { text: 'Configuration', link: '/guide/configuration' },
             { text: 'Deploying to a server', link: '/guide/deploy-terraform' },
             { text: 'External dependencies', link: '/guide/external-dependencies' },

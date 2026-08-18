@@ -179,27 +179,7 @@ func (q *Queue) enqueue(id int64) {
 // enqueue. Idempotent per (repo, sha): an in-flight or ready deploy is
 // returned as-is unless rebuild is set.
 func (q *Queue) RequestDeploy(ctx context.Context, repoName, ref string, rebuild bool) (db.DeployRow, error) {
-	repo, err := q.db.GetRepoByName(repoName)
-	if err != nil {
-		return db.DeployRow{}, err
-	}
-	switch repo.Status {
-	case db.RepoReady:
-	case db.RepoCloning:
-		return db.DeployRow{}, fmt.Errorf("repo %q is still cloning: %w", repoName, ErrRepoNotReady)
-	default:
-		return db.DeployRow{}, fmt.Errorf("clone of repo %q failed (%s): %w", repoName, repo.Error, ErrRepoNotReady)
-	}
-	gr := q.git.Open(repo.Name)
-
-	// Branch/tag names resolve against local refs, which go stale — fetch
-	// first. Full or abbreviated shas use ResolveRef's fetch-on-miss retry.
-	if !looksLikeSHA(ref) {
-		if _, err := gr.Fetch(ctx); err != nil {
-			return db.DeployRow{}, fmt.Errorf("fetch %s: %w", repoName, err)
-		}
-	}
-	sha, err := gr.ResolveRef(ctx, ref)
+	repo, gr, sha, err := q.resolveRepoRef(ctx, repoName, ref)
 	if err != nil {
 		return db.DeployRow{}, err
 	}
@@ -231,6 +211,37 @@ func (q *Queue) RequestDeploy(ctx context.Context, repoName, ref string, rebuild
 		return db.DeployRow{}, err
 	}
 	return q.db.GetDeployByID(d.ID)
+}
+
+// resolveRepoRef looks up a ready repo and resolves ref to a commit sha. Branch
+// and tag names resolve against local refs, which go stale, so it fetches
+// first; full or abbreviated shas rely on ResolveRef's fetch-on-miss retry.
+// Shared by RequestDeploy and Upload so a deploy and an upload of the same ref
+// always resolve to the same commit. A repo that isn't ready (still cloning, or
+// its clone failed) returns ErrRepoNotReady.
+func (q *Queue) resolveRepoRef(ctx context.Context, repoName, ref string) (db.Repo, gitrepo.Repo, string, error) {
+	repo, err := q.db.GetRepoByName(repoName)
+	if err != nil {
+		return db.Repo{}, gitrepo.Repo{}, "", err
+	}
+	switch repo.Status {
+	case db.RepoReady:
+	case db.RepoCloning:
+		return db.Repo{}, gitrepo.Repo{}, "", fmt.Errorf("repo %q is still cloning: %w", repoName, ErrRepoNotReady)
+	default:
+		return db.Repo{}, gitrepo.Repo{}, "", fmt.Errorf("clone of repo %q failed (%s): %w", repoName, repo.Error, ErrRepoNotReady)
+	}
+	gr := q.git.Open(repo.Name)
+	if !looksLikeSHA(ref) {
+		if _, err := gr.Fetch(ctx); err != nil {
+			return db.Repo{}, gitrepo.Repo{}, "", fmt.Errorf("fetch %s: %w", repoName, err)
+		}
+	}
+	sha, err := gr.ResolveRef(ctx, ref)
+	if err != nil {
+		return db.Repo{}, gitrepo.Repo{}, "", err
+	}
+	return repo, gr, sha, nil
 }
 
 // EvictUnreachable reclaims deploys of repo whose commit is no longer
@@ -363,29 +374,14 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 	if err != nil {
 		return err
 	}
-	env := q.loadDevcontainer(ctx, gr, row.SHA, m)
-	entries, err := gr.LsTree(ctx, row.SHA, "")
+	hs, err := q.resolveHashes(ctx, gr, row.SHA, m)
 	if err != nil {
 		return err
 	}
-	feHash, err := hashkey.Frontend(m.Frontend,
-		devcExtra(env.devc, m.Frontend.Image, m.Frontend.RunImage, len(m.Frontend.Run) > 0), entries)
-	if err != nil {
-		return err
-	}
-	beHash, err := hashkey.Backend(m.Backend, m.Frontend.Path,
-		devcExtra(env.devc, m.Backend.Image, m.Backend.RunImage, true), entries)
-	if err != nil {
-		return err
-	}
-	artNames := slices.Sorted(maps.Keys(m.Artifacts))
-	artRefs := make(map[string]db.ArtifactRef, len(artNames))
-	for _, name := range artNames {
-		h, err := hashkey.Artifact(m.Artifacts[name], m.Frontend.Path,
-			devcExtra(env.devc, m.Artifacts[name].Image, "", false), entries)
-		if err != nil {
-			return fmt.Errorf("artifacts.%s: %w", name, err)
-		}
+	feHash, beHash, env := hs.fe, hs.be, hs.env
+	artRefs := make(map[string]db.ArtifactRef, len(hs.art))
+	for _, name := range slices.Sorted(maps.Keys(hs.art)) {
+		h := hs.art[name]
 		// Artifacts build after the deploy turns ready (see buildArtifacts);
 		// a cache hit is ready the moment its hash is known.
 		status := db.ArtifactBuilding
@@ -471,6 +467,72 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 		}
 	}
 	return q.super.ForkOrInitStateDir(ctx, gr, repo.ID, row.RepoName, beHash, row.SHA, string(runCfg))
+}
+
+// hashSet is a commit's resolved content-addresses: the frontend and backend
+// hashes plus one per declared downloadable artifact (keyed by name). env is
+// the resolved build environment, carried alongside so a caller that goes on to
+// build a side doesn't resolve the devcontainer twice.
+type hashSet struct {
+	fe  string
+	be  string
+	art map[string]string
+	env buildEnv
+}
+
+// hashInputs resolves the two per-commit inputs every side's content-address
+// shares: the build environment (the commit's devcontainer, when a side would
+// use it) and the filtered git tree. Splitting this out lets Upload hash a
+// single side without hashing — and thus without requiring valid partitions
+// for — the others.
+func (q *Queue) hashInputs(ctx context.Context, gr gitrepo.Repo, sha string, m manifest.Manifest) (buildEnv, []gitrepo.TreeEntry, error) {
+	env := q.loadDevcontainer(ctx, gr, sha, m)
+	entries, err := gr.LsTree(ctx, sha, "")
+	return env, entries, err
+}
+
+// feHashOf, beHashOf, and artHashOf are the per-side content-address
+// computations. They are the single source of truth shared by resolveHashes
+// (the build) and Upload: an uploaded side must land in the exact slot a build
+// would target, which holds only because both feed hashkey identical inputs
+// (manifest section, resolved devcontainer via devcExtra, filtered tree).
+func feHashOf(fe manifest.Frontend, env buildEnv, entries []gitrepo.TreeEntry) (string, error) {
+	return hashkey.Frontend(fe, devcExtra(env.devc, fe.Image, fe.RunImage, len(fe.Run) > 0), entries)
+}
+
+func beHashOf(m manifest.Manifest, env buildEnv, entries []gitrepo.TreeEntry) (string, error) {
+	return hashkey.Backend(m.Backend, m.Frontend.Path,
+		devcExtra(env.devc, m.Backend.Image, m.Backend.RunImage, true), entries)
+}
+
+func artHashOf(m manifest.Manifest, spec manifest.Artifact, env buildEnv, entries []gitrepo.TreeEntry) (string, error) {
+	return hashkey.Artifact(spec, m.Frontend.Path, devcExtra(env.devc, spec.Image, "", false), entries)
+}
+
+// resolveHashes computes the content-address of every side of a commit — what
+// buildDeploy needs, since it hashes all sides to decide what to build.
+func (q *Queue) resolveHashes(ctx context.Context, gr gitrepo.Repo, sha string, m manifest.Manifest) (hashSet, error) {
+	env, entries, err := q.hashInputs(ctx, gr, sha, m)
+	if err != nil {
+		return hashSet{}, err
+	}
+	feHash, err := feHashOf(m.Frontend, env, entries)
+	if err != nil {
+		return hashSet{}, err
+	}
+	beHash, err := beHashOf(m, env, entries)
+	if err != nil {
+		return hashSet{}, err
+	}
+	art := make(map[string]string, len(m.Artifacts))
+	for _, name := range slices.Sorted(maps.Keys(m.Artifacts)) {
+		h, err := artHashOf(m, m.Artifacts[name], env, entries)
+		if err != nil {
+			return hashSet{}, fmt.Errorf("artifacts.%s: %w", name, err)
+		}
+		art[name] = h
+	}
+	return hashSet{fe: feHash, be: beHash, art: art, env: env}, nil
 }
 
 // buildArtifacts builds the deploy's still-pending downloadable artifacts.

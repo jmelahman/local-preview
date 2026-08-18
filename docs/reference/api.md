@@ -312,6 +312,62 @@ artifact, or file; `409` while the deploy isn't ready, while the artifact
 is still building (they build after the deploy turns ready), or when its
 build failed.
 
+## Uploads
+
+Publish a CI-built side into the content-addressed store so a deploy serves it
+without rebuilding — see [uploading prebuilt artifacts](/guide/uploads). The
+server is the authority on the hash: it resolves `ref → sha`, reads the
+manifest at that commit, and computes the same content-address a build would
+target, then lands the uploaded bytes in that slot. An upload touches no deploy
+row — it primes the store, and any deploy of a commit sharing the hash then
+skips that build.
+
+### `POST /api/repos/{repo}/uploads/frontend`
+### `POST /api/repos/{repo}/uploads/backend`
+### `POST /api/repos/{repo}/uploads/artifacts/{name}`
+
+The request body is a **tar** stream, optionally gzip-compressed (both are
+accepted; the server sniffs). Its entries are relative to the published root:
+the `dist` tree (or the built `path` tree for a process-mode frontend) for
+`frontend`, the built `backend.path` tree for `backend`, and the artifact's
+declared `files` at their `path`-relative locations for an artifact.
+
+| Query param | Meaning |
+| --- | --- |
+| `ref` | Required — the branch, tag, or (abbreviated) sha to resolve and hash |
+| `overwrite` | Optional bool; replace an already-present artifact instead of no-op'ing |
+
+Response: `200 OK`. `published` is `false` when the artifact was already
+present and `overwrite` wasn't set (an idempotent no-op).
+
+```json
+{
+  "sha": "a1b2c3d4…",
+  "short_sha": "a1b2c3d",
+  "side": "frontend",
+  "hash": "…",
+  "published": true
+}
+```
+
+An artifact upload additionally echoes the published files:
+
+```json
+{
+  "sha": "a1b2c3d4…", "short_sha": "a1b2c3d",
+  "side": "artifact", "name": "cli", "hash": "…", "published": true,
+  "files": [ { "name": "mycli", "size": 5242880 } ]
+}
+```
+
+Errors: `404` for an unknown repo or an artifact name the manifest doesn't
+declare; `409` if the repo isn't `ready` (still cloning, or its clone failed);
+`400` for a missing/unresolvable `ref`, a manifest error, a malformed tar, or a
+tar missing a declared artifact file.
+
+There is no authentication (as elsewhere in this API) — the server trusts the
+uploader's bytes for the commit exactly as it trusts its own build output.
+
 ## Storage & retention
 
 ### `GET /api/storage`

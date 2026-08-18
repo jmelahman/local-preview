@@ -16,7 +16,7 @@ const defaultServerURL = "http://localhost:8080"
 // They're thin wrappers over the HTTP API, useful for scripting and remote
 // control of a running `preview serve`.
 func addClientCommands(root *cobra.Command) {
-	root.AddCommand(repoCmd(), deployCmd(), openCmd(), installHookCmd(), configureCmd())
+	root.AddCommand(repoCmd(), deployCmd(), uploadCmd(), openCmd(), installHookCmd(), configureCmd())
 }
 
 // resolveURL returns the effective server URL for a leaf command: an

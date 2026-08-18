@@ -25,6 +25,17 @@ Builds always run against the committed tree, extracted from the server's
 mirror clone, never against a working directory. Every trigger therefore
 produces identical artifacts for the same commit.
 
+### Uploading instead of building
+
+Because artifacts are addressed by commit content, nothing requires the
+*server* to be what produces them. CI that already builds each side can
+[upload it](/guide/uploads): the server resolves the commit, computes the same
+hash a build would target, and lands the uploaded bytes in that exact slot. A
+deploy then finds the side already present and skips the build — served
+canonically, and shared across every commit with the same hash, identical to a
+locally-built artifact. The server stays the single authority on the hash; the
+upload only replaces the step that fills the slot.
+
 ## Deploy-agnostic frontends
 
 One frontend bundle is served under every subdomain that references it, so
