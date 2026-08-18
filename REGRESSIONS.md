@@ -164,3 +164,26 @@ lands byte-for-byte in the slot a build would target.
 **What would reintroduce it.** Having `Upload` (or any single-side path) reach
 for `resolveHashes` again for convenience. Hash exactly the side you're
 touching — never the whole commit — unless you genuinely need every hash.
+
+## GitHub OIDC upload auth: custom audience, and verify before repo lookup
+
+**Symptom (latent).** Two ways this feature can be quietly wrong. (1) If the
+server's `--github-oidc-audience` is left at GitHub's *default* audience — the
+repository owner URL, `https://github.com/<owner>` — then any workflow in the
+org can mint a token with that `aud`, so the per-repo `source` binding is the
+only thing standing between org repo A and uploading to registered repo B.
+(2) If the repo were looked up *before* the token is verified, an
+unauthenticated caller could probe which repos are registered by reading
+404-vs-401 on the upload path.
+
+**Root cause / fix.** (1) The audience must be a value unique to this server;
+we default the client to request the server URL and document setting
+`--github-oidc-audience` to the same. A custom audience scopes tokens to this
+service so they can't be replayed from another workload in the org. (2)
+`authorizeUpload` verifies the bearer token first and only then calls
+`GetRepoByName` — an unauthenticated caller always gets `401`, never a repo-
+existence signal. Authorization then binds `claims.repository` to the repo's
+`source` via `normalizeGitURL`, so repo A's workflow can never upload to repo B.
+
+**What would reintroduce it.** Documenting or shipping a default/empty audience;
+or reordering the gate to resolve the repo before verifying the token.

@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/clone"
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/githuboidc"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/retain"
 	"github.com/jmelahman/local-preview/internal/store"
@@ -62,6 +64,18 @@ type Deps struct {
 	// GitHubWebhookSecret validates X-Hub-Signature-256 on webhook
 	// deliveries; empty disables POST /api/webhooks/github.
 	GitHubWebhookSecret string
+	// UploadAuth authenticates upload requests against GitHub Actions OIDC.
+	// When non-nil, every upload must present a valid token whose repository
+	// claim matches the target repo's source; nil leaves uploads
+	// unauthenticated (the default, matching the rest of the API).
+	UploadAuth UploadVerifier
+}
+
+// UploadVerifier verifies an upload's bearer token and returns the GitHub
+// Actions OIDC claims it carries. *githuboidc.Verifier implements it; tests
+// substitute a fake so verification needs no network.
+type UploadVerifier interface {
+	Verify(ctx context.Context, rawToken string) (githuboidc.Claims, error)
 }
 
 // NewMux returns the apex-host handler: API routes plus the dashboard SPA.

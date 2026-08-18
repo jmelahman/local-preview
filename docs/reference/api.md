@@ -365,8 +365,24 @@ declare; `409` if the repo isn't `ready` (still cloning, or its clone failed);
 `400` for a missing/unresolvable `ref`, a manifest error, a malformed tar, or a
 tar missing a declared artifact file.
 
-There is no authentication (as elsewhere in this API) — the server trusts the
-uploader's bytes for the commit exactly as it trusts its own build output.
+#### Authentication
+
+By default there is no authentication — the server trusts the uploader's bytes
+for the commit exactly as it trusts its own build output; run it where only
+your CI can reach it.
+
+Starting the server with `--github-oidc-audience` (see
+[configuration](/guide/configuration#flags)) turns the upload endpoints
+into authenticated ones: every request must carry an
+`Authorization: Bearer <token>` header holding a [GitHub Actions OIDC
+token](/guide/uploads#authenticating-with-github-actions-oidc). The server
+verifies its signature, issuer, audience, and expiry, then authorizes it only
+against the repo whose registered `source` is the same GitHub repository the
+token's `repository` claim names. Additional statuses then apply:
+
+- `401` — no bearer token was presented.
+- `403` — the token is invalid/expired, or its `repository` doesn't match the
+  target repo's `source`.
 
 ## Storage & retention
 

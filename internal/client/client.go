@@ -73,8 +73,9 @@ type ArtifactFile struct {
 
 // Client talks to a running `preview serve` over HTTP.
 type Client struct {
-	base string
-	http *http.Client
+	base  string
+	http  *http.Client
+	token string
 }
 
 // New returns a client for the server at base. Pass nil to use
@@ -84,6 +85,14 @@ func New(base string, hc *http.Client) *Client {
 		hc = http.DefaultClient
 	}
 	return &Client{base: strings.TrimRight(base, "/"), http: hc}
+}
+
+// SetToken sets a bearer token sent as "Authorization: Bearer <token>" on
+// every request. Used by `preview upload` to present a GitHub Actions OIDC
+// token; returns the client for chaining.
+func (c *Client) SetToken(token string) *Client {
+	c.token = token
+	return c
 }
 
 // Health mirrors the API's health shape.
@@ -414,6 +423,9 @@ func (c *Client) doStream(ctx context.Context, method, path, contentType string,
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

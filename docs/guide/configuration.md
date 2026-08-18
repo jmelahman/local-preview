@@ -90,6 +90,8 @@ for lookup order and caching semantics.
 | `--max-warm` | `8` | Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (`0` = unlimited) |
 | `--poll-interval` | `1m` | How often [watched repos](/guide/triggers#watched-repos) are fetched for new commits (`0` disables watching) |
 | `--github-webhook-secret` | (unset) | Shared secret validating [GitHub webhook](/guide/triggers#github-webhooks) deliveries; empty disables the endpoint. Prefer the environment variable — flags are visible in `ps` |
+| `--github-oidc-audience` | (unset) | Expected `aud` of [GitHub Actions OIDC](/guide/uploads#authenticating-with-github-actions-oidc) tokens. Setting it **requires uploads to authenticate**; use a value unique to this server (its URL is a good choice) |
+| `--github-oidc-issuer` | `https://token.actions.githubusercontent.com` | OIDC issuer; override only for GitHub Enterprise Server |
 
 ## Environment variables
 
@@ -100,6 +102,9 @@ for lookup order and caching semantics.
 | `PREVIEW_DOMAIN` | `preview serve` | Preview base domain (an explicit `--preview-domain` flag wins) |
 | `PREVIEW_BASE_URL` | `preview serve` | Public base URL of previews (an explicit `--preview-base-url` flag wins). Not to be confused with `PREVIEW_URL`, which is a client setting |
 | `PREVIEW_GITHUB_WEBHOOK_SECRET` | `preview serve` | GitHub webhook shared secret (an explicit `--github-webhook-secret` flag wins) |
+| `PREVIEW_GITHUB_OIDC_AUDIENCE` | `preview serve`, `preview upload` | The OIDC audience: on the server it's the expected `aud` (an explicit `--github-oidc-audience` flag wins); on the client it's the audience requested for the token when `--oidc-audience` is unset |
+| `PREVIEW_GITHUB_OIDC_ISSUER` | `preview serve` | OIDC issuer override for GitHub Enterprise Server (an explicit `--github-oidc-issuer` flag wins) |
+| `PREVIEW_UPLOAD_TOKEN` | `preview upload` | A pre-fetched bearer token sent as-is; wins over `--oidc` and needs no runner |
 | `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins; this in turn beats the config file) |
 | `PREVIEW_BACKEND` | `web/` dev server | Backend `host:port` the Vite proxy targets |
 

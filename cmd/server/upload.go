@@ -17,8 +17,8 @@ import (
 )
 
 func uploadCmd() *cobra.Command {
-	var serverURL, repoFlag string
-	var overwrite, deploy bool
+	var serverURL, repoFlag, oidcAudience string
+	var overwrite, deploy, oidc bool
 
 	parent := &cobra.Command{
 		Use:   "upload",
@@ -27,20 +27,28 @@ func uploadCmd() *cobra.Command {
 			"the commit serves them without rebuilding. The server resolves the ref\n" +
 			"and computes the same hash a build would target, then lands the upload in\n" +
 			"that slot. Each <path> may be a directory (its contents are tarred) or an\n" +
-			"existing .tar/.tar.gz file. The ref defaults to HEAD of the current repo.",
+			"existing .tar/.tar.gz file. The ref defaults to HEAD of the current repo.\n\n" +
+			"When the server requires GitHub Actions OIDC, pass --oidc to authenticate\n" +
+			"with a token minted by the runner (needs `permissions: id-token: write`).",
 	}
 	addServerFlag(parent, &serverURL)
 	parent.PersistentFlags().StringVar(&repoFlag, "repo", "", "Registered repo name (default: auto-detect from cwd)")
 	parent.PersistentFlags().BoolVar(&overwrite, "overwrite", false, "Replace the artifact if it is already present")
 	parent.PersistentFlags().BoolVar(&deploy, "deploy", false, "Deploy the commit after uploading and print its preview URL")
+	parent.PersistentFlags().BoolVar(&oidc, "oidc", false, "Authenticate with a GitHub Actions OIDC token fetched from the runner")
+	parent.PersistentFlags().StringVar(&oidcAudience, "oidc-audience", "", "Audience to request for the OIDC token (default: $PREVIEW_GITHUB_OIDC_AUDIENCE, else the server URL)")
 
 	run := func(cmd *cobra.Command, side, name, path, ref string) error {
 		url, err := resolveURL(cmd, serverURL)
 		if err != nil {
 			return err
 		}
+		token, err := uploadToken(cmd.Context(), oidc, oidcAudience, url)
+		if err != nil {
+			return err
+		}
 		return runUpload(cmd.Context(), url, cmd.OutOrStdout(),
-			repoFlag, side, name, path, ref, overwrite, deploy)
+			repoFlag, side, name, path, ref, overwrite, deploy, token)
 	}
 
 	frontend := &cobra.Command{
@@ -79,8 +87,11 @@ func argRef(args []string, i int) string {
 	return ""
 }
 
-func runUpload(ctx context.Context, url string, out io.Writer, repoName, side, name, path, ref string, overwrite, deploy bool) error {
+func runUpload(ctx context.Context, url string, out io.Writer, repoName, side, name, path, ref string, overwrite, deploy bool, token string) error {
 	c := client.New(url, nil)
+	if token != "" {
+		c.SetToken(token)
+	}
 
 	if ref == "" {
 		sha, err := localHeadSHA(".")

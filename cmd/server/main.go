@@ -19,6 +19,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/clone"
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/githuboidc"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/proxy"
 	"github.com/jmelahman/local-preview/internal/retain"
@@ -80,6 +81,8 @@ type serveOptions struct {
 	maxWarm          int
 	pollInterval     time.Duration
 	githubSecret     string
+	githubOIDCAud    string
+	githubOIDCIssuer string
 }
 
 func Root() *cobra.Command {
@@ -107,6 +110,8 @@ func Root() *cobra.Command {
 	serve.Flags().IntVar(&opts.maxWarm, "max-warm", 8, "Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (0 = unlimited)")
 	serve.Flags().DurationVar(&opts.pollInterval, "poll-interval", watch.DefaultInterval, "How often watched repos are fetched for new commits (0 disables watching)")
 	serve.Flags().StringVar(&opts.githubSecret, "github-webhook-secret", "", "Shared secret validating GitHub webhook deliveries (default: $PREVIEW_GITHUB_WEBHOOK_SECRET; empty disables the endpoint)")
+	serve.Flags().StringVar(&opts.githubOIDCAud, "github-oidc-audience", "", "Expected audience of GitHub Actions OIDC tokens (default: $PREVIEW_GITHUB_OIDC_AUDIENCE); setting it requires uploads to authenticate with a valid token bound to the target repo")
+	serve.Flags().StringVar(&opts.githubOIDCIssuer, "github-oidc-issuer", githuboidc.DefaultIssuer, "GitHub Actions OIDC issuer (default: $PREVIEW_GITHUB_OIDC_ISSUER or the hosted issuer; override for GitHub Enterprise Server)")
 	cmd.AddCommand(serve)
 
 	addClientCommands(cmd)
@@ -117,6 +122,20 @@ func Root() *cobra.Command {
 func run(opts serveOptions) error {
 	if opts.githubSecret == "" {
 		opts.githubSecret = os.Getenv("PREVIEW_GITHUB_WEBHOOK_SECRET")
+	}
+	if opts.githubOIDCAud == "" {
+		opts.githubOIDCAud = os.Getenv("PREVIEW_GITHUB_OIDC_AUDIENCE")
+	}
+	if iss := os.Getenv("PREVIEW_GITHUB_OIDC_ISSUER"); iss != "" && opts.githubOIDCIssuer == githuboidc.DefaultIssuer {
+		opts.githubOIDCIssuer = iss
+	}
+	// Configuring an audience turns on OIDC auth for the upload endpoints; a
+	// nil verifier leaves them unauthenticated, as before.
+	var uploadAuth api.UploadVerifier
+	if opts.githubOIDCAud != "" {
+		uploadAuth = githuboidc.NewVerifier(opts.githubOIDCIssuer, opts.githubOIDCAud)
+		log.Printf("upload endpoints require GitHub Actions OIDC (issuer %s, audience %s)",
+			opts.githubOIDCIssuer, opts.githubOIDCAud)
 	}
 	cfg, err := config.Load(config.Options{
 		DataDir:        opts.dataDir,
@@ -179,6 +198,7 @@ func run(opts serveOptions) error {
 		Sweeper:             sweeper,
 		DBPath:              dbPath,
 		GitHubWebhookSecret: opts.githubSecret,
+		UploadAuth:          uploadAuth,
 	})
 	router := proxy.New(database, files, super, cfg.Preview.Domain, apex)
 

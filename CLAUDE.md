@@ -102,6 +102,9 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   a bounded-channel send before `ListenAndServe` wedges the whole server.
 - Uploads must hash only the side being uploaded — computing every side's hash
   (via `resolveHashes`) makes a one-side upload fail on an unrelated partition.
+- GitHub OIDC upload auth needs a custom `aud` (the default GH audience is
+  org-wide) and must verify the token before the repo lookup (else uploads leak
+  which repos exist).
 
 ## Documentation upkeep
 

@@ -59,13 +59,55 @@ upload of an already-present hash is a no-op (`published: false`); pass
 `--overwrite` to replace the bytes (a running backend keeps its old process
 until restarted, same as `--rebuild`).
 
+## Authenticating with GitHub Actions OIDC
+
+By default the upload endpoints are unauthenticated, so you must run the server
+where only your CI can reach it. To upload from GitHub Actions over the public
+internet instead, start the server with an **OIDC audience**:
+
+```bash
+preview serve --github-oidc-audience https://preview.example.com
+```
+
+That makes every upload require a GitHub Actions [OIDC
+token](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect).
+The server verifies the token's signature, issuer, audience, and expiry against
+GitHub's OIDC provider, then authorizes it **only** for the registered repo
+whose `source` is the same GitHub repository the token was minted in — a
+workflow in `acme/app` can upload to the repo registered from
+`github.com/acme/app` and nothing else. Pick an audience unique to your server
+(its URL is a good choice) so tokens minted for it can't be replayed elsewhere.
+
+In the workflow, grant the job `id-token: write` and pass `--oidc`; the CLI
+fetches a token from the runner and sends it as a bearer token:
+
+```yaml
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required to mint an OIDC token
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      # ... build web/dist ...
+      - run: |
+          preview upload frontend web/dist "$GITHUB_SHA" \
+            --repo myapp --server "$PREVIEW_URL" --oidc --deploy
+```
+
+`--oidc-audience` overrides the requested audience (default: the server URL);
+it must match the server's `--github-oidc-audience`. For non-Actions setups you
+can instead export a pre-fetched token as `PREVIEW_UPLOAD_TOKEN`, which is sent
+as-is. On GitHub Enterprise Server, point the server at your instance's issuer
+with `--github-oidc-issuer`.
+
 ## Trust and cleanup
 
 - **Trust.** The server can't verify uploaded bytes reproduce the commit —
   content addressing here is by git tree, not by built output. It trusts your
-  upload exactly as it trusts its own build. There is no authentication on the
-  endpoint, matching the rest of the [API](/reference/api#uploads); run the
-  server where only your CI can reach it.
+  upload exactly as it trusts its own build. OIDC authenticates *who* may
+  upload for a repo; it does not attest *what* the bytes are.
 - **Cleanup.** An uploaded side is reclaimed by [garbage
   collection](/reference/api#post-api-gc) once the deploy referencing its hash
   is removed, like any built artifact. A side you upload but *never* deploy has

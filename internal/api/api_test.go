@@ -76,6 +76,15 @@ func newSourceRepo(t *testing.T) string {
 
 func newTestMux(t *testing.T) (*http.ServeMux, string) {
 	t.Helper()
+	deps, root := newTestDeps(t)
+	return NewMux(deps), root
+}
+
+// newTestDeps builds a fully wired Deps against in-memory/temp storage.
+// Callers that need to tweak a field (e.g. UploadAuth) build the mux
+// themselves with NewMux.
+func newTestDeps(t *testing.T) (Deps, string) {
+	t.Helper()
 	database, err := db.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +110,7 @@ func newTestMux(t *testing.T) (*http.ServeMux, string) {
 	cloner := clone.New(database, gitMgr, nil)
 	cloner.Start(ctx)
 
-	return NewMux(Deps{
+	return Deps{
 		Store: database,
 		Build: BuildInfo{Version: "test"},
 		Config: config.Config{
@@ -116,7 +125,7 @@ func newTestMux(t *testing.T) (*http.ServeMux, string) {
 		Sweeper:             retain.New(database, super, files),
 		DBPath:              ":memory:",
 		GitHubWebhookSecret: testWebhookSecret,
-	}), root
+	}, root
 }
 
 func doJSON(t *testing.T, mux *http.ServeMux, method, path, body string) *httptest.ResponseRecorder {

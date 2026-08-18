@@ -77,6 +77,12 @@ Flags (shared by every subcommand):
 | `--repo` | Registered repo name; by default the current directory is matched against registered sources |
 | `--overwrite` | Replace the artifact if it is already present (an upload of an already-present hash is otherwise a no-op) |
 | `--deploy` | Deploy the commit after uploading and wait for its preview URL — the one-command CI flow |
+| `--oidc` | Authenticate with a [GitHub Actions OIDC](/guide/uploads#authenticating-with-github-actions-oidc) token minted from the runner (needs `permissions: id-token: write`) |
+| `--oidc-audience` | Audience to request for the OIDC token (default: `$PREVIEW_GITHUB_OIDC_AUDIENCE`, else the server URL) — must match the server's `--github-oidc-audience` |
+
+Setting `$PREVIEW_UPLOAD_TOKEN` sends that token as-is (a bearer `Authorization`
+header), taking precedence over `--oidc` and requiring no runner — an escape
+hatch for non-Actions OIDC or local testing.
 
 An upload primes the store independently of any deploy: order doesn't matter,
 and an uploaded side is shared by every commit with the same hash. Exits

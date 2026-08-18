@@ -4,13 +4,18 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/githuboidc"
 )
 
 func tarGz(t *testing.T, files map[string]string) []byte {
@@ -160,6 +165,131 @@ files = ["mycli"]
 	} {
 		if rec := doUpload(t, mux, tc.path, fe); rec.Code != tc.code {
 			t.Fatalf("%s: got %d, want %d (%s)", tc.name, rec.Code, tc.code, rec.Body)
+		}
+	}
+}
+
+// fakeVerifier is a stand-in UploadVerifier so the auth tests need no network
+// and no real GitHub token — it returns canned claims (or an error).
+type fakeVerifier struct {
+	claims githuboidc.Claims
+	err    error
+}
+
+func (f fakeVerifier) Verify(context.Context, string) (githuboidc.Claims, error) {
+	return f.claims, f.err
+}
+
+// doUploadTok is doUpload with an optional bearer token.
+func doUploadTok(t *testing.T, mux *http.ServeMux, path, token string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func newAuthMux(t *testing.T, v UploadVerifier) (*http.ServeMux, Deps) {
+	t.Helper()
+	deps, _ := newTestDeps(t)
+	deps.UploadAuth = v
+	return NewMux(deps), deps
+}
+
+// TestUploadOIDCAuth covers the auth gate on the upload endpoints when an
+// OIDC verifier is configured: the token is verified before the repo is even
+// looked up, and a verified token authorizes only the repo whose registered
+// source is the same GitHub repository the token names.
+func TestUploadOIDCAuth(t *testing.T) {
+	fe := tarGz(t, map[string]string{"index.html": "x"})
+
+	t.Run("missing token is 401", func(t *testing.T) {
+		mux, _ := newAuthMux(t, fakeVerifier{claims: githuboidc.Claims{Repository: "acme/app"}})
+		registerRepo(t, mux, "demo", newSourceRepo(t))
+		rec := doUpload(t, mux, "/api/repos/demo/uploads/frontend?ref=main", fe)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401 (%s)", rec.Code, rec.Body)
+		}
+		if got := rec.Header().Get("WWW-Authenticate"); got != "Bearer" {
+			t.Fatalf("WWW-Authenticate = %q, want Bearer", got)
+		}
+	})
+
+	t.Run("invalid token is 403", func(t *testing.T) {
+		mux, _ := newAuthMux(t, fakeVerifier{err: errors.New("bad signature")})
+		registerRepo(t, mux, "demo", newSourceRepo(t))
+		rec := doUploadTok(t, mux, "/api/repos/demo/uploads/frontend?ref=main", "some.jwt.token", fe)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("got %d, want 403 (%s)", rec.Code, rec.Body)
+		}
+	})
+
+	t.Run("unknown repo is 404 for an authenticated caller", func(t *testing.T) {
+		mux, _ := newAuthMux(t, fakeVerifier{claims: githuboidc.Claims{Repository: "acme/app"}})
+		rec := doUploadTok(t, mux, "/api/repos/nope/uploads/frontend?ref=main", "some.jwt.token", fe)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("got %d, want 404 (%s)", rec.Code, rec.Body)
+		}
+	})
+
+	t.Run("token for a different repo is 403", func(t *testing.T) {
+		mux, deps := newAuthMux(t, fakeVerifier{claims: githuboidc.Claims{Repository: "attacker/app"}})
+		mustCreateGitHubRepo(t, deps, "demo", "https://github.com/acme/app")
+		rec := doUploadTok(t, mux, "/api/repos/demo/uploads/frontend?ref=main", "some.jwt.token", fe)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("got %d, want 403 (%s)", rec.Code, rec.Body)
+		}
+	})
+
+	t.Run("matching token passes the gate", func(t *testing.T) {
+		mux, deps := newAuthMux(t, fakeVerifier{claims: githuboidc.Claims{Repository: "acme/app"}})
+		// A github source with no on-disk mirror: the gate must pass (not
+		// 401/403); the request then fails downstream in Queue.Upload. That is
+		// enough to prove the token authorized the request — the happy-path
+		// publish is covered by TestUploadEndpoints.
+		mustCreateGitHubRepo(t, deps, "demo", "https://github.com/acme/app")
+		rec := doUploadTok(t, mux, "/api/repos/demo/uploads/frontend?ref=main", "some.jwt.token", fe)
+		if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+			t.Fatalf("gate blocked a matching token: %d (%s)", rec.Code, rec.Body)
+		}
+	})
+}
+
+// mustCreateGitHubRepo inserts a ready repo row with a GitHub source directly,
+// bypassing the clone — the auth tests only need the source for the binding
+// check, not a real mirror.
+func mustCreateGitHubRepo(t *testing.T, deps Deps, name, source string) {
+	t.Helper()
+	if _, err := deps.Store.CreateRepo(name, source, deps.Git.Open(name).Path, db.RepoReady); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSourceMatchesGitHubRepo(t *testing.T) {
+	const repo = "acme/app"
+	for _, src := range []string{
+		"https://github.com/acme/app",
+		"https://github.com/acme/app.git",
+		"git@github.com:acme/app.git",
+		"ssh://git@github.com/acme/app.git",
+		"https://github.com/Acme/App", // case-insensitive host/path
+	} {
+		if !sourceMatchesGitHubRepo(src, repo) {
+			t.Errorf("source %q should match repository %q", src, repo)
+		}
+	}
+	for _, tc := range []struct{ src, repo string }{
+		{"https://github.com/acme/other", "acme/app"},
+		{"https://gitlab.com/acme/app", "acme/app"},
+		{"/local/path/app", "acme/app"},
+		{"https://github.com/acme/app", ""},
+	} {
+		if sourceMatchesGitHubRepo(tc.src, tc.repo) {
+			t.Errorf("source %q should NOT match repository %q", tc.src, tc.repo)
 		}
 	}
 }
