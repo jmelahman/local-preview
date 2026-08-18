@@ -135,6 +135,10 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   pair shares a per-deploy docker network that lives on one node, so a frontend
   hashes on its backend's hash (`Peer`), never its own. Splitting them across
   workers breaks `{backend_url}` and the deploy network.
+- A `nofail` data volume must gate the service that bind-mounts it — without
+  `RequiresMountsFor=`, a boot that races the volume attach starts the
+  orchestrator on an empty dir with a fresh SQLite DB, and a later mount can't
+  fix it (bind mounts don't follow). Latent until reboots are routine.
 
 ## Documentation upkeep
 

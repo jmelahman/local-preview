@@ -386,3 +386,32 @@ that skips the hydrate attempt; wiring cache eviction through `RemoveBackend`
 `tier == nil`; or a reconcile pass that lets an artifact leave disk before it is
 known to exist durably (a serve-only node cannot rebuild — Phase 1b is the
 correctness net, not an optimization).
+
+## A `nofail` data volume must gate the service that bind-mounts it
+
+**Symptom.** After a reboot, the orchestrator comes up with no registered
+repos, no deploys, and an empty dashboard — indistinguishable from total data
+loss. The data volume is fine and even mounts correctly moments later; the
+running server just never sees it.
+
+**Root cause / fix.** cloud-init writes the data volume to `/etc/fstab` with
+`nofail`, so a boot where the volume is slow to attach proceeds without it
+rather than dropping to emergency mode. `local-preview.service` declared only
+`Requires=docker.service`, so on such a boot it started anyway and
+bind-mounted the empty host directory into the container — where the server
+created a fresh SQLite database. Mounting the volume afterwards does not
+repair it: a bind mount resolves its source once, at container start, and does
+not follow a later mount at that path. The fix is `RequiresMountsFor=` on the
+unit, which the `local-preview-stack@` unit beside it already carried — the
+orchestrator unit had simply been missed.
+
+This stayed latent for as long as the host booted once, at create time, where
+cloud-init mounts the volume synchronously before writing the unit. It becomes
+a daily exposure the moment reboots are routine — an instance scheduled off
+outside business hours, an ASG replacing a node, or a spot reclaim.
+
+**What would reintroduce it.** Any new unit that bind-mounts the data dir
+without `RequiresMountsFor=`; dropping `nofail` from fstab and assuming
+ordering is therefore guaranteed (it makes a failed mount block boot instead,
+which is a different failure, not an equivalent one); or relying on
+`After=network-online.target` as a proxy for the volume being ready.

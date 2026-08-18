@@ -136,6 +136,13 @@ cat >/etc/systemd/system/local-preview.service <<EOF
 Description=local-preview orchestrator
 Requires=docker.service
 After=docker.service network-online.target
+# The data volume is fstab'd nofail, so a boot where it is slow to attach
+# proceeds without it. Without this line the orchestrator would then start and
+# bind-mount an empty data dir, coming up with no repos and a fresh SQLite
+# database — indistinguishable from total data loss, and not fixed by mounting
+# afterwards, because a bind mount does not follow a later mount at its source
+# path. Fail to start instead. (The stack unit above already does this.)
+RequiresMountsFor=${data_dir}
 
 [Service]
 Restart=always
