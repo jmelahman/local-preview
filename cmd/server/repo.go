@@ -41,7 +41,7 @@ func repoCmd() *cobra.Command {
 	}
 	create.Flags().StringVar(&source, "source", "", "Local path or clone URL of the repository (required)")
 	create.Flags().BoolVar(&createWatch, "watch", false, "Watch the repo: poll for new commits and deploy them")
-	create.Flags().StringVar(&createBranches, "branches", "", "Branches to watch, as comma-separated globs (default: all)")
+	create.Flags().StringVar(&createBranches, "branches", "", "Branches to build, as comma-separated globs; prefix with ! to exclude (default: all)")
 	create.Flags().BoolVar(&createBackfill, "backfill", false, "Also deploy the branch tips that already exist, not just new commits")
 	_ = create.MarkFlagRequired("source")
 
@@ -53,8 +53,10 @@ func repoCmd() *cobra.Command {
 		Long: "Enable watching: the server periodically fetches the repo and deploys\n" +
 			"the tip of every branch that gains commits. --branches narrows which\n" +
 			"branches with comma-separated globs (e.g. \"main,release/*\"); globs\n" +
-			"don't cross '/'. Only commits pushed from here on deploy — pass\n" +
-			"--backfill to deploy the branch tips that already exist too.",
+			"don't cross '/', and a ! prefix excludes (e.g. \"!main\" builds every\n" +
+			"branch but main). The same filter also gates webhook deploys. Only\n" +
+			"commits pushed from here on deploy — pass --backfill to deploy the\n" +
+			"branch tips that already exist too.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var branches *string
@@ -69,7 +71,7 @@ func repoCmd() *cobra.Command {
 				args[0], true, branches, watchBackfill)
 		},
 	}
-	watchCmd.Flags().StringVar(&watchBranches, "branches", "", "Branches to watch, as comma-separated globs (default: all)")
+	watchCmd.Flags().StringVar(&watchBranches, "branches", "", "Branches to build, as comma-separated globs; prefix with ! to exclude (default: all)")
 	watchCmd.Flags().BoolVar(&watchBackfill, "backfill", false, "Also deploy the branch tips that already exist, not just new commits")
 
 	unwatch := &cobra.Command{

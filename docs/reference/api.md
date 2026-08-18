@@ -80,7 +80,9 @@ Returns all repos. `GET /api/repos/{name}` returns one (`404` if missing).
 Updates a repo's watch settings; fields absent from the body keep their
 current value. `watch: true` polls the repo every `--poll-interval` and
 deploys branch tips as they move; `watch_branches` narrows which branches as
-comma-separated globs (`""` = all; globs don't cross `/`).
+comma-separated globs (`""` = all; globs don't cross `/`; a `!` prefix
+excludes, so `"!main"` is every branch but `main`). The filter also gates
+[webhook](#post-api-webhooks-github) deploys, regardless of `watch`.
 
 Switching watching on starts from the repo's current state — the tips that
 already exist are recorded and not deployed. Send `backfill: true` to deploy
@@ -495,7 +497,8 @@ Responses:
   repo. The pushed head sha is deployed (exactly what the event named, even
   if the branch has moved since).
 - `200 OK` `{"status": "ignored", "reason": "…"}` — deliveries that are
-  deliberately skipped: tag pushes, branch deletions, and non-push events.
-  `ping` answers `{"status": "pong"}`.
+  deliberately skipped: tag pushes, branch deletions, non-push events, and
+  pushes to a branch the repo's `watch_branches` filter excludes. `ping`
+  answers `{"status": "pong"}`.
 - `404` — no registered repo matches the payload's repository.
 - `503` — the server has no webhook secret configured.

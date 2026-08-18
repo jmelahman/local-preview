@@ -331,6 +331,15 @@ func TestMatchBranch(t *testing.T) {
 		{"release/*", "release/1.0/hotfix", false}, // globs don't cross '/'
 		{"release/*", "main", false},
 		{" main , develop ", "develop", true},
+		// negation: `!` excludes and always wins.
+		{"!main", "main", false},
+		{"!main", "feature", true},
+		{"!release/*", "release/1.0", false},
+		{"!release/*", "main", true},
+		{"!main,!develop", "feature", true}, // excludes only ⇒ everything else
+		{"release/*,!release/experimental", "release/1.0", true},
+		{"release/*,!release/experimental", "release/experimental", false}, // exclude beats include
+		{"release/*,!release/experimental", "main", false},                 // include present, no match
 	}
 	for _, c := range cases {
 		if got := MatchBranch(SplitPatterns(c.patterns), c.branch); got != c.want {
@@ -348,5 +357,14 @@ func TestValidatePatterns(t *testing.T) {
 	}
 	if _, err := ValidatePatterns("release/["); err == nil {
 		t.Error("bad pattern accepted")
+	}
+	if got, err := ValidatePatterns(" !main , release/* "); err != nil || got != "!main,release/*" {
+		t.Errorf("ValidatePatterns(negation) = %q, %v", got, err)
+	}
+	if _, err := ValidatePatterns("!"); err == nil {
+		t.Error("bare ! accepted")
+	}
+	if _, err := ValidatePatterns("!release/["); err == nil {
+		t.Error("bad negated pattern accepted")
 	}
 }

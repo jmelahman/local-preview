@@ -1169,10 +1169,9 @@ function RepoRow({ repo }: { repo: Repo }) {
         </label>
         <input
           value={branches}
-          disabled={!watch}
           onChange={(e) => setBranches(e.target.value)}
-          placeholder="all branches (e.g. main,release/*)"
-          className={`${inputClass} min-w-40 flex-1 disabled:opacity-40`}
+          placeholder="all branches (e.g. main,release/* or !main)"
+          className={`${inputClass} min-w-40 flex-1`}
         />
         {dirty && (
           <button

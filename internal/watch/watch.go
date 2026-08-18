@@ -244,28 +244,40 @@ func SplitPatterns(s string) []string {
 }
 
 // ValidatePatterns canonicalizes a comma-separated branch pattern list
-// (path.Match globs; `*` doesn't cross `/`). Empty input is valid and means
-// "all branches".
+// (path.Match globs; `*` doesn't cross `/`). A `!` prefix negates a pattern
+// (see MatchBranch). Empty input is valid and means "all branches".
 func ValidatePatterns(s string) (string, error) {
 	parts := SplitPatterns(s)
 	for _, p := range parts {
-		if _, err := path.Match(p, "x"); err != nil {
+		glob := strings.TrimPrefix(p, "!")
+		if glob == "" { // bare "!"
+			return "", fmt.Errorf("invalid branch pattern %q", p)
+		}
+		if _, err := path.Match(glob, "x"); err != nil {
 			return "", fmt.Errorf("invalid branch pattern %q", p)
 		}
 	}
 	return strings.Join(parts, ","), nil
 }
 
-// MatchBranch reports whether branch matches any pattern. An empty pattern
-// list matches every branch.
+// MatchBranch reports whether branch should be built under patterns. A
+// `!`-prefixed pattern excludes, and any exclude match wins regardless of the
+// includes. Non-`!` patterns form an allowlist that applies only when at
+// least one is present: with no include pattern (an empty list, or excludes
+// only) every branch matches except those excluded.
 func MatchBranch(patterns []string, branch string) bool {
-	if len(patterns) == 0 {
-		return true
-	}
+	hasInclude, included := false, false
 	for _, p := range patterns {
-		if ok, _ := path.Match(p, branch); ok {
-			return true
+		if neg, ok := strings.CutPrefix(p, "!"); ok {
+			if m, _ := path.Match(neg, branch); m {
+				return false // exclude wins, regardless of includes
+			}
+			continue
+		}
+		hasInclude = true
+		if m, _ := path.Match(p, branch); m {
+			included = true
 		}
 	}
-	return false
+	return !hasInclude || included
 }

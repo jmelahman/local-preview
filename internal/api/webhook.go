@@ -12,6 +12,7 @@ import (
 
 	"github.com/jmelahman/local-preview/internal/build"
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/watch"
 )
 
 // maxWebhookBody bounds webhook payload reads; GitHub caps deliveries at
@@ -87,6 +88,10 @@ func (d Deps) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		httpError(w, http.StatusNotFound,
 			"no registered repo matches "+ev.Repository.FullName+" — register it with its clone URL as source")
+		return
+	}
+	if !watch.MatchBranch(watch.SplitPatterns(repo.WatchBranches), branch) {
+		ignore(w, "branch "+branch+" excluded by filter")
 		return
 	}
 	row, err := d.Queue.RequestDeploy(r.Context(), repo.Name, ev.After, false)

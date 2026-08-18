@@ -144,6 +144,55 @@ func TestWebhookIgnoresNonDeployEvents(t *testing.T) {
 	}
 }
 
+func TestWebhookBranchFilter(t *testing.T) {
+	mux, _ := newTestMux(t)
+	src := newSourceRepo(t)
+	sha := runTestGit(t, src, "rev-parse", "HEAD")
+
+	// The filter governs webhooks even with watch off: exclude main, allow
+	// everything else.
+	rec := doJSON(t, mux, "POST", "/api/repos",
+		`{"name":"demo","source":`+jsonQuote(src)+`,"watch_branches":"!main"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create repo: %d %s", rec.Code, rec.Body)
+	}
+	waitRepoStatus(t, mux, "demo", "ready")
+
+	// An excluded branch is acknowledged but not deployed.
+	rec = deliver(t, mux, "push", pushPayload(src, "refs/heads/main", sha, false), true)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "excluded by filter") {
+		t.Fatalf("excluded push: %d %s, want 200 ignored", rec.Code, rec.Body)
+	}
+	if rec := doJSON(t, mux, "GET", "/api/deploys", ""); !strings.Contains(rec.Body.String(), "[]") {
+		t.Fatalf("excluded branch created a deploy: %s", rec.Body)
+	}
+
+	// A non-excluded branch still deploys.
+	rec = deliver(t, mux, "push", pushPayload(src, "refs/heads/feature", sha, false), true)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("allowed push: %d %s", rec.Code, rec.Body)
+	}
+
+	// Drain the triggered build so teardown doesn't race the worker.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var d struct {
+			Status string `json:"status"`
+		}
+		rec := doJSON(t, mux, "GET", "/api/deploys/1", "")
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+			t.Fatal(err)
+		}
+		if d.Status != "queued" && d.Status != "building" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("deploy stuck in %s", d.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestNormalizeGitURL(t *testing.T) {
 	want := "github.com/acme/app"
 	for _, u := range []string{

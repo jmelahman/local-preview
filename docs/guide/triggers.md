@@ -54,6 +54,7 @@ new branch tips on its own.
 ```bash
 preview repo watch myapp                            # all branches
 preview repo watch myapp --branches "main,release/*"
+preview repo watch myapp --branches "!main"         # everything except main
 preview repo create myapp --source <url> --watch    # watched from the start
 ```
 
@@ -61,7 +62,12 @@ Watched repos are fetched every `--poll-interval` (default `1m`). A branch
 that advances gets a fresh preview while the old commits keep theirs.
 `--branches` takes comma-separated globs matched against the branch name
 (globs don't cross `/`, so `release/*` matches `release/1.0` but not
-`release/1.0/hotfix`).
+`release/1.0/hotfix`). A `!` prefix turns a pattern into an exclusion, and an
+exclusion always wins over the includes: `!main` builds every branch but
+`main`, and `release/*,!release/experimental` builds the release branches
+except that one. With only exclusions (or no patterns at all) every branch
+builds except those excluded. This same filter gates [webhook](#github-webhooks)
+deploys too.
 
 Watching starts from where the repo is now: the first poll records the tips
 that already exist and deploys none of them, so a repo with hundreds of
@@ -114,8 +120,9 @@ directly.
 Each branch push deploys the pushed head commit. Deliveries are matched to
 registered repos by repository URL (https, ssh, and git forms of the same
 repo all match), so the source can be any clone-URL form. Tag pushes and
-branch deletions are acknowledged but ignored; GitHub's webhook delivery
-log shows the reason for anything skipped. (A branch deletion isn't a
+branch deletions are acknowledged but ignored; so are pushes to a branch that
+the repo's `--branches` filter excludes. GitHub's webhook delivery log shows
+the reason for anything skipped. (A branch deletion isn't a
 teardown signal here — if the repo is also watched, the poller evicts the
 orphaned previews on its next fetch, as [above](#watched-repos).)
 
