@@ -117,6 +117,9 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - SSO's preview-access cookie must stay a separate scope from the apex session
   and be stripped in the proxy `Rewrite` — else the untrusted previewed backend
   receives (and can replay) the control-plane credential.
+- A truncated artifact must never land under a content-addressed key — the S3
+  tier's skip-if-exists would make it permanent; compress to a temp file (abort
+  before put), record the size, and verify it on hydrate.
 
 ## Documentation upkeep
 

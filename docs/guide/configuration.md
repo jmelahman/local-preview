@@ -99,6 +99,13 @@ for lookup order and caching semantics.
 | `--sso-allowed-team` | (unset) | Narrow `--sso-allowed-org` to one team slug |
 | `--sso-allowed-logins` | (unset) | Comma-separated GitHub usernames allowed to sign in |
 | `--sso-allowed-emails` | (unset) | Comma-separated verified emails allowed to sign in |
+| `--s3-endpoint` | (unset) | S3 (or MinIO) endpoint `host:port`. Setting it **and** `--s3-bucket` enables the [artifact tier](#artifact-tier-s3); empty disables it |
+| `--s3-bucket` | (unset) | Bucket for the artifact tier (required to enable it) |
+| `--s3-prefix` | (unset) | Optional key prefix within the bucket |
+| `--s3-region` | (unset) | Region for the bucket |
+| `--s3-access-key` | (unset) | Access key. Prefer the environment variable — flags are visible in `ps` |
+| `--s3-secret-key` | (unset) | Secret key. Prefer the environment variable — flags are visible in `ps` |
+| `--s3-use-ssl` | `true` | Use TLS for the endpoint; set `false` for a local MinIO over http |
 
 ## Environment variables
 
@@ -116,6 +123,10 @@ for lookup order and caching semantics.
 | `PREVIEW_SSO_GITHUB_CLIENT_SECRET` | `preview serve` | GitHub OAuth App client secret (an explicit `--sso-github-client-secret` flag wins) |
 | `PREVIEW_SSO_CALLBACK_URL` | `preview serve` | Public OAuth callback URL (an explicit `--sso-callback-url` flag wins) |
 | `PREVIEW_SSO_ALLOWED_ORG` / `_TEAM` / `_LOGINS` / `_EMAILS` | `preview serve` | Allowlist rules (the matching `--sso-allowed-*` flag wins) |
+| `PREVIEW_S3_ENDPOINT` | `preview serve` | Artifact-tier endpoint `host:port` (an explicit `--s3-endpoint` flag wins) |
+| `PREVIEW_S3_BUCKET` | `preview serve` | Artifact-tier bucket (an explicit `--s3-bucket` flag wins) |
+| `PREVIEW_S3_PREFIX` / `PREVIEW_S3_REGION` | `preview serve` | Key prefix and region (the matching flag wins) |
+| `PREVIEW_S3_ACCESS_KEY` / `PREVIEW_S3_SECRET_KEY` | `preview serve` | Artifact-tier credentials (the matching flag wins). Fall back to `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` |
 | `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins; this in turn beats the config file) |
 | `PREVIEW_TOKEN` | CLI subcommands | Bearer token (a GitHub PAT) sent to an [SSO-protected](/guide/sso) server (wins over the config file's `token`) |
 | `PREVIEW_BACKEND` | `web/` dev server | Backend `host:port` the Vite proxy targets |
@@ -191,6 +202,57 @@ deploy entirely, history included.
 The dashboard's Storage & retention dialog also reports disk usage by
 category (artifacts, state, logs, mirror clones, tmp, database) and per
 repo, backed by [`GET /api/storage`](/reference/api#get-api-storage).
+
+## Artifact tier (S3)
+
+By default an evicted deploy's artifacts are deleted from local disk, and
+redeploying its commit does a full rebuild from the git tree. Point the server
+at an S3 bucket (or any S3-compatible store, such as MinIO) and it keeps a
+**durable copy** of every build artifact instead: eviction still frees local
+disk, but a redeploy *hydrates* the artifact from the bucket and skips the
+build.
+
+Enable it by setting an endpoint and bucket — everything else is optional:
+
+```bash
+preview serve \
+  --s3-endpoint s3.amazonaws.com \
+  --s3-bucket my-preview-artifacts \
+  --s3-region us-east-1
+# credentials via env (preferred): PREVIEW_S3_ACCESS_KEY / PREVIEW_S3_SECRET_KEY,
+# or the standard AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+```
+
+For a local MinIO over plain http:
+
+```bash
+PREVIEW_S3_ACCESS_KEY=… PREVIEW_S3_SECRET_KEY=… \
+preview serve --s3-endpoint localhost:9000 --s3-bucket preview-artifacts --s3-use-ssl=false
+```
+
+The bucket must already exist — the server verifies it at startup and **refuses
+to start** if it's missing or unreachable, rather than silently dropping every
+upload. How it works:
+
+- **What's stored.** The immutable, content-addressed build artifacts —
+  frontend bundles, backend build trees, and downloadable artifacts — as
+  `<prefix>/<repo>/{fe,be,dl}/<hash>.tar.zst`. Objects are keyed by content
+  hash, so identical builds across commits or repos deduplicate, and an object
+  is never rewritten. Uploads happen in the background right after a build
+  publishes locally, so they never slow a build; downloadable artifacts upload
+  off the readiness path.
+- **What's *not* stored.** Mutable backend **state directories** aren't
+  archived. A hydrated backend starts from a fresh state directory and re-runs
+  its `init` step — exactly what an evict-then-rebuild does today, so nothing
+  changes for a repo now. (A repo whose manifest templates `{state_dir}` can't
+  reconstruct that mutable state from the tier; keep this in mind if you later
+  run more than one node.)
+- **Bucket growth.** Because every build is kept, set a bucket **lifecycle
+  rule** to expire old objects if storage is a concern — a rebuild transparently
+  re-creates anything that's been expired.
+- **Startup-only gaps.** An upload interrupted by a hard crash may be missing; a
+  redeploy simply rebuilds and re-uploads it. Uploads still in flight at a normal
+  shutdown are drained before the process exits.
 
 ## The preview domain
 

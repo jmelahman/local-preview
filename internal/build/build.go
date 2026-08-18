@@ -86,6 +86,24 @@ type Queue struct {
 
 	mu      sync.Mutex
 	rebuild map[int64]bool
+
+	// Optional durable artifact tier (S3/MinIO). nil disables persist/hydrate.
+	tier        ArtifactTier
+	persistJobs chan persistJob
+	persistQuit chan struct{}
+	persistWG   sync.WaitGroup
+}
+
+// ArtifactTier is the durable content-addressed artifact store the queue
+// persists builds to and hydrates from. Implemented by *s3store.Tier; an
+// interface so tests can substitute a fake.
+type ArtifactTier interface {
+	// Save uploads srcDir's contents under the (repo, side, hash) key,
+	// idempotently. side is "fe", "be", or "dl".
+	Save(ctx context.Context, repo, side, hash, srcDir string) error
+	// Open returns a reader over the artifact's decompressed tar bytes, or
+	// found=false when absent. Close verifies integrity.
+	Open(ctx context.Context, repo, side, hash string) (rc io.ReadCloser, found bool, err error)
 }
 
 // NewQueue wires the pipeline. runner may be nil for the default runner.
@@ -141,6 +159,7 @@ func (q *Queue) Start(ctx context.Context, n int) {
 	for range n {
 		go q.worker(ctx)
 	}
+	q.startPersist()
 	// A backlog larger than the work buffer would block the caller — which at
 	// startup is the goroutine that still has to bring up the HTTP server — so
 	// hand the resume to a goroutine the workers can drain behind.
@@ -399,6 +418,15 @@ func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool)
 		return err
 	}
 
+	// Try the durable tier before deciding to build: a hydrated artifact makes
+	// HasFrontend/HasBackend true, so the build is skipped. Never on an explicit
+	// rebuild, which must re-run the build. Downloadable artifacts hydrate later
+	// (buildArtifacts), off the readiness-gating path.
+	if !rebuild {
+		q.hydrate(ctx, row.RepoName, "fe", feHash)
+		q.hydrate(ctx, row.RepoName, "be", beHash)
+	}
+
 	needFe := rebuild || !q.files.HasFrontend(row.RepoName, feHash)
 	needBe := rebuild || !q.files.HasBackend(row.RepoName, beHash)
 
@@ -576,7 +604,12 @@ func (q *Queue) buildArtifacts(ctx context.Context, row db.DeployRow, rebuild bo
 	var scratch string
 	for _, name := range pending {
 		ref := row.Artifacts[name]
-		// A sibling deploy sharing the hash may have published it meanwhile.
+		// A sibling deploy sharing the hash may have published it meanwhile, or
+		// the durable tier may hold it from a prior build — either way, skip the
+		// build.
+		if !rebuild {
+			q.hydrate(ctx, row.RepoName, "dl", ref.Hash)
+		}
 		if !rebuild && q.files.HasArtifact(row.RepoName, ref.Hash) {
 			q.db.SetDeployArtifactStatus(row.ID, name, db.ArtifactReady, "")
 			continue
@@ -663,13 +696,21 @@ func (q *Queue) buildFrontend(ctx context.Context, row db.DeployRow, fe manifest
 	if len(fe.Run) > 0 {
 		// Process-mode frontend: the whole built tree is the artifact — the
 		// server runs from it the way backends do; there is no static dist.
-		return q.files.PublishFrontend(row.RepoName, hash, filepath.Join(scratch, fe.Path), overwrite)
+		if err := q.files.PublishFrontend(row.RepoName, hash, filepath.Join(scratch, fe.Path), overwrite); err != nil {
+			return err
+		}
+		q.enqueuePersist(row.RepoName, "fe", hash)
+		return nil
 	}
 	dist := filepath.Join(scratch, fe.Path, fe.Dist)
 	if st, err := os.Stat(dist); err != nil || !st.IsDir() {
 		return fmt.Errorf("frontend.dist %q was not produced by the build", fe.Dist)
 	}
-	return q.files.PublishFrontend(row.RepoName, hash, dist, overwrite)
+	if err := q.files.PublishFrontend(row.RepoName, hash, dist, overwrite); err != nil {
+		return err
+	}
+	q.enqueuePersist(row.RepoName, "fe", hash)
+	return nil
 }
 
 func (q *Queue) buildBackend(ctx context.Context, row db.DeployRow, be manifest.Backend, env buildEnv, scratch, hash, logPath string, overwrite bool) error {
@@ -684,7 +725,11 @@ func (q *Queue) buildBackend(ctx context.Context, row db.DeployRow, be manifest.
 			return err
 		}
 	}
-	return q.files.PublishBackend(row.RepoName, hash, filepath.Join(scratch, be.Path), overwrite)
+	if err := q.files.PublishBackend(row.RepoName, hash, filepath.Join(scratch, be.Path), overwrite); err != nil {
+		return err
+	}
+	q.enqueuePersist(row.RepoName, "be", hash)
+	return nil
 }
 
 func (q *Queue) buildArtifact(ctx context.Context, row db.DeployRow, a manifest.Artifact, env buildEnv, scratch, hash, logPath string, overwrite bool) error {
@@ -699,7 +744,11 @@ func (q *Queue) buildArtifact(ctx context.Context, row db.DeployRow, a manifest.
 			return err
 		}
 	}
-	return q.files.PublishArtifactFiles(row.RepoName, hash, filepath.Join(scratch, a.Path), a.Files, overwrite)
+	if err := q.files.PublishArtifactFiles(row.RepoName, hash, filepath.Join(scratch, a.Path), a.Files, overwrite); err != nil {
+		return err
+	}
+	q.enqueuePersist(row.RepoName, "dl", hash)
+	return nil
 }
 
 func (q *Queue) runStep(ctx context.Context, row db.DeployRow, scratch, dir, image string, devc devcontainer.Config, argv []string, logF io.Writer) error {

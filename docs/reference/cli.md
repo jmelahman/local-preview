@@ -24,6 +24,10 @@ Start the orchestrator.
 | `--sso-callback-url` | `$PREVIEW_SSO_CALLBACK_URL` | Public OAuth callback URL; must match the OAuth App exactly |
 | `--sso-allowed-org` / `--sso-allowed-team` | `$PREVIEW_SSO_ALLOWED_ORG` / `_TEAM` | Allow a GitHub org (optionally one team within it) |
 | `--sso-allowed-logins` / `--sso-allowed-emails` | `$PREVIEW_SSO_ALLOWED_LOGINS` / `_EMAILS` | Comma-separated usernames / verified emails |
+| `--s3-endpoint` / `--s3-bucket` | `$PREVIEW_S3_ENDPOINT` / `$PREVIEW_S3_BUCKET` | S3/MinIO endpoint and bucket; both enable the [artifact tier](/guide/configuration#artifact-tier-s3) (built artifacts persist and hydrate instead of rebuilding after eviction) |
+| `--s3-prefix` / `--s3-region` | `$PREVIEW_S3_PREFIX` / `$PREVIEW_S3_REGION` | Optional key prefix and bucket region |
+| `--s3-access-key` / `--s3-secret-key` | `$PREVIEW_S3_ACCESS_KEY` / `$PREVIEW_S3_SECRET_KEY` | Artifact-tier credentials (fall back to `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) |
+| `--s3-use-ssl` | `true` | Use TLS for the endpoint (set `false` for local MinIO over http) |
 
 ## `preview repo`
 

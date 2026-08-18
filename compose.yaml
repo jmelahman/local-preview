@@ -48,6 +48,18 @@ services:
       # that can't carry a preview.toml upstream. Same-path bind so failed
       # deploys name the host path to drop the file at.
       PREVIEW_CONFIG_DIR: ${XDG_CONFIG_HOME:-${HOME}/.config}/preview
+      # Durable artifact tier (optional): with an S3/MinIO bucket configured,
+      # built artifacts are uploaded and hydrated instead of rebuilt after
+      # eviction — see docs/guide/configuration.md#artifact-tier-s3. To use the
+      # bundled `minio-artifacts` service below, start it with
+      # `docker compose --profile artifacts up -d`, create the bucket once, and
+      # uncomment these (the app uses host networking, so localhost:9000 reaches
+      # the published MinIO port):
+      #   PREVIEW_S3_ENDPOINT: localhost:9000
+      #   PREVIEW_S3_BUCKET: preview-artifacts
+      #   PREVIEW_S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      #   PREVIEW_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      #   PREVIEW_S3_USE_SSL: "false"
     volumes:
       # Host path of the docker socket. Without it the server warns at
       # build time and falls back to host execution — and the image bundles
@@ -61,3 +73,25 @@ services:
       # Repos registered by local path must be visible in-container at the
       # registered path, e.g.:
       - ./:/code/local-preview:ro
+
+  # Optional durable artifact tier. Deliberately named `minio-artifacts` (not
+  # `minio`) so it isn't confused with a MinIO a previewed app's own stack runs
+  # for its file store — this one backs local-preview's build artifacts. Opt in
+  # with `docker compose --profile artifacts up -d`, then create the bucket once:
+  #   docker compose exec minio-artifacts \
+  #     mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+  #   docker compose exec minio-artifacts mc mb --ignore-existing local/preview-artifacts
+  minio-artifacts:
+    image: minio/minio:latest
+    container_name: local-preview-minio-artifacts
+    profiles: ["artifacts"]
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    # Host networking to match the app service, so it reaches MinIO at
+    # localhost:9000. The console is on :9001.
+    network_mode: host
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - ${HOME}/.local/share/local-preview-minio:/data

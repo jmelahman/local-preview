@@ -36,6 +36,11 @@ canonically, and shared across every commit with the same hash, identical to a
 locally-built artifact. The server stays the single authority on the hash; the
 upload only replaces the step that fills the slot.
 
+The same content-addressing lets artifacts outlive local disk: with an
+[artifact tier](/guide/configuration#artifact-tier-s3) configured, each build is
+also copied to an S3/MinIO bucket, so an evicted deploy is *hydrated* from the
+bucket on redeploy rather than rebuilt.
+
 ## Deploy-agnostic frontends
 
 One frontend bundle is served under every subdomain that references it, so

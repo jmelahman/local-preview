@@ -23,6 +23,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/proxy"
 	"github.com/jmelahman/local-preview/internal/retain"
+	"github.com/jmelahman/local-preview/internal/s3store"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
 	"github.com/jmelahman/local-preview/internal/watch"
@@ -90,6 +91,13 @@ type serveOptions struct {
 	ssoAllowedTeam   string
 	ssoAllowedLogins string
 	ssoAllowedEmails string
+	s3Endpoint       string
+	s3Bucket         string
+	s3Prefix         string
+	s3Region         string
+	s3AccessKey      string
+	s3SecretKey      string
+	s3UseSSL         bool
 }
 
 func Root() *cobra.Command {
@@ -126,6 +134,13 @@ func Root() *cobra.Command {
 	serve.Flags().StringVar(&opts.ssoAllowedTeam, "sso-allowed-team", "", "Narrow --sso-allowed-org to this team slug (default: $PREVIEW_SSO_ALLOWED_TEAM)")
 	serve.Flags().StringVar(&opts.ssoAllowedLogins, "sso-allowed-logins", "", "Comma-separated GitHub usernames allowed to sign in (default: $PREVIEW_SSO_ALLOWED_LOGINS)")
 	serve.Flags().StringVar(&opts.ssoAllowedEmails, "sso-allowed-emails", "", "Comma-separated verified emails allowed to sign in (default: $PREVIEW_SSO_ALLOWED_EMAILS)")
+	serve.Flags().StringVar(&opts.s3Endpoint, "s3-endpoint", "", "S3 (or MinIO) endpoint host:port enabling the durable artifact tier — built artifacts are uploaded and hydrated instead of rebuilt after eviction (default: $PREVIEW_S3_ENDPOINT; empty disables it)")
+	serve.Flags().StringVar(&opts.s3Bucket, "s3-bucket", "", "Bucket for the durable artifact tier (default: $PREVIEW_S3_BUCKET; required to enable it)")
+	serve.Flags().StringVar(&opts.s3Prefix, "s3-prefix", "", "Optional key prefix within the artifact-tier bucket (default: $PREVIEW_S3_PREFIX)")
+	serve.Flags().StringVar(&opts.s3Region, "s3-region", "", "Region for the artifact-tier bucket (default: $PREVIEW_S3_REGION)")
+	serve.Flags().StringVar(&opts.s3AccessKey, "s3-access-key", "", "Access key for the artifact tier (default: $PREVIEW_S3_ACCESS_KEY or $AWS_ACCESS_KEY_ID)")
+	serve.Flags().StringVar(&opts.s3SecretKey, "s3-secret-key", "", "Secret key for the artifact tier (default: $PREVIEW_S3_SECRET_KEY or $AWS_SECRET_ACCESS_KEY)")
+	serve.Flags().BoolVar(&opts.s3UseSSL, "s3-use-ssl", true, "Use TLS for the artifact-tier endpoint (set false for local MinIO over http)")
 	cmd.AddCommand(serve)
 
 	addClientCommands(cmd)
@@ -158,6 +173,14 @@ func run(opts serveOptions) error {
 	envDefault(&opts.ssoAllowedTeam, "PREVIEW_SSO_ALLOWED_TEAM")
 	envDefault(&opts.ssoAllowedLogins, "PREVIEW_SSO_ALLOWED_LOGINS")
 	envDefault(&opts.ssoAllowedEmails, "PREVIEW_SSO_ALLOWED_EMAILS")
+	envDefault(&opts.s3Endpoint, "PREVIEW_S3_ENDPOINT")
+	envDefault(&opts.s3Bucket, "PREVIEW_S3_BUCKET")
+	envDefault(&opts.s3Prefix, "PREVIEW_S3_PREFIX")
+	envDefault(&opts.s3Region, "PREVIEW_S3_REGION")
+	envDefault(&opts.s3AccessKey, "PREVIEW_S3_ACCESS_KEY")
+	envDefault(&opts.s3AccessKey, "AWS_ACCESS_KEY_ID")
+	envDefault(&opts.s3SecretKey, "PREVIEW_S3_SECRET_KEY")
+	envDefault(&opts.s3SecretKey, "AWS_SECRET_ACCESS_KEY")
 	// Setting the client ID turns on interactive SSO for the dashboard, API,
 	// and previews; leaving it unset keeps the historical open behavior.
 	var sso api.SSOProvider
@@ -210,6 +233,28 @@ func run(opts serveOptions) error {
 	})
 	if dir := config.ManifestsDir(); dir != "" {
 		queue.SetLocalManifestDir(dir)
+	}
+	// A configured bucket enables the durable artifact tier: built artifacts are
+	// uploaded and, after eviction, hydrated instead of rebuilt. Fail closed so a
+	// misconfigured bucket surfaces at startup rather than silently dropping every
+	// upload. Must be set before Start, which launches the persist workers.
+	if opts.s3Bucket != "" && opts.s3Endpoint != "" {
+		tier, err := s3store.New(s3store.Config{
+			Endpoint:  opts.s3Endpoint,
+			Bucket:    opts.s3Bucket,
+			Prefix:    opts.s3Prefix,
+			Region:    opts.s3Region,
+			AccessKey: opts.s3AccessKey,
+			SecretKey: opts.s3SecretKey,
+			UseSSL:    opts.s3UseSSL,
+			TmpDir:    cfg.TmpDir(),
+		})
+		if err != nil {
+			return err
+		}
+		queue.SetArtifactTier(tier)
+		log.Printf("artifact tier: s3 %s/%s (built artifacts persist and hydrate instead of rebuilding)",
+			opts.s3Endpoint, opts.s3Bucket)
 	}
 	queue.Start(workCtx, opts.buildConcurrency)
 	watcher := watch.New(database, gitMgr, queue, opts.pollInterval)
@@ -266,6 +311,10 @@ func run(opts serveOptions) error {
 	defer cancel()
 	err = srv.Shutdown(ctx)
 	stopWork()
+	// Drain in-flight artifact uploads before stopping processes: the build
+	// workers have stopped enqueuing (their context is cancelled), so this only
+	// waits on uploads already started.
+	queue.Stop()
 	super.StopAll()
 	return err
 }

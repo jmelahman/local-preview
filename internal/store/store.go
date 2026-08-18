@@ -119,6 +119,16 @@ func (s *Store) PublishBackend(repo, hash, srcDir string, overwrite bool) error 
 	return s.publish(s.BackendDir(repo, hash), srcDir, overwrite)
 }
 
+// PublishArtifactDir publishes an already-staged flat downloadable-artifact
+// directory (every entry a regular file addressed by base name), landing it
+// with the same atomic rename as every other publish. Unlike
+// PublishArtifactFiles it does no per-file staging — the caller has already
+// materialized the final layout, as when a downloadable artifact is hydrated
+// from the durable tier.
+func (s *Store) PublishArtifactDir(repo, hash, srcDir string, overwrite bool) error {
+	return s.publish(s.ArtifactDir(repo, hash), srcDir, overwrite)
+}
+
 // PublishArtifactFiles publishes the named build outputs (slash paths
 // relative to builtDir) as a downloadable artifact. Files are staged flat —
 // downloads are addressed by base name; the manifest rejects duplicate base

@@ -315,3 +315,37 @@ wiring it straight to `DeployFilter.Status`, or filtering the fetched page
 in the frontend instead — a client-side filter silently breaks paging and
 `X-Total-Count`. Any state the DB doesn't store has to be resolved into a
 row predicate before the query runs.
+
+## A truncated artifact must never land under a content-addressed key
+
+**Symptom (latent).** The durable artifact tier (`internal/s3store`) uploads
+each build to S3 keyed by content hash, and `Save` skips the upload when the
+key already exists (content-addressed: same key ⇒ same bytes). If a *partial*
+object ever lands under that key, the skip makes it permanent — every future
+`hydrate` extracts a corrupt tree, and a reconcile pass that only checks
+existence never notices.
+
+**Root cause / fix.** The persist worker reads the published store directory
+*after* the build, and retention's `GCDeploy` can delete that directory out
+from under it (eviction racing a fresh build of a shared hash). A streaming
+`tarDir → zstd → PutObject` that returned the walk error without failing the
+put could let the multipart *complete* with fewer bytes than intended. Two
+guards prevent a bad object from materializing:
+
+- `Save` compresses to a temp file first and only then puts it with a known
+  size — a walk/tar failure (including `ErrSourceGone` when the source dir
+  vanished mid-walk) aborts before any bytes reach the bucket.
+- `Save` records the uncompressed byte size as object metadata; `Open` streams
+  through a verifier whose `Close` fails if the decompressed length doesn't
+  match. `hydrate` treats that failure like a miss and rebuilds.
+
+`ErrSourceGone` is a *benign* drop, not a retryable error: GC won the race, so
+there's nothing to persist — the next redeploy rebuilds and re-uploads.
+
+**What would reintroduce it.** Switching `Save` back to a streaming pipe
+without `CloseWithError` on the writer side; making `Save` record the object
+*before* the bytes are known to be complete; or making the reconcile/back-fill
+pass assert only `StatObject != nil` instead of checking the size metadata.
+Also: a serve-only second node is a correctness (not efficiency) dependency on
+that reconcile pass — it can't rebuild a missing artifact, so no artifact may
+be missing before one exists.
