@@ -524,6 +524,13 @@ func (d Deps) handleGetDeploy(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A CI caller polls this until the deploy it just created settles, so it
+	// may read only its own repo's deploys. Answering "not found" rather than
+	// "forbidden" keeps the sequential IDs from being enumerable.
+	if claims, isOIDC := oidcClaimsFrom(r.Context()); isOIDC && !d.oidcOwnsRepo(claims, row.RepoName) {
+		httpError(w, http.StatusNotFound, "deploy not found")
+		return
+	}
 	writeJSON(w, http.StatusOK, d.deployJSON(row))
 }
 

@@ -85,6 +85,18 @@ func (d Deps) authorizeUpload(w http.ResponseWriter, r *http.Request, repoName s
 	return d.oidcMayActOn(w, claims, repoName, "upload to")
 }
 
+// oidcOwnsRepo reports whether verified OIDC claims name the GitHub repository
+// registered as repoName's source. Unlike oidcMayActOn it writes no response
+// and does not distinguish "no such repo" from "not yours" — the read path
+// answers both with the same 404, so deploy IDs can't be enumerated.
+func (d Deps) oidcOwnsRepo(claims githuboidc.Claims, repoName string) bool {
+	repo, err := d.Store.GetRepoByName(repoName)
+	if err != nil {
+		return false
+	}
+	return sourceMatchesGitHubRepo(repo.Source, claims.Repository)
+}
+
 // oidcMayActOn reports whether verified OIDC claims authorize acting on the
 // named repo: its registered source must be the same GitHub repository the
 // token was minted for, so repo A's workflow can never reach repo B. verb names

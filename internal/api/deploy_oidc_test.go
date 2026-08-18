@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/jmelahman/local-preview/internal/db"
@@ -31,9 +32,9 @@ func doDeploy(h http.Handler, token string, body []byte) *httptest.ResponseRecor
 
 // TestDeployOIDCRouteGate covers which routes a GitHub Actions OIDC token may
 // authenticate. The token proves only which workflow minted it, so it is an
-// identity with no authority until a handler binds it to a repo — and only
-// POST /api/deploys names one. Everywhere else it must be refused outright,
-// even though it verifies, or every repo's CI would be authorized for
+// identity with no authority until a handler binds it to a repo. Creating a
+// deploy and reading one back can do that; the rest must be refused outright
+// even though the token verifies, or every repo's CI would be authorized for
 // everything.
 func TestDeployOIDCRouteGate(t *testing.T) {
 	claims := githuboidc.Claims{Repository: "acme/app"}
@@ -45,7 +46,10 @@ func TestDeployOIDCRouteGate(t *testing.T) {
 		want   int
 	}{
 		{"create deploy is allowed", "POST", "/api/deploys", http.StatusOK},
+		{"reading one deploy is allowed", "GET", "/api/deploys/1", http.StatusOK},
 		{"listing deploys is not", "GET", "/api/deploys", http.StatusUnauthorized},
+		{"deploy logs are not", "GET", "/api/deploys/1/logs", http.StatusUnauthorized},
+		{"deploy stats are not", "GET", "/api/deploys/1/stats", http.StatusUnauthorized},
 		{"stopping a deploy is not", "POST", "/api/deploys/1/stop", http.StatusUnauthorized},
 		{"deleting a deploy is not", "DELETE", "/api/deploys/1", http.StatusUnauthorized},
 		{"registering a repo is not", "POST", "/api/repos", http.StatusUnauthorized},
@@ -135,6 +139,34 @@ func TestDeployOIDCRepoBinding(t *testing.T) {
 		rec := doDeploy(h, "some.jwt.token", deployBody("demo", "main"))
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("got %d, want 403 (%s)", rec.Code, rec.Body)
+		}
+	})
+
+	t.Run("reading another repo's deploy is 404, not 403", func(t *testing.T) {
+		// 404 on purpose: deploy IDs are sequential, so a 403 here would
+		// distinguish "someone else's deploy" from "no such deploy" and make
+		// the whole table enumerable by a token from any repo in the org.
+		deps, _ := newTestDeps(t)
+		deps.SSO = fakeSSO{identity: githubsso.Identity{Login: "octocat"}}
+		deps.DashboardOrigin = "http://localhost:8080"
+		deps.UploadAuth = fakeVerifier{claims: githuboidc.Claims{Repository: "evil/other"}}
+		repo, err := deps.Store.CreateRepo("demo", "https://github.com/acme/app", t.TempDir(), db.RepoReady)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dep, err := deps.Store.CreateDeploy(repo.ID, "0123456789abcdef0123456789abcdef01234567", db.DeployMeta{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := AuthMiddleware(deps, NewMux(deps))
+
+		req := httptest.NewRequest("GET", "/api/deploys/"+strconv.FormatInt(dep.ID, 10), nil)
+		req.Header.Set("Authorization", "Bearer some.jwt.token")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("got %d, want 404 (%s)", rec.Code, rec.Body)
 		}
 	})
 

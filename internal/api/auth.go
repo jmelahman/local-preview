@@ -314,15 +314,26 @@ func (d Deps) verifyOIDC(r *http.Request, tok string) (githuboidc.Claims, bool) 
 }
 
 // oidcRoute lists the non-exempt routes a GitHub Actions OIDC token may
-// authenticate. Only creating a deploy qualifies: it names a repo in its body,
-// so handleCreateDeploy can bind the token to it. The uploads are OIDC-gated
-// too but never reach here — they are exempt above and self-gate instead.
+// authenticate — the two `preview upload … --oidc --deploy` needs: creating a
+// deploy, and reading it back until it settles. Both name a repo the handler
+// can bind the token to, the first in its body and the second on the row it
+// loads. The uploads are OIDC-gated too but never reach here — they are exempt
+// above and self-gate instead.
 //
-// Deliberately not the rest of /api/deploys: stopping or deleting a deploy
-// takes an ID, and an ID does not say which repo it belongs to without a lookup
-// the caller could use to probe for other repos' deploys.
+// Deliberately not the mutating by-ID routes (stop, delete) or the log and
+// stats reads: CI has no reason to touch them, and every route added here is
+// one more place the binding has to be gotten right.
 func oidcRoute(method, path string) bool {
-	return method == http.MethodPost && path == "/api/deploys"
+	switch method {
+	case http.MethodPost:
+		return path == "/api/deploys"
+	case http.MethodGet:
+		id, ok := strings.CutPrefix(path, "/api/deploys/")
+		// Digits only, so this matches the deploy itself and not the /logs,
+		// /stats, or /artifacts paths beneath it.
+		return ok && id != "" && strings.TrimLeft(id, "0123456789") == ""
+	}
+	return false
 }
 
 // isStateChanging reports whether a method mutates state and so warrants the

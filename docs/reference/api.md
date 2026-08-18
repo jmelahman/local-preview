@@ -25,15 +25,18 @@ Exempt regardless of SSO: `GET /api/health`, the `/api/auth/*` endpoints below,
 `POST /api/webhooks/github` (HMAC-authenticated), and
 `POST /api/repos/{repo}/uploads/*` (GitHub Actions OIDC).
 
-`POST /api/deploys` additionally accepts a [GitHub Actions OIDC
-token](/guide/uploads#authenticating-with-github-actions-oidc) as its bearer
-credential, so `preview upload … --oidc --deploy` can deploy what it just
-uploaded without a session. The token authorizes only the repo named in the
-request body, and only when that repo's registered source is the GitHub
-repository the token was minted for — otherwise `403`. No other endpoint accepts
-one: a token says which workflow minted it, which authorizes nothing until it is
-checked against a named repo, and the remaining deploy endpoints take an ID
-rather than a repo.
+`POST /api/deploys` and `GET /api/deploys/{id}` additionally accept a [GitHub
+Actions OIDC token](/guide/uploads#authenticating-with-github-actions-oidc) as
+their bearer credential — the two calls `preview upload … --oidc --deploy` makes
+to deploy what it just uploaded and wait for it, without a session. Such a token
+reaches only the repo whose registered source is the GitHub repository it was
+minted for: naming another repo on the create gets `403`, and reading another
+repo's deploy gets `404` rather than `403`, so the sequential IDs stay
+unenumerable.
+
+No other endpoint accepts one. A token says which workflow minted it, which
+authorizes nothing until it is checked against a repo, so only routes that
+identify one are eligible.
 
 A gated request with
 no valid credential gets `401`; a valid session on a state-changing

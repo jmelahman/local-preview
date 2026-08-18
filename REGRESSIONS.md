@@ -270,8 +270,16 @@ audience. So the fallback is gated on `oidcRoute` — currently just
 that the `repo` in the body has the token's GitHub repository as its registered
 source. Same rule the uploads already applied, same helper now.
 
+**Caught the same day, one layer down.** The first fix allowed only
+`POST /api/deploys`, on the theory that a by-ID route can't be bound to a repo.
+That was wrong twice over: `--deploy` then polls `GET /api/deploys/{id}` and
+failed there instead, and the deploy row names its repo, so the binding was
+available all along. The read is now eligible too — but it answers a mismatch
+with `404`, not `403`: deploy IDs are sequential, and a `403` would separate
+"someone else's deploy" from "no such deploy" and make the table enumerable by a
+token from any repo in the org.
+
 **What would reintroduce it.** Adding a route to `oidcRoute` that has no repo to
-bind against — every other `/api/deploys/*` endpoint takes an ID, and an ID
-can't be checked without a lookup that doubles as a probe for other repos'
-deploys. Or accepting the claims in a handler without calling `oidcMayActOn`,
-which authorizes every repo's CI for that route.
+bind against, or accepting the claims in a handler without checking the binding
+— either authorizes every repo's CI for that route. On read paths, also
+returning `403` where `404` is required.
