@@ -140,14 +140,15 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, rt runtimeEnv,
 		rmCtx, rmCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cli.RemoveContainer(rmCtx, id, true) //nolint:errcheck
 		rmCancel()
+		p.exit, p.exitOK = fmt.Sprintf("exit %d", code), waitErr == nil && code == 0
+		if waitErr != nil {
+			p.exit = waitErr.Error()
+		}
 		close(p.done)
 		m.forget(k, p)
 		if !p.intentional {
-			detail := fmt.Sprintf("exit %d", code)
-			if waitErr != nil {
-				detail = waitErr.Error()
-			}
-			m.db.AddProcessEvent(k.RepoID, k.Hash, "exited", detail)
+			m.db.AddProcessEvent(k.RepoID, k.Hash, "exited", p.exit)
+			m.noteExit(k, p)
 		}
 	}()
 	return nil

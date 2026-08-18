@@ -76,8 +76,16 @@ func newSourceRepo(t *testing.T) string {
 
 func newTestMux(t *testing.T) (*http.ServeMux, string) {
 	t.Helper()
+	mux, root, _ := newTestMuxSuper(t)
+	return mux, root
+}
+
+// newTestMuxSuper is newTestMux plus the supervisor behind it, for tests
+// that drive process state directly rather than through the proxy.
+func newTestMuxSuper(t *testing.T) (*http.ServeMux, string, *supervise.Manager) {
+	t.Helper()
 	deps, root := newTestDeps(t)
-	return NewMux(deps), root
+	return NewMux(deps), root, deps.Super
 }
 
 // newTestDeps builds a fully wired Deps against in-memory/temp storage.
@@ -489,6 +497,92 @@ files = ["mycli"]
 		if rec := doJSON(t, mux, "GET", path, ""); rec.Code == http.StatusOK {
 			t.Errorf("GET %s: %d, want an error", path, rec.Code)
 		}
+	}
+}
+
+// TestCrashedProcessSurfaces: a backend whose start attempt dies must not
+// keep reading "idle" — the deploy reports "crashed" with the reason, both
+// on the row and in its stats, and a stop clears it again.
+func TestCrashedProcessSurfaces(t *testing.T) {
+	mux, _, super := newTestMuxSuper(t)
+	src := newSourceRepo(t)
+	registerRepo(t, mux, "demo", src)
+	if rec := doJSON(t, mux, "POST", "/api/deploys", `{"repo":"demo","ref":"main"}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("create deploy: %d %s", rec.Code, rec.Body)
+	}
+	var d struct {
+		Status       string `json:"status"`
+		BeHash       string `json:"be_hash"`
+		Process      string `json:"process"`
+		ProcessError string `json:"process_error"`
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for d.Status != "ready" {
+		if d.Status == "failed" || time.Now().After(deadline) {
+			t.Fatalf("deploy status = %s", d.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+		rec := doJSON(t, mux, "GET", "/api/deploys/1", "")
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if d.Process != "idle" {
+		t.Fatalf("process before any start = %q, want idle", d.Process)
+	}
+
+	// The fixture manifest's run command doesn't exist, so the start fails
+	// exactly like a backend that dies on boot.
+	var repo struct {
+		ID int64 `json:"id"`
+	}
+	rec := doJSON(t, mux, "GET", "/api/repos/demo", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &repo); err != nil {
+		t.Fatal(err)
+	}
+	key := supervise.BackendKey(repo.ID, d.BeHash)
+	if _, err := super.EnsureRunning(context.Background(), key, "demo"); err == nil {
+		t.Fatal("EnsureRunning succeeded; want a failed start")
+	}
+
+	rec = doJSON(t, mux, "GET", "/api/deploys/1", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Process != "crashed" || d.ProcessError == "" {
+		t.Fatalf("process = %q, process_error = %q; want crashed with a reason", d.Process, d.ProcessError)
+	}
+
+	rec = doJSON(t, mux, "GET", "/api/deploys/1/stats", "")
+	var stats struct {
+		Backend struct {
+			State string `json:"state"`
+			Error string `json:"error"`
+		} `json:"backend"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.Backend.State != "crashed" || stats.Backend.Error != d.ProcessError {
+		t.Fatalf("backend stats = %+v, want crashed with the same reason", stats.Backend)
+	}
+
+	// Stopping acknowledges the crash: nothing is running, and the deploy
+	// reads idle again — with no leftover reason (decoded fresh, since an
+	// empty process_error is omitted from the body).
+	if rec := doJSON(t, mux, "POST", "/api/deploys/1/stop", ""); rec.Code != http.StatusOK {
+		t.Fatalf("stop: %d %s", rec.Code, rec.Body)
+	}
+	var after struct {
+		Process      string `json:"process"`
+		ProcessError string `json:"process_error"`
+	}
+	rec = doJSON(t, mux, "GET", "/api/deploys/1", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Process != "idle" || after.ProcessError != "" {
+		t.Fatalf("process after stop = %q (%q), want idle", after.Process, after.ProcessError)
 	}
 }
 

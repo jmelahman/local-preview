@@ -71,16 +71,30 @@ function ThemeToggle() {
 
 // A deploy's displayed state: the build status until it's ready, then the
 // merged runtime state of its supervised processes (backend and, for
-// process-mode frontends, the frontend) — starting while any side warms
-// up, running only once every side is warm, idle otherwise.
+// process-mode frontends, the frontend) — crashed if any side died, starting
+// while any side warms up, running only once every side is warm, idle
+// otherwise.
 type DeployState = DeployStatus | ProcessState;
 
 function deployState(d: Deploy): DeployState {
   if (d.status !== "ready") return d.status;
   const procs = [d.process, d.fe_process].filter((p): p is ProcessState => p != null);
   if (procs.length === 0) return d.status;
+  // A dead side outranks a live one: half a deploy can't serve the preview.
+  if (procs.includes("crashed")) return "crashed";
   if (procs.includes("starting")) return "starting";
   return procs.every((p) => p === "running") ? "running" : "idle";
+}
+
+// processError is the message behind a crashed deploy, naming the side that
+// died — both can be crashed at once (a frontend outlives its backend only
+// until its next start).
+function processError(d: Deploy): string | null {
+  const sides = [
+    d.process === "crashed" ? `backend: ${d.process_error || "exited"}` : null,
+    d.fe_process === "crashed" ? `frontend: ${d.fe_process_error || "exited"}` : null,
+  ].filter((s): s is string => s != null);
+  return sides.length > 0 ? sides.join(" · ") : null;
 }
 
 const stateStyles: Record<DeployState, { dot: string; pill: string; hint: string }> = {
@@ -113,6 +127,11 @@ const stateStyles: Record<DeployState, { dot: string; pill: string; hint: string
     dot: "bg-success",
     pill: "border-success/30 text-success",
     hint: "Warm — served instantly",
+  },
+  crashed: {
+    dot: "bg-danger",
+    pill: "border-danger/30 text-danger",
+    hint: "Exited unexpectedly — check the run log; the next request starts it again",
   },
   failed: {
     dot: "bg-danger",
@@ -658,6 +677,11 @@ function StatsRow({ label, stats }: { label: string; stats: SideStats }) {
       <Metric label="mem" value={mem} title="Resident memory / total available" />
       <Metric label="up" value={stats.started_at ? uptime(stats.started_at) : "—"} />
       {stats.runtime && <span className="ml-auto text-fg-muted">{stats.runtime}</span>}
+      {stats.error && (
+        <span className="w-full truncate text-danger" title={stats.error}>
+          {stats.error}
+        </span>
+      )}
     </div>
   );
 }
@@ -943,7 +967,10 @@ function DeployDetailDialog({ deploy, onClose }: { deploy: Deploy; onClose: () =
 // StopButton quiesces a deploy's running processes; they cold-start again on
 // the next request, so it needs no confirmation. Rendered only when there's a
 // live process to stop.
-function StopButton({ deploy }: { deploy: Deploy }) {
+// StopButton stops a deploy's processes. On a crashed deploy there's nothing
+// left to stop — the same request acknowledges the crash instead, so the
+// button says what it does.
+function StopButton({ deploy, crashed }: { deploy: Deploy; crashed?: boolean }) {
   const queryClient = useQueryClient();
   const stop = useMutation({
     mutationFn: () => api.stopDeploy(deploy.id),
@@ -954,11 +981,15 @@ function StopButton({ deploy }: { deploy: Deploy }) {
       type="button"
       onClick={() => stop.mutate()}
       disabled={stop.isPending}
-      title="Stop the running process (restarts on the next request)"
+      title={
+        crashed
+          ? "Clear the crash (starts again on the next request)"
+          : "Stop the running process (restarts on the next request)"
+      }
       className={`${neutralButtonClass} gap-1 disabled:opacity-50`}
     >
       <IconStop className="h-3 w-3" />
-      stop
+      {crashed ? "dismiss" : "stop"}
     </button>
   );
 }
@@ -1672,8 +1703,11 @@ export default function App() {
                   .filter(Boolean)
                   .join("\n");
                 const state = deployState(d);
-                // A process is worth stopping only once it's warm or warming.
-                const stoppable = state === "running" || state === "starting";
+                const crashError = state === "crashed" ? processError(d) : null;
+                // A process is worth stopping once it's warm or warming; a
+                // crashed one has nothing to stop but a crash to dismiss.
+                const stoppable =
+                  state === "running" || state === "starting" || state === "crashed";
                 return (
                   <li
                     key={d.id}
@@ -1718,11 +1752,19 @@ export default function App() {
                           {d.error}
                         </p>
                       )}
+                      {crashError && (
+                        <p
+                          className="mt-0.5 max-w-full truncate text-xs text-danger"
+                          title={crashError}
+                        >
+                          {crashError}
+                        </p>
+                      )}
                     </div>
                     {d.artifacts?.map((a) => (
                       <ArtifactDownload key={a.name} artifact={a} />
                     ))}
-                    {stoppable && <StopButton deploy={d} />}
+                    {stoppable && <StopButton deploy={d} crashed={state === "crashed"} />}
                     {d.status === "evicted" && <RedeployButton deploy={d} />}
                     <button
                       type="button"

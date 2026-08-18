@@ -146,11 +146,23 @@ for an unresolvable ref.
 deploys additionally carry `preview_url` (built from the server's public
 preview base — see [hosting behind a
 proxy](/guide/configuration#hosting-behind-a-proxy)) and `process` (the live backend
-state: `running` means warm, `starting` means a start is in flight, and
-`idle` means the process will start on the first request — processes start
-on demand), and `fe_process` (same states) when the frontend is a
+state: `running` means warm, `starting` means a start is in flight, `idle`
+means the process will start on the first request — processes start on
+demand — and `crashed` means the last run or start attempt ended
+unexpectedly), and `fe_process` (same states) when the frontend is a
 [process](/reference/preview-toml#process-mode-frontends) rather than a
 static bundle. Deploys with no backend never carry `process`.
+
+A `crashed` side also carries the reason in `process_error` (or
+`fe_process_error`): the exit status of a process that died on its own, or
+the failure of a start attempt that never became healthy. It exists because
+a service that stopped answering is otherwise indistinguishable from one
+nobody has requested yet — both would read `idle`. Crashed is not a wedged
+state: the next request starts the process like any other cold start, and
+that attempt (or a [stop](#post-api-deploys-id-stop)) clears the reason.
+Processes are shared per artifact hash, so every deploy on that hash reports
+the same crash. Run logs outlive the process — `GET
+/api/deploys/{id}/logs/run` has the output it died with.
 
 Ready deploys whose manifest declares
 [downloadable artifacts](/reference/preview-toml#artifacts-name) also carry
@@ -221,7 +233,8 @@ again on its next request. Build artifacts and the deploy row are untouched.
 
 Response: `200 OK` with the deploy (its `process`/`fe_process` now read
 `idle`). `404` if the deploy doesn't exist. A no-op — succeeds — when nothing
-was running.
+was running. Stopping also acknowledges a `crashed` side: the state and its
+`process_error` clear.
 
 ### `DELETE /api/deploys/{id}`
 
@@ -272,7 +285,8 @@ since — the polling loop behind the dashboard's live tail. When the
 requested attempt is stale (the process restarted) the response resets to a
 tail of the new attempt's log, with `truncated: true` if history beyond the
 last 256 KiB was skipped. `process` is the side's live state
-(`idle`/`starting`/`running`).
+(`idle`/`starting`/`running`/`crashed`) — a `crashed` tail is the output the
+process died with.
 
 ### `GET /api/deploys/{id}/stats`
 
@@ -294,7 +308,8 @@ view. A side the deploy doesn't have is `null`.
 ```
 
 `state` is always present; the sampled fields appear only while the process
-runs. `cpu_percent` is percent of one core (docker-stats convention — it can
+runs. A `crashed` state adds `error` with the exit status or start failure
+behind it. `cpu_percent` is percent of one core (docker-stats convention — it can
 exceed 100 on multi-core use) and needs two samples, so it appears from the
 second request onward; poll at a steady interval for stable readings.
 `memory_limit_bytes` is the container's cgroup limit or, for host

@@ -39,7 +39,9 @@ export type DeployStatus = "queued" | "building" | "ready" | "failed" | "evicted
 
 // Live runtime state of a supervised process, present on ready deploys:
 // `process` for the backend, `fe_process` for process-mode frontends.
-export type ProcessState = "idle" | "starting" | "running";
+// "crashed" means the last run or start attempt ended unexpectedly — the
+// next request still starts it, but nothing is serving in the meantime.
+export type ProcessState = "idle" | "starting" | "running" | "crashed";
 
 export type ArtifactFile = {
   name: string;
@@ -80,7 +82,11 @@ export type Deploy = {
   attempt_count: number;
   preview_url?: string;
   process?: ProcessState;
+  // Why the side crashed (exit status or start failure), while its state is
+  // "crashed".
+  process_error?: string;
   fe_process?: ProcessState;
+  fe_process_error?: string;
   artifacts?: DeployArtifact[];
   created_at: string;
   updated_at: string;
@@ -93,6 +99,8 @@ export type ProcessRuntime = "host" | "container";
 // the second poll onward.
 export type SideStats = {
   state: ProcessState;
+  // Why the side crashed, while its state is "crashed".
+  error?: string;
   runtime?: ProcessRuntime;
   cpu_percent?: number;
   memory_bytes?: number;

@@ -57,6 +57,15 @@ backend (the proxy waits briefly, then shows a self-refreshing "starting"
 page) and later requests hit the warm process. Backends bind loopback-only;
 the only exposed listener is the orchestrator's own address.
 
+A process that exits on its own with a non-zero status — or a start attempt
+that never becomes healthy — leaves the side reading `crashed` instead of
+`idle`, with the exit status or failure alongside it, so a preview that
+stopped answering is distinguishable from one nobody has asked for yet. The
+process is still on demand: the next request starts it like any cold start,
+and the [run log](/reference/api#get-api-deploys-id-logs-run) holds the
+output it died with. Because a process is shared per artifact, every deploy
+on that hash reports the same crash.
+
 ## Downloadable artifacts
 
 A manifest can also declare

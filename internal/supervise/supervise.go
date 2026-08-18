@@ -45,6 +45,14 @@ const AncestryLimit = 500
 // stopGrace is how long a SIGTERM'd process gets before SIGKILL.
 const stopGrace = 5 * time.Second
 
+// Process states reported by Status.
+const (
+	StatusIdle     = "idle"     // not running; a start is one request away
+	StatusStarting = "starting" // a start is in flight
+	StatusRunning  = "running"  // healthy
+	StatusCrashed  = "crashed"  // the last run or start attempt failed
+)
+
 // Side distinguishes the two supervised process kinds.
 type Side string
 
@@ -89,7 +97,8 @@ type Manager struct {
 	mu       sync.Mutex
 	procs    map[Key]*process
 	locks    map[Key]*sync.Mutex
-	stopping bool // set by StopAll; refuses new starts during shutdown
+	failures map[Key]Failure // last unexpected exit / failed start, per key
+	stopping bool            // set by StopAll; refuses new starts during shutdown
 
 	dockerMu     sync.Mutex
 	dockerProbed bool
@@ -107,7 +116,60 @@ func New(database *db.Store, files *store.Store, logsDir string) *Manager {
 		reapInterval:   30 * time.Second,
 		procs:          make(map[Key]*process),
 		locks:          make(map[Key]*sync.Mutex),
+		failures:       make(map[Key]Failure),
 	}
+}
+
+// Failure is why a key stopped serving: an unintentional non-zero exit, or a
+// start attempt that never reached healthy. It outlives the process itself
+// so a dead service reads "crashed" rather than an indistinguishable "idle",
+// and is cleared by the next start attempt or a deliberate stop.
+type Failure struct {
+	Detail string
+	At     time.Time
+}
+
+// noteFailure records why the key stopped serving.
+func (m *Manager) noteFailure(k Key, detail string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failures[k] = Failure{Detail: detail, At: time.Now()}
+}
+
+// noteExit records a healthy process dying on its own — the crash a user
+// notices as a preview that stopped answering. A clean exit isn't a failure,
+// and a process that never went healthy belongs to the start attempt's own
+// failure path, which knows what it was waiting for.
+func (m *Manager) noteExit(k Key, p *process) {
+	if p.exitOK || !isReady(p) {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// This runs after the key is forgotten, so a start racing the exit may
+	// already own it; that attempt's outcome is the current one, and a
+	// report from the process it replaced would outlive its subject.
+	if cur, ok := m.procs[k]; ok && cur != p {
+		return
+	}
+	m.failures[k] = Failure{Detail: p.exit, At: time.Now()}
+}
+
+// clearFailure drops a recorded failure: a new start attempt or a deliberate
+// stop supersedes whatever the last run did.
+func (m *Manager) clearFailure(k Key) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.failures, k)
+}
+
+// LastFailure returns the failure behind a "crashed" status, if one is
+// recorded for the key.
+func (m *Manager) LastFailure(k Key) (Failure, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f, ok := m.failures[k]
+	return f, ok
 }
 
 // SetMaxWarm caps concurrently running processes: beyond it the
@@ -166,6 +228,12 @@ type process struct {
 	done   chan struct{}
 	err    error
 
+	// exit summarizes how the process ended ("exit status 3", "exit 137",
+	// "exit ok"); exitOK marks a zero status. Both are written before done
+	// closes, so any reader that waited on done sees them.
+	exit   string
+	exitOK bool
+
 	intentional bool // set (under the key lock) before a deliberate stop
 }
 
@@ -200,6 +268,8 @@ func (m *Manager) EnsureRunning(ctx context.Context, k Key, repoName string) (in
 				done:     make(chan struct{}),
 			}
 			m.procs[k] = p
+			// This attempt now owns the key's outcome.
+			delete(m.failures, k)
 			go m.start(k, p)
 		}
 		p.lastTouch = time.Now()
@@ -384,9 +454,14 @@ func (m *Manager) start(k Key, p *process) {
 	lock.Lock()
 	defer lock.Unlock()
 
+	// fail ends the attempt and leaves the reason behind: nothing is serving
+	// this key, and Status must say so instead of reading "idle". A process
+	// that exited before it was ever healthy is reported here — the exit
+	// watcher defers to the start, which knows what it was waiting for.
 	fail := func(event string, err error) {
 		p.err = err
 		m.db.AddProcessEvent(k.RepoID, k.Hash, event, err.Error())
+		m.noteFailure(k, err.Error())
 		close(p.failed)
 		m.forget(k, p)
 	}
@@ -497,15 +572,16 @@ func (m *Manager) start(k Key, p *process) {
 		go func() {
 			waitErr := cmd.Wait()
 			logFile.Close()
+			p.exit, p.exitOK = "exit ok", waitErr == nil
+			if waitErr != nil {
+				p.exit = waitErr.Error()
+			}
 			close(p.done)
 			m.forget(k, p)
 			m.db.DeleteProcessRecord(k.RepoID, k.Hash)
 			if !p.intentional {
-				detail := "exit ok"
-				if waitErr != nil {
-					detail = waitErr.Error()
-				}
-				m.db.AddProcessEvent(k.RepoID, k.Hash, "exited", detail)
+				m.db.AddProcessEvent(k.RepoID, k.Hash, "exited", p.exit)
+				m.noteExit(k, p)
 			}
 		}()
 	}
@@ -513,14 +589,18 @@ func (m *Manager) start(k Key, p *process) {
 	if err := m.awaitHealthy(p, spec.healthPath, spec.startTimeout, port); err != nil {
 		// Only kill what's still alive: force-removing an already-exited
 		// container would cut its log stream before the crash output
-		// (reaped with a drain grace) lands in the run log.
-		if !isExited(p) {
+		// (reaped with a drain grace) lands in the run log. Whether it died
+		// on its own has to be read before the wait below, which makes every
+		// process look exited.
+		died := isExited(p)
+		if !died {
 			m.killProcess(p)
 		}
 		<-p.done
 		event := "health_timeout"
-		if isExited(p) {
-			event = "exited"
+		if died {
+			// The exit status is a better answer than "never went healthy".
+			event, err = "exited", fmt.Errorf("process exited during startup: %s (see run log)", p.exit)
 		}
 		fail(event, err)
 		return
@@ -744,6 +824,9 @@ func (m *Manager) Stop(k Key, reason string) {
 
 // stopLocked stops the tracked process while the caller holds the key lock.
 func (m *Manager) stopLocked(k Key, reason string) {
+	// Stopping is a deliberate act on this key either way, so it also
+	// acknowledges a crash the key was still reporting.
+	m.clearFailure(k)
 	m.mu.Lock()
 	p := m.procs[k]
 	m.mu.Unlock()
@@ -825,6 +908,13 @@ func (m *Manager) StopRepo(repoID int64, reason string) {
 	for k := range m.procs {
 		if k.RepoID == repoID {
 			keys = append(keys, k)
+		}
+	}
+	// Crashed keys have no process left to stop; drop their records so a
+	// deleted repo leaves nothing behind.
+	for k := range m.failures {
+		if k.RepoID == repoID {
+			delete(m.failures, k)
 		}
 	}
 	m.mu.Unlock()
@@ -949,20 +1039,27 @@ func (m *Manager) removeHashLogs(repoName, kind, hash string) {
 }
 
 // Status reports the runtime state of an artifact's process for API views:
-// "running", "starting", or "idle" (not running; a start is one request
-// away).
+// "running", "starting", "crashed" (the last run or start attempt ended
+// badly and nothing has superseded it), or "idle" (not running; a start is
+// one request away). Crashed is not a wedged state — the next request starts
+// the process like any idle one; it exists so a service that died on its own
+// is distinguishable from one that was never asked to run.
 func (m *Manager) Status(k Key) string {
 	m.mu.Lock()
 	p := m.procs[k]
+	_, crashed := m.failures[k]
 	m.mu.Unlock()
 	if p == nil {
-		return "idle"
+		if crashed {
+			return StatusCrashed
+		}
+		return StatusIdle
 	}
 	select {
 	case <-p.ready:
-		return "running"
+		return StatusRunning
 	default:
-		return "starting"
+		return StatusStarting
 	}
 }
 

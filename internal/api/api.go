@@ -298,13 +298,17 @@ func (d Deps) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 // deployJSON augments a deploy row with its preview URL and the
 // supervisor's live process statuses. FeProcess is present only for
 // process-mode frontends; Artifacts only for manifests that declare
-// downloadable artifacts.
+// downloadable artifacts. The *Error fields carry the exit or start-failure
+// detail behind a "crashed" side, so a caller never has to dig through the
+// run log to learn why a preview stopped answering.
 type deployJSON struct {
 	db.DeployRow
-	PreviewURL string         `json:"preview_url,omitempty"`
-	Process    string         `json:"process,omitempty"`
-	FeProcess  string         `json:"fe_process,omitempty"`
-	Artifacts  []artifactJSON `json:"artifacts,omitempty"`
+	PreviewURL     string         `json:"preview_url,omitempty"`
+	Process        string         `json:"process,omitempty"`
+	ProcessError   string         `json:"process_error,omitempty"`
+	FeProcess      string         `json:"fe_process,omitempty"`
+	FeProcessError string         `json:"fe_process_error,omitempty"`
+	Artifacts      []artifactJSON `json:"artifacts,omitempty"`
 }
 
 // artifactJSON is one named downloadable artifact on a ready deploy.
@@ -331,10 +335,11 @@ func (d Deps) deployJSON(row db.DeployRow) deployJSON {
 	if row.Status == db.DeployReady {
 		out.PreviewURL = d.previewURL(row)
 		if row.BeHash != "" {
-			out.Process = d.Super.Status(supervise.BackendKey(row.RepoID, row.BeHash))
+			out.Process, out.ProcessError = d.processState(supervise.BackendKey(row.RepoID, row.BeHash))
 		}
 		if row.FeHash != "" && row.HasFeProcess {
-			out.FeProcess = d.Super.Status(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
+			out.FeProcess, out.FeProcessError = d.processState(
+				supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
 		}
 		for _, name := range slices.Sorted(maps.Keys(row.Artifacts)) {
 			ref := row.Artifacts[name]
@@ -356,6 +361,17 @@ func (d Deps) deployJSON(row db.DeployRow) deployJSON {
 		}
 	}
 	return out
+}
+
+// processState reports one side's live state plus, when that state is
+// "crashed", the failure detail behind it.
+func (d Deps) processState(k supervise.Key) (state, detail string) {
+	state = d.Super.Status(k)
+	if state != supervise.StatusCrashed {
+		return state, ""
+	}
+	f, _ := d.Super.LastFailure(k)
+	return state, f.Detail
 }
 
 // previewURL builds the public URL of a deploy's preview.
@@ -694,9 +710,10 @@ func (d Deps) handleDeployRunLog(w http.ResponseWriter, r *http.Request) {
 // sideStats is one side's slice of a deploy stats response. Sampled fields
 // are absent while the process isn't running (or can't be sampled);
 // cpu_percent additionally needs two samples, so it appears from the second
-// poll onward.
+// poll onward. Error accompanies a "crashed" state.
 type sideStats struct {
 	State            string   `json:"state"`
+	Error            string   `json:"error,omitempty"`
 	Runtime          string   `json:"runtime,omitempty"`
 	CPUPercent       *float64 `json:"cpu_percent,omitempty"`
 	MemoryBytes      *uint64  `json:"memory_bytes,omitempty"`
@@ -713,7 +730,8 @@ func (d Deps) handleDeployStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sample := func(k supervise.Key) *sideStats {
-		s := &sideStats{State: d.Super.Status(k)}
+		state, detail := d.processState(k)
+		s := &sideStats{State: state, Error: detail}
 		if ps := d.Super.Stats(r.Context(), k); ps != nil {
 			s.Runtime = ps.Runtime
 			s.CPUPercent = ps.CPUPercent

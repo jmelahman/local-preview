@@ -187,3 +187,41 @@ existence signal. Authorization then binds `claims.repository` to the repo's
 
 **What would reintroduce it.** Documenting or shipping a default/empty audience;
 or reordering the gate to resolve the repo before verifying the token.
+
+## A dead process needs a record that outlives it
+
+**Symptom.** A preview whose backend exited on its own — panic on startup, an
+OOM kill, a bad migration — kept showing `idle` in the dashboard and the API,
+the same badge as a deploy nobody had visited yet. The only hint that anything
+was wrong was the preview not answering.
+
+**Root cause.** `Status` reported on `m.procs`, and every exit path (`cmd.Wait`
+watcher, container watcher, the start-failure `fail` closure) ends in
+`m.forget`, which deletes the entry. Once the process is gone the manager holds
+nothing about it, so "died two seconds ago" and "never started" are the same
+observation: no entry, therefore `idle`. Correct for a supervisor that starts
+on demand — the next request *does* boot it either way — but it discards the
+one fact a user needs.
+
+**Fix.** A separate `failures map[Key]Failure` that outlives the process. A
+non-zero exit of a process that had gone healthy records via `noteExit`; a
+start attempt that never got there records via `fail` (which knows what it was
+waiting for). `Status` returns `crashed` when the key has no process but has a
+failure, and the API/orchestrator surface the detail as `process_error`. The
+record is cleared where it stops being true: on the next start attempt, on an
+explicit `Stop`, and per-repo in `StopRepo`.
+
+Exactly one path reports per lifecycle — `noteExit` returns early unless the
+process was `isReady`, so a start attempt that dies before healthy belongs to
+`fail` alone and can't double-report.
+
+**What would reintroduce it.** Adding an exit path that calls `forget` without
+recording, or clearing failures somewhere that isn't a real acknowledgement.
+More generally: any UI state derived only from a live-process table inherits
+that table's amnesia. If a state means "nothing here", check that it isn't
+covering for something that was here and failed.
+
+**Bug found on the way.** The health-timeout path called `isExited(p)` after
+`<-p.done`, where every process looks exited, so the `health_timeout` event
+never fired. Reading liveness after waiting for death answers a different
+question than the one asked — sample it before the wait.

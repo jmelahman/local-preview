@@ -100,6 +100,8 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   best-effort, so creates replace orphaned dirs; only DB rows may conflict.
 - A startup backlog must not be enqueued from the goroutine that serves HTTP —
   a bounded-channel send before `ListenAndServe` wedges the whole server.
+- State derived from a live-process table can't report a process that died —
+  a failure record has to outlive the process, or "crashed" reads as "idle".
 - Uploads must hash only the side being uploaded — computing every side's hash
   (via `resolveHashes`) makes a one-side upload fail on an unrelated partition.
 - GitHub OIDC upload auth needs a custom `aud` (the default GH audience is

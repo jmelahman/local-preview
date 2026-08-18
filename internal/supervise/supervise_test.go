@@ -314,12 +314,16 @@ func TestStopAllRefusesNewStarts(t *testing.T) {
 	}
 }
 
+// TestOutOfBandKillRecovers: a healthy process dying on its own reads
+// "crashed" — an idle deploy and a dead one must not look alike — and the
+// next start supersedes that record.
 func TestOutOfBandKillRecovers(t *testing.T) {
 	f := newFixture(t)
 	f.provision(t, "be-kill", serverArgv(t))
 	ctx := context.Background()
+	k := BackendKey(f.repoID, "be-kill")
 
-	port, err := f.m.EnsureRunning(ctx, BackendKey(f.repoID, "be-kill"), "demo")
+	port, err := f.m.EnsureRunning(ctx, k, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,33 +334,63 @@ func TestOutOfBandKillRecovers(t *testing.T) {
 	syscall.Kill(-recs[0].PGID, syscall.SIGKILL)
 
 	// The reaper notices and clears state; a new EnsureRunning restarts.
-	deadline := time.Now().Add(5 * time.Second)
-	for f.m.Status(BackendKey(f.repoID, "be-kill")) != "idle" {
-		if time.Now().After(deadline) {
-			t.Fatal("kill was not detected")
-		}
-		time.Sleep(20 * time.Millisecond)
+	f.waitStatus(t, k, "crashed")
+	fail, ok := f.m.LastFailure(k)
+	if !ok || fail.Detail == "" || fail.At.IsZero() {
+		t.Fatalf("LastFailure = %+v, %v; want the exit detail", fail, ok)
 	}
-	newPort, err := f.m.EnsureRunning(ctx, BackendKey(f.repoID, "be-kill"), "demo")
+	newPort, err := f.m.EnsureRunning(ctx, k, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if code, _ := get(t, newPort, "/api/health"); code != 200 {
 		t.Fatalf("health after restart = %d", code)
 	}
+	if got := f.m.Status(k); got != "running" {
+		t.Fatalf("Status after restart = %q, want running", got)
+	}
+	if _, ok := f.m.LastFailure(k); ok {
+		t.Fatal("restart did not clear the recorded failure")
+	}
 	_ = port
+}
+
+// TestStopClearsCrash: stopping a crashed key acknowledges it — the deploy
+// goes back to reading "idle" rather than a crash nobody can clear.
+func TestStopClearsCrash(t *testing.T) {
+	f := newFixture(t)
+	f.provision(t, "be-ack", []string{testExe(t), "--helper-crash"})
+	k := BackendKey(f.repoID, "be-ack")
+
+	if _, err := f.m.EnsureRunning(context.Background(), k, "demo"); err == nil {
+		t.Fatal("EnsureRunning succeeded; want a crash")
+	}
+	if got := f.m.Status(k); got != "crashed" {
+		t.Fatalf("Status = %q, want crashed", got)
+	}
+	f.m.Stop(k, "test")
+	if got := f.m.Status(k); got != "idle" {
+		t.Fatalf("Status after stop = %q, want idle", got)
+	}
 }
 
 func TestInstantCrashSurfaces(t *testing.T) {
 	f := newFixture(t)
 	f.provision(t, "be-crash", []string{testExe(t), "--helper-crash"})
+	k := BackendKey(f.repoID, "be-crash")
 
-	_, err := f.m.EnsureRunning(context.Background(), BackendKey(f.repoID, "be-crash"), "demo")
+	_, err := f.m.EnsureRunning(context.Background(), k, "demo")
 	if err == nil || !strings.Contains(err.Error(), "exited") {
 		t.Fatalf("err = %v, want exit error", err)
 	}
-	if got := f.m.Status(BackendKey(f.repoID, "be-crash")); got != "idle" {
-		t.Fatalf("Status = %q", got)
+	// A start that never reached healthy is a crash too: nothing serves the
+	// preview, so "idle" would be a lie.
+	if got := f.m.Status(k); got != "crashed" {
+		t.Fatalf("Status = %q, want crashed", got)
+	}
+	// The exit status beats "never went healthy" as an explanation.
+	if fail, ok := f.m.LastFailure(k); !ok || !strings.Contains(fail.Detail, "exit status 3") {
+		t.Fatalf("LastFailure = %+v, %v; want the helper's exit status", fail, ok)
 	}
 }
 
@@ -414,8 +448,8 @@ func TestInitFailureRetriesNextStart(t *testing.T) {
 	if art, err := f.db.GetBackendArtifact(f.repoID, "be-init-retry"); err != nil || art.InitDoneAt != "" {
 		t.Fatalf("failed init must not be recorded done: %+v, %v", art, err)
 	}
-	if got := f.m.Status(k); got != "idle" {
-		t.Fatalf("Status after init failure = %q", got)
+	if got := f.m.Status(k); got != "crashed" {
+		t.Fatalf("Status after init failure = %q, want crashed", got)
 	}
 
 	// The next start attempt re-runs init, which now succeeds.

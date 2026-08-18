@@ -183,11 +183,15 @@ type Deploy struct {
 	AttemptCount int64  `json:"attempt_count"`
 	// PreviewURL is set once the deploy is ready.
 	PreviewURL string `json:"preview_url,omitempty"`
-	// Process is the live backend state when ready: running, starting, or
-	// idle (backends start on demand). FeProcess is the same for a
-	// process-mode frontend, absent for static frontends.
-	Process   string `json:"process,omitempty"`
-	FeProcess string `json:"fe_process,omitempty"`
+	// Process is the live backend state when ready: running, starting, idle
+	// (backends start on demand), or crashed — the last run or start attempt
+	// ended badly, with ProcessError carrying the detail. FeProcess and
+	// FeProcessError are the same for a process-mode frontend, absent for
+	// static frontends.
+	Process        string `json:"process,omitempty"`
+	ProcessError   string `json:"process_error,omitempty"`
+	FeProcess      string `json:"fe_process,omitempty"`
+	FeProcessError string `json:"fe_process_error,omitempty"`
 	// Artifacts are the deploy's named downloadable artifacts, present on
 	// ready deploys whose manifest declares [artifacts.<name>] sections.
 	Artifacts []DeployArtifact `json:"artifacts,omitempty"`
@@ -658,10 +662,11 @@ func (o *Orchestrator) toDeploy(row db.DeployRow) Deploy {
 	if row.Status == db.DeployReady {
 		d.PreviewURL = o.previewURL(row)
 		if row.BeHash != "" {
-			d.Process = o.super.Status(supervise.BackendKey(row.RepoID, row.BeHash))
+			d.Process, d.ProcessError = o.processState(supervise.BackendKey(row.RepoID, row.BeHash))
 		}
 		if row.FeHash != "" && row.HasFeProcess {
-			d.FeProcess = o.super.Status(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
+			d.FeProcess, d.FeProcessError = o.processState(
+				supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
 		}
 		for _, name := range slices.Sorted(maps.Keys(row.Artifacts)) {
 			art := DeployArtifact{Name: name, Hash: row.Artifacts[name].Hash, Files: []ArtifactFile{}}
@@ -702,4 +707,15 @@ func (o *Orchestrator) ArtifactFilePath(deployID int64, artifact, file string) (
 
 func (o *Orchestrator) previewURL(row db.DeployRow) string {
 	return o.previewBase.URL(row.ShortSHA, row.RepoName)
+}
+
+// processState reports one side's live state plus, when that state is
+// "crashed", the failure detail behind it.
+func (o *Orchestrator) processState(k supervise.Key) (state, detail string) {
+	state = o.super.Status(k)
+	if state != supervise.StatusCrashed {
+		return state, ""
+	}
+	f, _ := o.super.LastFailure(k)
+	return state, f.Detail
 }
