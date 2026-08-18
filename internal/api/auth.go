@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/githuboidc"
 	"github.com/jmelahman/local-preview/internal/githubsso"
 )
 
@@ -236,6 +237,15 @@ func AuthMiddleware(d Deps, next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+			// Not a personal-access token. It may still be a GitHub Actions
+			// OIDC token, which is what CI has instead of a session — but only
+			// on a route that can bind it to a repo (see oidcRoute). The claims
+			// ride the context so the handler can enforce that binding without
+			// verifying a second time.
+			if claims, ok := d.verifyOIDC(r, tok); ok {
+				next.ServeHTTP(w, r.WithContext(withOIDCClaims(r.Context(), claims)))
+				return
+			}
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			httpError(w, http.StatusUnauthorized, "invalid or unauthorized token")
 			return
@@ -268,6 +278,51 @@ func isAuthExempt(p string) bool {
 		return true
 	}
 	return false
+}
+
+// oidcCtxKey types the context key carrying verified OIDC claims.
+type oidcCtxKey struct{}
+
+// withOIDCClaims marks a request as OIDC-authenticated, carrying the verified
+// claims to the handler that must bind them to a repo.
+func withOIDCClaims(ctx context.Context, claims githuboidc.Claims) context.Context {
+	return context.WithValue(ctx, oidcCtxKey{}, claims)
+}
+
+// oidcClaimsFrom returns the verified claims the middleware attached, if the
+// request authenticated with a GitHub Actions OIDC token rather than a session
+// or a personal-access token.
+func oidcClaimsFrom(ctx context.Context) (githuboidc.Claims, bool) {
+	claims, ok := ctx.Value(oidcCtxKey{}).(githuboidc.Claims)
+	return claims, ok
+}
+
+// verifyOIDC verifies tok as a GitHub Actions OIDC token, but only for requests
+// on an OIDC-eligible route. Gating on the route matters: a valid token proves
+// only which workflow minted it, so it is an identity with no authority until a
+// handler checks it against the repo being acted on. Letting one past on a route
+// with nothing to bind it to would authorize every repo's CI for everything.
+func (d Deps) verifyOIDC(r *http.Request, tok string) (githuboidc.Claims, bool) {
+	if d.UploadAuth == nil || !oidcRoute(r.Method, r.URL.Path) {
+		return githuboidc.Claims{}, false
+	}
+	claims, err := d.UploadAuth.Verify(r.Context(), tok)
+	if err != nil {
+		return githuboidc.Claims{}, false
+	}
+	return claims, true
+}
+
+// oidcRoute lists the non-exempt routes a GitHub Actions OIDC token may
+// authenticate. Only creating a deploy qualifies: it names a repo in its body,
+// so handleCreateDeploy can bind the token to it. The uploads are OIDC-gated
+// too but never reach here — they are exempt above and self-gate instead.
+//
+// Deliberately not the rest of /api/deploys: stopping or deleting a deploy
+// takes an ID, and an ID does not say which repo it belongs to without a lookup
+// the caller could use to probe for other repos' deploys.
+func oidcRoute(method, path string) bool {
+	return method == http.MethodPost && path == "/api/deploys"
 }
 
 // isStateChanging reports whether a method mutates state and so warrants the

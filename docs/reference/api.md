@@ -23,7 +23,19 @@ and checked against the allowlist.
 
 Exempt regardless of SSO: `GET /api/health`, the `/api/auth/*` endpoints below,
 `POST /api/webhooks/github` (HMAC-authenticated), and
-`POST /api/repos/{repo}/uploads/*` (GitHub Actions OIDC). A gated request with
+`POST /api/repos/{repo}/uploads/*` (GitHub Actions OIDC).
+
+`POST /api/deploys` additionally accepts a [GitHub Actions OIDC
+token](/guide/uploads#authenticating-with-github-actions-oidc) as its bearer
+credential, so `preview upload … --oidc --deploy` can deploy what it just
+uploaded without a session. The token authorizes only the repo named in the
+request body, and only when that repo's registered source is the GitHub
+repository the token was minted for — otherwise `403`. No other endpoint accepts
+one: a token says which workflow minted it, which authorizes nothing until it is
+checked against a named repo, and the remaining deploy endpoints take an ID
+rather than a repo.
+
+A gated request with
 no valid credential gets `401`; a valid session on a state-changing
 (`POST`/`PUT`/`PATCH`/`DELETE`) request whose `Origin` isn't the dashboard gets
 `403` (CSRF defense). A signed-in account that isn't on the allowlist gets `403`
@@ -170,6 +182,11 @@ Request:
 Response: `202 Accepted` with the deploy. `404` for an unknown repo, `409`
 for a repo that isn't `ready` (still cloning, or its clone failed), `400`
 for an unresolvable ref.
+
+Accepts a GitHub Actions OIDC token in place of a session — see
+[Authentication](#authentication) — which is what makes `--oidc --deploy` work
+from CI. Such a token gets `403` if `repo`'s registered source is not the
+repository it was minted for.
 
 ```json
 {

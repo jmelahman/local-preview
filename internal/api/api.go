@@ -422,6 +422,15 @@ func (d Deps) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "repo and ref are required")
 		return
 	}
+	// A CI caller authenticates with a GitHub Actions OIDC token instead of a
+	// session — `preview upload ... --oidc --deploy` deploys what it just
+	// uploaded. The token is already verified; what it does not yet establish
+	// is that its workflow owns this repo.
+	if claims, ok := oidcClaimsFrom(r.Context()); ok {
+		if !d.oidcMayActOn(w, claims, req.Repo, "deploy") {
+			return
+		}
+	}
 	row, err := d.Queue.RequestDeploy(r.Context(), req.Repo, req.Ref, req.Rebuild)
 	if errors.Is(err, db.ErrNotFound) {
 		httpError(w, http.StatusNotFound, fmt.Sprintf("repo %q is not registered", req.Repo))

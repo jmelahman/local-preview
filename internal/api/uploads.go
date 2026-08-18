@@ -9,6 +9,7 @@ import (
 
 	"github.com/jmelahman/local-preview/internal/build"
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/githuboidc"
 )
 
 // handleUploadFrontend, handleUploadBackend, and handleUploadArtifact publish a
@@ -81,6 +82,18 @@ func (d Deps) authorizeUpload(w http.ResponseWriter, r *http.Request, repoName s
 		httpError(w, http.StatusForbidden, "invalid OIDC token")
 		return false
 	}
+	return d.oidcMayActOn(w, claims, repoName, "upload to")
+}
+
+// oidcMayActOn reports whether verified OIDC claims authorize acting on the
+// named repo: its registered source must be the same GitHub repository the
+// token was minted for, so repo A's workflow can never reach repo B. verb names
+// the attempted action in the denial message. On any failure it writes the
+// error response and returns false.
+//
+// Callers must verify the token first — this looks the repo up, and doing so
+// for an unauthenticated caller would leak which repos are registered.
+func (d Deps) oidcMayActOn(w http.ResponseWriter, claims githuboidc.Claims, repoName, verb string) bool {
 	repo, err := d.Store.GetRepoByName(repoName)
 	if errors.Is(err, db.ErrNotFound) {
 		httpError(w, http.StatusNotFound, fmt.Sprintf("repo %q is not registered", repoName))
@@ -92,7 +105,7 @@ func (d Deps) authorizeUpload(w http.ResponseWriter, r *http.Request, repoName s
 	}
 	if !sourceMatchesGitHubRepo(repo.Source, claims.Repository) {
 		httpError(w, http.StatusForbidden, fmt.Sprintf(
-			"token for %q is not authorized to upload to repo %q", claims.Repository, repoName))
+			"token for %q is not authorized to %s repo %q", claims.Repository, verb, repoName))
 		return false
 	}
 	return true

@@ -249,3 +249,29 @@ sent to a preview host in the first place.
 **What would reintroduce it.** Scoping one cookie to cover both the apex host
 and the preview subdomains; dropping the `stripCookie` call in the proxy
 `Rewrite`; or letting the apex middleware accept a `'preview'`-scope session.
+
+## An OIDC token authenticates nothing until it is bound to a named repo
+
+**Symptom.** `preview upload frontend … --oidc --deploy` uploaded fine and then
+failed with `POST /api/deploys: invalid or unauthorized token`. The upload
+endpoints are auth-exempt and self-gate on OIDC, but `/api/deploys` went through
+the session middleware, which treats *every* bearer token as a personal-access
+token and verifies it against the GitHub user API. An OIDC JWT is not a PAT, so
+it was rejected — making `--oidc` and `--deploy`, both documented as composable
+global flags, unusable together. CI could publish an artifact but never deploy
+it.
+
+**Root cause / fix.** The middleware now falls back to OIDC verification when
+the PAT check fails, and attaches the verified claims to the request context.
+The subtlety is that verifying is not authorizing: a valid token proves only
+which workflow minted it, and any repo in the org can mint one for a given
+audience. So the fallback is gated on `oidcRoute` — currently just
+`POST /api/deploys` — and `handleCreateDeploy` calls `oidcMayActOn` to require
+that the `repo` in the body has the token's GitHub repository as its registered
+source. Same rule the uploads already applied, same helper now.
+
+**What would reintroduce it.** Adding a route to `oidcRoute` that has no repo to
+bind against — every other `/api/deploys/*` endpoint takes an ID, and an ID
+can't be checked without a lookup that doubles as a probe for other repos'
+deploys. Or accepting the claims in a handler without calling `oidcMayActOn`,
+which authorizes every repo's CI for that route.
