@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -372,6 +373,10 @@ func run(opts serveOptions) error {
 	// never ALB-reachable.
 	var workerSrv *http.Server
 	if opts.workerListen != "" && (opts.role == "worker" || opts.role == "all") {
+		if isPublicBind(opts.workerListen) {
+			log.Printf("WARNING: --worker-listen %q binds all interfaces — the worker API starts arbitrary processes and must be firewalled to the control node only (private subnet / security group)",
+				opts.workerListen)
+		}
 		workerSrv = &http.Server{
 			Addr:              opts.workerListen,
 			Handler:           workerapi.NewServer(super, opts.workerSecret).Handler(),
@@ -459,7 +464,10 @@ func logRequests(h http.Handler) http.Handler {
 // so a just-built side whose asynchronous persist is still in flight is never
 // swept before it lands durably.
 const (
-	cacheSweepInterval = time.Minute
+	// cacheSweepInterval is deliberately well above a minute: a sweep walks
+	// resident artifact trees, and even with size memoization it contends with
+	// previews reading the same directories, so it should be infrequent.
+	cacheSweepInterval = 5 * time.Minute
 	cacheSweepMinAge   = 10 * time.Minute
 )
 
@@ -475,11 +483,11 @@ func startCacheSweeper(ctx context.Context, files *store.Store, super *supervise
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				live := super.LiveArtifacts()
-				protect := func(repo, side, hash string) bool {
-					_, ok := live[repo+"\x00"+side+"\x00"+hash]
-					return ok
-				}
+				// protect is evaluated per candidate immediately before deletion
+				// (inside EvictCacheToWatermark), so it must be a live check — a
+				// snapshot taken here would be TOCTOU against a process that
+				// starts mid-sweep and bind-mounts the files about to be removed.
+				protect := super.IsArtifactLive
 				if freed, err := files.EvictCacheToWatermark(maxBytes, cacheSweepMinAge, protect); err != nil {
 					log.Printf("artifact cache sweep: %v", err)
 				} else if freed > 0 {
@@ -507,8 +515,17 @@ func startReconciler(ctx context.Context, r *reconcile.Reconciler) {
 		}
 		log.Printf("reconcile: %s", rep)
 		if rep.Gaps > 0 {
-			log.Printf("reconcile: WARNING %d artifact(s) missing from the tier and not resident locally: %v",
-				rep.Gaps, rep.GapKeys)
+			// Cap the enumerated keys: the first pass after a repo set predates
+			// the tier can surface many gaps at once, and an unbounded slice in
+			// one log line is unreadable.
+			shown := rep.GapKeys
+			suffix := ""
+			if len(shown) > 20 {
+				suffix = fmt.Sprintf(" (+%d more)", len(shown)-20)
+				shown = shown[:20]
+			}
+			log.Printf("reconcile: WARNING %d artifact(s) missing from the tier and not resident locally: %v%s",
+				rep.Gaps, shown, suffix)
 		}
 	}
 	go func() {
@@ -584,4 +601,20 @@ func startFleetSignal(ctx context.Context, reg *fleet.Registry) {
 			}
 		}
 	}()
+}
+
+// isPublicBind reports whether a listen address binds all interfaces rather
+// than a specific private one — an empty host or a wildcard IP. Used only to
+// warn: the worker API is a remote-code-execution surface and should be
+// firewalled to the control node, not exposed on every interface.
+func isPublicBind(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return true
+	}
+	return false
 }

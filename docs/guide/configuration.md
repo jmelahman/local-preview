@@ -301,6 +301,12 @@ capacity) is logged as `fleet: load=…` — the signal an autoscaling policy
 target-tracks. A worker can be told to drain (stop taking new work while
 finishing what is warm) ahead of instance termination.
 
+Note that only *process-mode* previews (backends, and frontends that run as a
+process) are routed to workers. A **static frontend** has no process, so the
+control node serves it directly from its own disk — meaning a control node also
+needs the artifact tier configured, so those frontend artifacts remain
+hydratable if the control node's local cache evicts them.
+
 The worker API starts arbitrary preview processes on request, so it is a
 remote-code-execution surface by design: it authenticates with a shared secret
 and **must live on a private listener that is never reachable from the ALB or

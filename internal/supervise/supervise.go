@@ -187,6 +187,22 @@ func (m *Manager) LiveArtifacts() map[string]struct{} {
 	return out
 }
 
+// IsArtifactLive reports whether a specific artifact side currently has a
+// tracked process. Cache eviction calls it per candidate immediately before
+// deleting, so a process that a start registered after the sweep began is still
+// seen — a snapshot taken once per sweep would be TOCTOU against a fresh start
+// whose container is about to bind-mount the very files being reclaimed.
+func (m *Manager) IsArtifactLive(repoName, side, hash string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, p := range m.procs {
+		if p.repoName == repoName && string(k.Side) == side && k.Hash == hash {
+			return true
+		}
+	}
+	return false
+}
+
 // CrashedKeys returns every key Status would currently report as
 // "crashed" — a recorded failure with no process since started under it.
 // Runtime state lives only here, so a listing that wants to filter on it

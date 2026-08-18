@@ -46,6 +46,17 @@ type Store struct {
 	// hydrated, so cache eviction can reclaim the coldest first. Keyed by
 	// cacheKey(repo, side, hash). Absent entries fall back to directory mtime.
 	accessed map[string]time.Time
+	// sizeCache memoizes the recursive byte size of an artifact directory,
+	// keyed by path and validated by mtime. Published dirs are immutable (they
+	// land by rename, and a rebuild-overwrite changes the mtime), so a hit is
+	// always accurate — this keeps a cache sweep from re-walking every
+	// artifact's tens of thousands of files on every pass.
+	sizeCache map[string]sizeCacheEntry
+}
+
+type sizeCacheEntry struct {
+	mtime time.Time
+	size  int64
 }
 
 type artListEntry struct {
@@ -61,6 +72,7 @@ func New(artifactsDir, stateDir, tmpDir string) *Store {
 		tmpDir:       tmpDir,
 		artLists:     map[string]artListEntry{},
 		accessed:     map[string]time.Time{},
+		sizeCache:    map[string]sizeCacheEntry{},
 	}
 }
 

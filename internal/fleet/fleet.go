@@ -151,10 +151,11 @@ func (r *Registry) EnsureRunning(ctx context.Context, k supervise.Key, repoName 
 	return w.be.EnsureRunning(ctx, k, repoName)
 }
 
-// Capacity totals warm slots (running) and cap (max_warm) across fresh workers.
-// A worker with max_warm 0 (unlimited) contributes its running count to both,
-// so an unbounded worker never inflates headroom. This is the fleet-wide signal
-// scale-out tracks.
+// Capacity totals committed warm slots (running) and the *bounded* fleet
+// capacity (the sum of positive max_warm caps) across fresh workers. A worker
+// with max_warm 0 (unlimited) contributes no finite capacity figure — see
+// LoadRatio for how unlimited headroom is scored — so it never inflates the
+// denominator into implying the fleet is full.
 func (r *Registry) Capacity() (running, capacity int) {
 	now := time.Now()
 	for _, w := range r.list() {
@@ -165,18 +166,38 @@ func (r *Registry) Capacity() (running, capacity int) {
 		running += hb.Running
 		if hb.MaxWarm > 0 {
 			capacity += hb.MaxWarm
-		} else {
-			capacity += hb.Running
 		}
 	}
 	return running, capacity
 }
 
-// LoadRatio is committed warm slots ÷ fleet capacity in [0,1]; 1 when there is
-// no capacity. The target for scale-out target-tracking.
+// LoadRatio is committed warm slots ÷ fleet capacity in [0,1] — the target a
+// scale-out policy tracks. Any fresh worker with unlimited capacity (max_warm
+// 0) means the fleet has spare room, so the ratio is 0 (never a scale-out
+// trigger) rather than running/running = 1, which would read as "scale out
+// forever". With no fresh worker, or all bounded workers at zero capacity, it
+// is 1.
 func (r *Registry) LoadRatio() float64 {
-	running, capacity := r.Capacity()
-	if capacity <= 0 {
+	now := time.Now()
+	var running, capacity int
+	var anyFresh, unbounded bool
+	for _, w := range r.list() {
+		hb, last, reachable := w.snapshot()
+		if !r.fresh(last, reachable, now) {
+			continue
+		}
+		anyFresh = true
+		running += hb.Running
+		if hb.MaxWarm > 0 {
+			capacity += hb.MaxWarm
+		} else {
+			unbounded = true
+		}
+	}
+	if unbounded {
+		return 0
+	}
+	if !anyFresh || capacity <= 0 {
 		return 1
 	}
 	return float64(running) / float64(capacity)

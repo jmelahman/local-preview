@@ -72,7 +72,7 @@ func (s *Store) residentArtifacts() []cacheEntry {
 					side:    side,
 					hash:    h.Name(),
 					dir:     dir,
-					bytes:   dirSizeOf(dir),
+					bytes:   s.cachedDirSize(dir, born),
 					born:    born,
 					recency: recency,
 				})
@@ -145,6 +145,7 @@ func (s *Store) EvictCacheToWatermark(maxBytes int64, minAge time.Duration, prot
 		}
 		s.mu.Lock()
 		delete(s.accessed, cacheKey(e.repo, e.side, e.hash))
+		delete(s.sizeCache, e.dir)
 		s.mu.Unlock()
 		total -= e.bytes
 		freed += e.bytes
@@ -188,6 +189,24 @@ func (s *Store) ResidentSide(repo, side, hash string) (dir string, bytes int64, 
 		return nil
 	})
 	return dir, bytes, files, true
+}
+
+// cachedDirSize returns the recursive byte size of an artifact directory,
+// memoized against its mtime. A published directory is immutable, so a matching
+// mtime guarantees the cached size is still accurate; a rebuild-overwrite lands
+// a new directory by rename with a fresh mtime, invalidating the entry.
+func (s *Store) cachedDirSize(dir string, mtime time.Time) int64 {
+	s.mu.Lock()
+	if e, ok := s.sizeCache[dir]; ok && e.mtime.Equal(mtime) {
+		s.mu.Unlock()
+		return e.size
+	}
+	s.mu.Unlock()
+	size := dirSizeOf(dir)
+	s.mu.Lock()
+	s.sizeCache[dir] = sizeCacheEntry{mtime: mtime, size: size}
+	s.mu.Unlock()
+	return size
 }
 
 // dirSizeOf sums regular-file sizes under root; 0 if root is missing.

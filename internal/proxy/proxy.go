@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"net"
@@ -480,6 +481,39 @@ func matchesRoute(routes []string, path string) bool {
 // serveStatic serves the frontend artifact with SPA fallback, mirroring the
 // embedded-dashboard handler's behavior but rooted at a disk directory.
 func (rt *Router) serveStatic(w http.ResponseWriter, r *http.Request, repoName, feHash string) {
+	// A static frontend has no supervised process, so nothing on the serving
+	// path would otherwise hydrate it — yet with a durable tier its local files
+	// are a cache that the sweeper can reclaim while the deploy stays ready.
+	// Bring it back here, mirroring supervise.start's hydrate-on-serve: absence
+	// of files is a cache miss to refill, not an eviction to 404. (No tier =
+	// today's behavior exactly: local disk is authoritative, so skip the dance.)
+	if rt.files.ArtifactTier() != nil {
+		if !rt.files.HasFrontend(repoName, feHash) {
+			ctx, cancel := context.WithTimeout(r.Context(), coldStartWait)
+			defer cancel()
+			if err := rt.files.Hydrate(ctx, repoName, "fe", feHash); err != nil {
+				switch {
+				case errors.Is(err, store.ErrNotInTier):
+					rt.errorPage(w, r, http.StatusBadGateway, "Preview unavailable",
+						"The preview frontend is missing from durable storage. Redeploy to rebuild it.")
+				case ctx.Err() != nil && r.Context().Err() == nil:
+					// Still landing — tell the client to come back shortly.
+					w.Header().Set("Retry-After", "2")
+					rt.refreshPage(w, r, http.StatusServiceUnavailable, "Loading preview…",
+						"The preview frontend is being restored from durable storage. This page refreshes automatically.")
+				default:
+					rt.errorPage(w, r, http.StatusBadGateway, "Preview unavailable",
+						"The preview frontend could not be restored: "+err.Error())
+				}
+				return
+			}
+		}
+		// Mark it hot on every served request so a busy static frontend doesn't
+		// sort coldest (its dir mtime is pinned at publish time) and get evicted
+		// out from under live traffic.
+		rt.files.NoteAccess(repoName, "fe", feHash)
+	}
+
 	// Explicit revalidation instead of heuristic freshness: previews are
 	// content-addressed, but the URL only carries the commit sha — a
 	// --rebuild of the same sha can change file contents under the same

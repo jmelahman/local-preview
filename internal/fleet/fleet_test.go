@@ -124,6 +124,29 @@ func TestCapacityAndLoad(t *testing.T) {
 	}
 }
 
+func TestLoadRatioUnboundedIsHeadroom(t *testing.T) {
+	// An unlimited worker (max_warm 0) means the fleet has spare room, so the
+	// scale-out signal must read 0, not running/running = 1 ("scale forever").
+	r, _ := regFresh(t, map[string]workerapi.Heartbeat{
+		"unbounded": {Running: 100, MaxWarm: 0},
+	})
+	if got := r.LoadRatio(); got != 0 {
+		t.Fatalf("all-unbounded load = %v, want 0", got)
+	}
+	// Even mixed with a full bounded worker, the unbounded one is headroom.
+	mixed, _ := regFresh(t, map[string]workerapi.Heartbeat{
+		"full":      {Running: 10, MaxWarm: 10},
+		"unbounded": {Running: 3, MaxWarm: 0},
+	})
+	if got := mixed.LoadRatio(); got != 0 {
+		t.Fatalf("mixed-with-unbounded load = %v, want 0", got)
+	}
+	// No workers at all: fully loaded (need capacity).
+	if got := New(time.Minute).LoadRatio(); got != 1 {
+		t.Fatalf("empty fleet load = %v, want 1", got)
+	}
+}
+
 func TestEnsureRoutesToPlacedWorker(t *testing.T) {
 	r, bes := regFresh(t, map[string]workerapi.Heartbeat{
 		"w1": {Running: 0, MaxWarm: 10},

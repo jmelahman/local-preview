@@ -5,7 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
+
+// hydrateTimeout bounds a single durable-tier fetch+extract. It is generous
+// because a backend artifact can be ~1.5 GB (an extracted uv venv), but it must
+// exist: the fetch runs detached from any one caller's deadline, so without its
+// own bound a wedged download would hang the shared singleflight forever.
+const hydrateTimeout = 15 * time.Minute
 
 // ErrNotInTier is returned by Hydrate when the durable tier has no object for
 // the requested (repo, side, hash). It is distinct from "no tier configured"
@@ -65,12 +72,20 @@ func (s *Store) Hydrate(ctx context.Context, repo, side, hash string) error {
 		return fmt.Errorf("hydrate %s %s/%s: no durable tier configured", repo, side, hash)
 	}
 	key := repo + ":hydrate:" + side + ":" + hash
-	_, err, _ := s.sf.Do(key, func() (any, error) {
+	// DoChan, not Do: a caller that gives up (a proxy request whose short
+	// deadline elapses) must be able to bail and render a "loading" page while
+	// the shared fetch keeps running for the next request — a joined waiter's
+	// cancellation must never abort the winner's download. The fetch therefore
+	// runs on a context detached from any one caller's cancellation, with its
+	// own generous timeout so it is still bounded.
+	ch := s.sf.DoChan(key, func() (any, error) {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hydrateTimeout)
+		defer cancel()
 		// A sibling may have landed it while we waited on the singleflight.
 		if s.hasSide(repo, side, hash) {
 			return nil, nil
 		}
-		rc, found, err := s.tier.Open(ctx, repo, side, hash)
+		rc, found, err := s.tier.Open(fctx, repo, side, hash)
 		if err != nil {
 			return nil, fmt.Errorf("hydrate %s %s/%s: open: %w", repo, side, hash, err)
 		}
@@ -100,7 +115,13 @@ func (s *Store) Hydrate(ctx context.Context, repo, side, hash string) error {
 		s.NoteAccess(repo, side, hash)
 		return nil, nil
 	})
-	return err
+	select {
+	case res := <-ch:
+		return res.Err
+	case <-ctx.Done():
+		// Caller gave up; the fetch continues in the background for the next one.
+		return ctx.Err()
+	}
 }
 
 // hasSide reports whether an artifact side is resident on local disk.

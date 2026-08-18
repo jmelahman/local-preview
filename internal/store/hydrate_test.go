@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // tarDirRaw tars a directory's contents (relative paths, no compression) so a
@@ -164,6 +165,58 @@ func TestHydrateNoTierConfigured(t *testing.T) {
 	err := s.Hydrate(context.Background(), "demo", "be", "abc")
 	if err == nil || errors.Is(err, ErrNotInTier) {
 		t.Fatalf("want a 'no tier' error, got %v", err)
+	}
+}
+
+// gatedTier blocks Open until released, and respects the context it is given —
+// so the test can prove a bailing caller doesn't abort the shared fetch.
+type gatedTier struct {
+	release chan struct{}
+	opened  chan struct{}
+	blob    []byte
+}
+
+func (g *gatedTier) Save(context.Context, string, string, string, string) error { return nil }
+
+func (g *gatedTier) Open(ctx context.Context, _, _, _ string) (io.ReadCloser, bool, error) {
+	select {
+	case g.opened <- struct{}{}:
+	default:
+	}
+	select {
+	case <-g.release:
+		return io.NopCloser(bytes.NewReader(g.blob)), true, nil
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	}
+}
+
+// A caller that gives up (short deadline) must return its own error but must NOT
+// abort the shared fetch — the download continues on a detached context and the
+// artifact still lands for the next request. Regression for the singleflight
+// closing over the winner's cancellation.
+func TestHydrateWaiterBailDoesNotAbortFetch(t *testing.T) {
+	s := newStore(t)
+	src := t.TempDir()
+	writeTree(t, src, map[string]string{"f": "x"})
+	gt := &gatedTier{release: make(chan struct{}), opened: make(chan struct{}, 1), blob: tarDirRaw(t, src)}
+	s.SetArtifactTier(gt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	err := s.Hydrate(ctx, "demo", "be", "h")
+	if err == nil {
+		t.Fatal("expected the bailing caller to return its context error")
+	}
+	// The shared fetch is still blocked on release; let it finish.
+	<-gt.opened
+	close(gt.release)
+	deadline := time.Now().Add(5 * time.Second)
+	for !s.HasBackend("demo", "h") {
+		if time.Now().After(deadline) {
+			t.Fatal("fetch was aborted by the bailing caller — artifact never landed")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
