@@ -83,6 +83,13 @@ type serveOptions struct {
 	githubSecret     string
 	githubOIDCAud    string
 	githubOIDCIssuer string
+	ssoClientID      string
+	ssoClientSecret  string
+	ssoCallbackURL   string
+	ssoAllowedOrg    string
+	ssoAllowedTeam   string
+	ssoAllowedLogins string
+	ssoAllowedEmails string
 }
 
 func Root() *cobra.Command {
@@ -112,6 +119,13 @@ func Root() *cobra.Command {
 	serve.Flags().StringVar(&opts.githubSecret, "github-webhook-secret", "", "Shared secret validating GitHub webhook deliveries (default: $PREVIEW_GITHUB_WEBHOOK_SECRET; empty disables the endpoint)")
 	serve.Flags().StringVar(&opts.githubOIDCAud, "github-oidc-audience", "", "Expected audience of GitHub Actions OIDC tokens (default: $PREVIEW_GITHUB_OIDC_AUDIENCE); setting it requires uploads to authenticate with a valid token bound to the target repo")
 	serve.Flags().StringVar(&opts.githubOIDCIssuer, "github-oidc-issuer", githuboidc.DefaultIssuer, "GitHub Actions OIDC issuer (default: $PREVIEW_GITHUB_OIDC_ISSUER or the hosted issuer; override for GitHub Enterprise Server)")
+	serve.Flags().StringVar(&opts.ssoClientID, "sso-github-client-id", "", "GitHub OAuth App client ID enabling interactive login (default: $PREVIEW_SSO_GITHUB_CLIENT_ID); setting it requires a sign-in for the dashboard, API, and previews")
+	serve.Flags().StringVar(&opts.ssoClientSecret, "sso-github-client-secret", "", "GitHub OAuth App client secret (default: $PREVIEW_SSO_GITHUB_CLIENT_SECRET)")
+	serve.Flags().StringVar(&opts.ssoCallbackURL, "sso-callback-url", "", "Public OAuth callback URL, e.g. https://preview.example.com/api/auth/callback — must match the GitHub OAuth App exactly (default: $PREVIEW_SSO_CALLBACK_URL)")
+	serve.Flags().StringVar(&opts.ssoAllowedOrg, "sso-allowed-org", "", "Allow members of this GitHub org to sign in (default: $PREVIEW_SSO_ALLOWED_ORG)")
+	serve.Flags().StringVar(&opts.ssoAllowedTeam, "sso-allowed-team", "", "Narrow --sso-allowed-org to this team slug (default: $PREVIEW_SSO_ALLOWED_TEAM)")
+	serve.Flags().StringVar(&opts.ssoAllowedLogins, "sso-allowed-logins", "", "Comma-separated GitHub usernames allowed to sign in (default: $PREVIEW_SSO_ALLOWED_LOGINS)")
+	serve.Flags().StringVar(&opts.ssoAllowedEmails, "sso-allowed-emails", "", "Comma-separated verified emails allowed to sign in (default: $PREVIEW_SSO_ALLOWED_EMAILS)")
 	cmd.AddCommand(serve)
 
 	addClientCommands(cmd)
@@ -136,6 +150,26 @@ func run(opts serveOptions) error {
 		uploadAuth = githuboidc.NewVerifier(opts.githubOIDCIssuer, opts.githubOIDCAud)
 		log.Printf("upload endpoints require GitHub Actions OIDC (issuer %s, audience %s)",
 			opts.githubOIDCIssuer, opts.githubOIDCAud)
+	}
+	envDefault(&opts.ssoClientID, "PREVIEW_SSO_GITHUB_CLIENT_ID")
+	envDefault(&opts.ssoClientSecret, "PREVIEW_SSO_GITHUB_CLIENT_SECRET")
+	envDefault(&opts.ssoCallbackURL, "PREVIEW_SSO_CALLBACK_URL")
+	envDefault(&opts.ssoAllowedOrg, "PREVIEW_SSO_ALLOWED_ORG")
+	envDefault(&opts.ssoAllowedTeam, "PREVIEW_SSO_ALLOWED_TEAM")
+	envDefault(&opts.ssoAllowedLogins, "PREVIEW_SSO_ALLOWED_LOGINS")
+	envDefault(&opts.ssoAllowedEmails, "PREVIEW_SSO_ALLOWED_EMAILS")
+	// Setting the client ID turns on interactive SSO for the dashboard, API,
+	// and previews; leaving it unset keeps the historical open behavior.
+	var sso api.SSOProvider
+	var dashboardOrigin string
+	var cookiesSecure bool
+	if opts.ssoClientID != "" {
+		provider, origin, secure, err := buildSSO(opts)
+		if err != nil {
+			return err
+		}
+		sso, dashboardOrigin, cookiesSecure = provider, origin, secure
+		log.Printf("SSO login enabled (dashboard %s); dashboard, API, and previews require a GitHub sign-in", origin)
 	}
 	cfg, err := config.Load(config.Options{
 		DataDir:        opts.dataDir,
@@ -185,7 +219,7 @@ func run(opts serveOptions) error {
 	sweeper := retain.New(database, super, files)
 	sweeper.Start(workCtx)
 
-	apex := api.NewMux(api.Deps{
+	deps := api.Deps{
 		Store:               database,
 		Build:               api.BuildInfo(Build()),
 		Config:              cfg,
@@ -199,8 +233,16 @@ func run(opts serveOptions) error {
 		DBPath:              dbPath,
 		GitHubWebhookSecret: opts.githubSecret,
 		UploadAuth:          uploadAuth,
-	})
+		SSO:                 sso,
+		DashboardOrigin:     dashboardOrigin,
+		CookiesSecure:       cookiesSecure,
+	}
+	apex := api.AuthMiddleware(deps, api.NewMux(deps))
 	router := proxy.New(database, files, super, cfg.Preview.Domain, apex)
+	if sso != nil {
+		router.SetPreviewAuth(true, dashboardOrigin, cookiesSecure)
+		startSessionGC(workCtx, database)
+	}
 
 	srv := &http.Server{
 		Addr:              opts.addr,

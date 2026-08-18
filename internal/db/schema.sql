@@ -146,3 +146,33 @@ CREATE TABLE IF NOT EXISTS process_events (
     detail TEXT NOT NULL DEFAULT '',
     occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+
+-- Interactive "Sign in with GitHub" sessions. scope cuts the trust boundary:
+-- 'apex' authenticates the dashboard and /api/*, 'preview' authenticates
+-- preview subdomains only and is never accepted by the apex auth middleware —
+-- so a preview-scoped cookie stolen by untrusted previewed code can't drive
+-- the control plane. Only the sha256 hash of the opaque token is stored, never
+-- the token itself, so a database leak can't be replayed as a live cookie.
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT NOT NULL UNIQUE,
+    scope TEXT NOT NULL DEFAULT 'apex'
+        CHECK (scope IN ('apex', 'preview')),
+    github_login TEXT NOT NULL,
+    github_user_id INTEGER NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    expires_at TEXT NOT NULL
+);
+
+-- Single-use handoff codes for the apex→preview grant handshake: an apex
+-- session mints one, the proxy redeems it exactly once to establish a
+-- preview-scoped session on the preview origin (see internal/proxy). Codes are
+-- stored hashed and are short-lived.
+CREATE TABLE IF NOT EXISTS preview_grants (
+    code_hash TEXT PRIMARY KEY,
+    apex_session_id INTEGER NOT NULL REFERENCES sessions(id),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    expires_at TEXT NOT NULL
+);

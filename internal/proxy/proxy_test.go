@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/store"
@@ -371,5 +372,146 @@ func TestHyphenatedRepoName(t *testing.T) {
 	// exists; "abc1234-my" is not registered, so it must not shadow it.
 	if _, _, guess, ok := e.router.splitSub("abc1234-nosuch-repo"); ok || guess != "nosuch-repo" {
 		t.Fatalf("unregistered: ok=%v guess=%q, want false/nosuch-repo", ok, guess)
+	}
+}
+
+func cookieByName(cookies []*http.Cookie, name string) *http.Cookie {
+	for _, c := range cookies {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+func TestPreviewAuthRedirectsWhenUnauthenticated(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	e.router.SetPreviewAuth(true, "http://localhost:8080", false)
+
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	req := httptest.NewRequest("GET", "http://"+host+"/", nil)
+	req.Host = host
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("want 302, got %d", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.HasPrefix(loc, "http://localhost:8080/api/auth/preview-grant?return_to=") {
+		t.Fatalf("location %q", loc)
+	}
+}
+
+func TestPreviewAuthValidCookieServes(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	e.router.SetPreviewAuth(true, "http://localhost:8080", false)
+
+	raw, hash, err := newToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.CreateSession(db.Session{
+		TokenHash: hash, Scope: "preview", GitHubLogin: "octocat", GitHubUserID: 1,
+	}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	req := httptest.NewRequest("GET", "http://"+host+"/", nil)
+	req.Host = host
+	req.Header.Set("Accept", "text/html")
+	req.AddCookie(&http.Cookie{Name: previewGrantCookieName, Value: raw})
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "preview home") {
+		t.Fatalf("want served preview, got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPreviewAuthRedeemsCode(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	e.router.SetPreviewAuth(true, "http://localhost:8080", false)
+
+	apex, err := e.db.CreateSession(db.Session{
+		TokenHash: "apexhash", Scope: "apex", GitHubLogin: "octocat", GitHubUserID: 1,
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := "grantcode"
+	if err := e.db.CreatePreviewGrant(hashToken(code), apex.ID, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	req := httptest.NewRequest("GET", "http://"+host+"/?preview_auth="+code, nil)
+	req.Host = host
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("want 302, got %d", rec.Code)
+	}
+	set := cookieByName(rec.Result().Cookies(), previewGrantCookieName)
+	if set == nil || set.Value == "" {
+		t.Fatal("expected preview_grant cookie to be set")
+	}
+	if loc := rec.Header().Get("Location"); strings.Contains(loc, "preview_auth") {
+		t.Fatalf("redirect should strip the code, got %q", loc)
+	}
+	// The grant is consumed: a second redemption fails.
+	if _, err := e.db.RedeemPreviewGrant(hashToken(code)); err == nil {
+		t.Fatal("grant should be single-use")
+	}
+}
+
+func TestPreviewGrantCookieStrippedFromBackend(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	e.router.SetPreviewAuth(true, "http://localhost:8080", false)
+
+	var gotCookie string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCookie = r.Header.Get("Cookie")
+		fmt.Fprint(w, "ok")
+	}))
+	t.Cleanup(upstream.Close)
+	u, _ := url.Parse(upstream.URL)
+	port, _ := strconv.Atoi(u.Port())
+	e.fake.port = port
+
+	raw, hash, err := newToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.CreateSession(db.Session{
+		TokenHash: hash, Scope: "preview", GitHubLogin: "octocat", GitHubUserID: 1,
+	}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	req := httptest.NewRequest("GET", "http://"+host+"/api/things", nil)
+	req.Host = host
+	req.AddCookie(&http.Cookie{Name: previewGrantCookieName, Value: raw})
+	req.AddCookie(&http.Cookie{Name: "keep", Value: "me"})
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("code %d", rec.Code)
+	}
+	if strings.Contains(gotCookie, previewGrantCookieName) {
+		t.Fatalf("backend must not receive the preview-access cookie: %q", gotCookie)
+	}
+	if !strings.Contains(gotCookie, "keep=me") {
+		t.Fatalf("backend should still receive the app's own cookies: %q", gotCookie)
 	}
 }

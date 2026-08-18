@@ -121,7 +121,11 @@ func repoCmd() *cobra.Command {
 }
 
 func runRepoDelete(ctx context.Context, url string, out io.Writer, name string) error {
-	if err := client.New(url, nil).DeleteRepo(ctx, name); err != nil {
+	c, err := newClient(url)
+	if err != nil {
+		return err
+	}
+	if err := c.DeleteRepo(ctx, name); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "deleted %s\n", name)
@@ -129,7 +133,10 @@ func runRepoDelete(ctx context.Context, url string, out io.Writer, name string) 
 }
 
 func runRepoCreate(ctx context.Context, url string, out io.Writer, name, source string, watch bool, branches string, backfill bool) error {
-	c := client.New(url, nil)
+	c, err := newClient(url)
+	if err != nil {
+		return err
+	}
 	repo, err := c.CreateRepo(ctx, name, source, watch, branches, backfill)
 	if err != nil {
 		return err
@@ -165,7 +172,11 @@ func runRepoCreate(ctx context.Context, url string, out io.Writer, name, source 
 }
 
 func runRepoWatch(ctx context.Context, url string, out io.Writer, name string, watch bool, branches *string, backfill bool) error {
-	repo, err := client.New(url, nil).SetRepoWatch(ctx, name, watch, branches, backfill)
+	c, err := newClient(url)
+	if err != nil {
+		return err
+	}
+	repo, err := c.SetRepoWatch(ctx, name, watch, branches, backfill)
 	if err != nil {
 		return err
 	}
@@ -186,7 +197,11 @@ func watchLabel(r client.Repo) string {
 }
 
 func runRepoList(ctx context.Context, url string, out io.Writer) error {
-	repos, err := client.New(url, nil).ListRepos(ctx)
+	c, err := newClient(url)
+	if err != nil {
+		return err
+	}
+	repos, err := c.ListRepos(ctx)
 	if err != nil {
 		return err
 	}

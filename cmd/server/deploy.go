@@ -84,7 +84,11 @@ func deployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			d, err := client.New(url, nil).GetDeploy(cmd.Context(), id)
+			c, err := newClient(url)
+			if err != nil {
+				return err
+			}
+			d, err := c.GetDeploy(cmd.Context(), id)
 			if err != nil {
 				return err
 			}
@@ -107,7 +111,10 @@ func deployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c := client.New(url, nil)
+			c, err := newClient(url)
+			if err != nil {
+				return err
+			}
 			if !runLog {
 				if follow || cmd.Flags().Changed("side") {
 					return fmt.Errorf("--follow and --side apply to the run log; add --run")
@@ -159,7 +166,11 @@ func deployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			d, err := client.New(url, nil).StopDeploy(cmd.Context(), id)
+			c, err := newClient(url)
+			if err != nil {
+				return err
+			}
+			d, err := c.StopDeploy(cmd.Context(), id)
 			if err != nil {
 				return err
 			}
@@ -184,7 +195,11 @@ func deployCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := client.New(url, nil).DeleteDeploy(cmd.Context(), id); err != nil {
+			c, err := newClient(url)
+			if err != nil {
+				return err
+			}
+			if err := c.DeleteDeploy(cmd.Context(), id); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "deleted deploy %d\n", id)
@@ -229,7 +244,10 @@ func printRunLog(ctx context.Context, c *client.Client, out io.Writer, id int64,
 // runDeployStats samples twice a second apart — a CPU percentage needs a
 // delta — and prints one docker-stats-like table.
 func runDeployStats(ctx context.Context, url string, out io.Writer, id int64) error {
-	c := client.New(url, nil)
+	c, err := newClient(url)
+	if err != nil {
+		return err
+	}
 	if _, err := c.GetDeployStats(ctx, id); err != nil {
 		return err
 	}
@@ -282,7 +300,10 @@ func formatBytes(n uint64) string {
 }
 
 func runDeploy(ctx context.Context, url string, out io.Writer, repoName, ref string, rebuild, noWait, asJSON bool) error {
-	c := client.New(url, nil)
+	c, err := newClient(url)
+	if err != nil {
+		return err
+	}
 
 	if ref == "" {
 		sha, err := localHeadSHA(".")
@@ -385,7 +406,11 @@ func repoNames(repos []client.Repo) string {
 }
 
 func runDeployList(ctx context.Context, url string, out io.Writer, f client.DeployFilter) error {
-	deploys, err := client.New(url, nil).ListDeploys(ctx, f)
+	c, err := newClient(url)
+	if err != nil {
+		return err
+	}
+	deploys, err := c.ListDeploys(ctx, f)
 	if err != nil {
 		return err
 	}

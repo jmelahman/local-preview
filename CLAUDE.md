@@ -107,6 +107,9 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - GitHub OIDC upload auth needs a custom `aud` (the default GH audience is
   org-wide) and must verify the token before the repo lookup (else uploads leak
   which repos exist).
+- SSO's preview-access cookie must stay a separate scope from the apex session
+  and be stripped in the proxy `Rewrite` — else the untrusted previewed backend
+  receives (and can replay) the control-plane credential.
 
 ## Documentation upkeep
 

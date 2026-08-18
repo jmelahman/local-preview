@@ -225,3 +225,27 @@ covering for something that was here and failed.
 `<-p.done`, where every process looks exited, so the `health_timeout` event
 never fired. Reading liveness after waiting for death answers a different
 question than the one asked — sample it before the wait.
+
+## Preview-access cookie must be stripped before proxying to the previewed app
+
+**Symptom (latent).** With SSO gating previews, a browser holds a
+`preview_grant` cookie scoped to `.<preview-domain>`, so it's sent to every
+preview host. `httputil.ReverseProxy` forwards request headers — including
+`Cookie` — verbatim, so without intervention the orchestrator hands its own
+preview-access credential to the previewed repo's (untrusted) backend on every
+proxied request. A malicious preview backend could then replay that cookie
+value against the control plane from its own server-side HTTP calls, entirely
+outside the browser's Origin/SameSite sandbox.
+
+**Root cause / fix.** Two defenses, both required. (1) Preview access uses a
+*separate* credential from the dashboard: `sessions.scope` is `'preview'` vs
+`'apex'`, and the apex auth middleware only ever accepts `'apex'` sessions — so
+a leaked preview cookie is useless against `/api/*` even if replayed. (2)
+`ensureAndProxy`'s `Rewrite` calls `stripCookie(pr.Out, previewGrantCookieName)`
+so the cookie never reaches the previewed process at all. The apex session
+cookie is host-only (never `Domain`-scoped to the preview domain), so it's never
+sent to a preview host in the first place.
+
+**What would reintroduce it.** Scoping one cookie to cover both the apex host
+and the preview subdomains; dropping the `stripCookie` call in the proxy
+`Rewrite`; or letting the apex middleware accept a `'preview'`-scope session.

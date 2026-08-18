@@ -43,6 +43,7 @@ export default defineConfig({
             { text: 'Concepts', link: '/guide/concepts' },
             { text: 'Deployment triggers', link: '/guide/triggers' },
             { text: 'Uploading prebuilt artifacts', link: '/guide/uploads' },
+            { text: 'Authentication (SSO)', link: '/guide/sso' },
             { text: 'Configuration', link: '/guide/configuration' },
             { text: 'Deploying to a server', link: '/guide/deploy-terraform' },
             { text: 'External dependencies', link: '/guide/external-dependencies' },

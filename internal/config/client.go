@@ -25,6 +25,10 @@ type ClientConfig struct {
 	// talk to, e.g. "https://preview.example.com". Empty means unset, which
 	// falls back to localhost.
 	Server string `toml:"server"`
+	// Token is the bearer token subcommands present when the server requires
+	// authentication — a GitHub personal-access token checked against the
+	// server's allowlist. Empty means send none. $PREVIEW_TOKEN overrides it.
+	Token string `toml:"token"`
 }
 
 // ClientConfigPath returns the CLI config file's path, or "" when no config

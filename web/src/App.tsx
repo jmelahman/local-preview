@@ -69,6 +69,44 @@ function ThemeToggle() {
   );
 }
 
+// UserMenu shows the signed-in GitHub identity and a sign-out button. It
+// renders nothing when SSO is disabled (the viewer is anonymous), so an
+// unauthenticated instance's header is unchanged. Shares the ["me"] query with
+// AuthGate, so it reads from cache rather than refetching.
+function UserMenu() {
+  const queryClient = useQueryClient();
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
+  const logout = useMutation({
+    mutationFn: api.logout,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["me"] }),
+  });
+  if (!me.data || me.data.anonymous) return null;
+  const label = me.data.login || me.data.email || "account";
+  return (
+    <div className="flex items-center gap-2">
+      <span
+        className="flex items-center gap-1.5 text-xs text-fg-muted"
+        title={me.data.email || label}
+      >
+        {me.data.avatar_url ? (
+          <img src={me.data.avatar_url} alt="" className="h-5 w-5 rounded-full" />
+        ) : null}
+        <span className="max-w-[10rem] truncate">{label}</span>
+      </span>
+      <button
+        type="button"
+        onClick={() => logout.mutate()}
+        disabled={logout.isPending}
+        title="Sign out"
+        aria-label="Sign out"
+        className="inline-flex h-7 items-center rounded bg-surface-2 px-2 text-xs text-fg transition-colors duration-150 hover:bg-surface-3 disabled:opacity-50"
+      >
+        Sign out
+      </button>
+    </div>
+  );
+}
+
 // A deploy's displayed state: the build status until it's ready, then the
 // merged runtime state of its supervised processes (backend and, for
 // process-mode frontends, the frontend) — crashed if any side died, starting
@@ -1594,6 +1632,7 @@ export default function App() {
           >
             <IconDatabase />
           </button>
+          <UserMenu />
           <ThemeToggle />
         </div>
       </header>

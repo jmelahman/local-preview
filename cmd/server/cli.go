@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jmelahman/local-preview/internal/client"
 	"github.com/jmelahman/local-preview/internal/config"
 )
 
@@ -47,6 +48,35 @@ func effectiveServer() (url, source string, err error) {
 		return cfg.Server, "config file", nil
 	}
 	return defaultServerURL, "default", nil
+}
+
+// effectiveToken resolves the bearer token CLI subcommands present, in
+// precedence order: $PREVIEW_TOKEN, then the config file's token. Empty means
+// send none, which is correct against a server without SSO.
+func effectiveToken() (string, error) {
+	if env := os.Getenv("PREVIEW_TOKEN"); env != "" {
+		return env, nil
+	}
+	cfg, err := config.LoadClientConfig()
+	if err != nil {
+		return "", err
+	}
+	return cfg.Token, nil
+}
+
+// newClient builds an HTTP client for the server at url, attaching the
+// configured bearer token (a GitHub personal-access token) when one is set.
+// Use it instead of client.New so every subcommand authenticates uniformly.
+func newClient(url string) (*client.Client, error) {
+	tok, err := effectiveToken()
+	if err != nil {
+		return nil, err
+	}
+	c := client.New(url, nil)
+	if tok != "" {
+		c.SetToken(tok)
+	}
+	return c, nil
 }
 
 // addServerFlag registers --server as a persistent flag on the parent group

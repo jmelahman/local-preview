@@ -13,6 +13,10 @@ package proxy
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -38,6 +42,19 @@ const coldStartWait = 1500 * time.Millisecond
 // refresh on the same order, so transitions surface promptly.
 const cacheTTL = 2 * time.Second
 
+// previewSessionTTL is how long a preview-access session lasts before the
+// browser must re-run the apex→preview handshake.
+const previewSessionTTL = 7 * 24 * time.Hour
+
+// previewGrantCookieName is the preview-scoped session cookie the proxy sets
+// after redeeming a grant. It is deliberately distinct from the apex dashboard
+// cookie (internal/api's "preview_session"): a preview subdomain runs
+// untrusted code and must never hold the dashboard credential.
+const previewGrantCookieName = "preview_grant"
+
+// previewAuthParam is the one-time handoff code the apex redirects back with.
+const previewAuthParam = "preview_auth"
+
 // Backends is the slice of the supervisor the proxy needs.
 type Backends interface {
 	EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (int, error)
@@ -51,6 +68,14 @@ type Router struct {
 	backends  Backends
 	domain    string
 	dashboard http.Handler
+
+	// authEnabled gates preview subdomains behind the SSO login; when off the
+	// Router behaves exactly as before. authBaseURL is the dashboard origin the
+	// grant handshake bounces through; authSecure marks the preview cookie
+	// Secure.
+	authEnabled bool
+	authBaseURL string
+	authSecure  bool
 
 	mu    sync.Mutex
 	cache map[string]cacheEntry
@@ -84,10 +109,25 @@ func New(database *db.Store, files *store.Store, backends Backends, domain strin
 	}
 }
 
+// SetPreviewAuth turns on SSO gating of preview subdomains. baseURL is the
+// dashboard origin (scheme://host) the grant handshake redirects through, and
+// secure marks the preview cookie Secure. The zero value (never calling this)
+// leaves previews open, so existing callers and tests are unaffected.
+func (rt *Router) SetPreviewAuth(enabled bool, baseURL string, secure bool) {
+	rt.authEnabled = enabled
+	rt.authBaseURL = strings.TrimRight(baseURL, "/")
+	rt.authSecure = secure
+}
+
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sub, ok := rt.parseHost(r.Host)
 	if !ok {
 		rt.dashboard.ServeHTTP(w, r)
+		return
+	}
+	// Gate preview traffic before any DB lookup, so an unauthenticated caller
+	// can't even probe which previews exist.
+	if rt.authEnabled && !rt.previewAuthorized(w, r) {
 		return
 	}
 	entry := rt.resolve(sub)
@@ -100,6 +140,134 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.errorPage(w, r, http.StatusNotFound, "Unknown preview", entry.err)
 	default:
 		rt.servePreview(w, r, entry)
+	}
+}
+
+// previewAuthorized authorizes a preview request. It redeems a one-time
+// ?preview_auth code into a preview-scoped cookie, accepts an existing valid
+// preview cookie, or bounces the browser through the dashboard's grant
+// handshake. It returns true only when the request may proceed; otherwise it
+// has already written a redirect and the caller must stop.
+func (rt *Router) previewAuthorized(w http.ResponseWriter, r *http.Request) bool {
+	if code := r.URL.Query().Get(previewAuthParam); code != "" {
+		return rt.redeemPreviewGrant(w, r, code)
+	}
+	if c, err := r.Cookie(previewGrantCookieName); err == nil {
+		if _, err := rt.db.GetSessionByTokenHash("preview", hashToken(c.Value)); err == nil {
+			return true
+		}
+	}
+	rt.redirectToGrant(w, r)
+	return false
+}
+
+// redeemPreviewGrant consumes a handoff code and, on success, establishes a
+// preview-scoped session (copying the apex session's identity) and sets its
+// cookie for the whole preview domain, then redirects to the clean URL. Any
+// failure restarts the handshake rather than leaking a reason.
+func (rt *Router) redeemPreviewGrant(w http.ResponseWriter, r *http.Request, code string) bool {
+	apexID, err := rt.db.RedeemPreviewGrant(hashToken(code))
+	if err != nil {
+		rt.redirectToGrant(w, r)
+		return false
+	}
+	apex, err := rt.db.GetSessionByID(apexID)
+	if err != nil {
+		rt.redirectToGrant(w, r)
+		return false
+	}
+	raw, hash, err := newToken()
+	if err != nil {
+		rt.errorPage(w, r, http.StatusInternalServerError, "Preview auth error",
+			"Could not establish a preview session. Try again.")
+		return false
+	}
+	if _, err := rt.db.CreateSession(db.Session{
+		TokenHash:    hash,
+		Scope:        "preview",
+		GitHubLogin:  apex.GitHubLogin,
+		GitHubUserID: apex.GitHubUserID,
+		Email:        apex.Email,
+		AvatarURL:    apex.AvatarURL,
+	}, previewSessionTTL); err != nil {
+		rt.errorPage(w, r, http.StatusInternalServerError, "Preview auth error",
+			"Could not establish a preview session. Try again.")
+		return false
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     previewGrantCookieName,
+		Value:    raw,
+		Path:     "/",
+		Domain:   "." + rt.domain,
+		HttpOnly: true,
+		Secure:   rt.authSecure,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Now().Add(previewSessionTTL),
+		MaxAge:   int(previewSessionTTL.Seconds()),
+	})
+	http.Redirect(w, r, previewReturnURL(r), http.StatusFound)
+	return false
+}
+
+// redirectToGrant sends the browser to the dashboard's preview-grant endpoint,
+// which mints a code (after logging the user in if needed) and redirects back.
+func (rt *Router) redirectToGrant(w http.ResponseWriter, r *http.Request) {
+	target := rt.authBaseURL + "/api/auth/preview-grant?return_to=" +
+		url.QueryEscape(previewReturnURL(r))
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
+// previewReturnURL is the absolute URL of the current preview request with the
+// one-time code stripped — where the handshake should land the browser.
+func previewReturnURL(r *http.Request) string {
+	u := *r.URL
+	q := u.Query()
+	q.Del(previewAuthParam)
+	u.RawQuery = q.Encode()
+	u.Scheme = requestScheme(r)
+	u.Host = r.Host
+	return u.String()
+}
+
+// requestScheme reports the public scheme, honoring a TLS-terminating proxy's
+// X-Forwarded-Proto before the local connection's TLS state.
+func requestScheme(r *http.Request) string {
+	if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
+		return p
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
+}
+
+// newToken returns a 256-bit random token and its sha256 hex hash. Only the
+// hash is persisted; the raw value lives in the cookie.
+func newToken() (raw, hash string, err error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", err
+	}
+	raw = base64.RawURLEncoding.EncodeToString(b)
+	return raw, hashToken(raw), nil
+}
+
+// hashToken maps a raw token to its stored form.
+func hashToken(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+// stripCookie removes a single named cookie from a request's Cookie header,
+// leaving the others intact.
+func stripCookie(r *http.Request, name string) {
+	cookies := r.Cookies()
+	r.Header.Del("Cookie")
+	for _, c := range cookies {
+		if c.Name == name {
+			continue
+		}
+		r.AddCookie(c)
 	}
 }
 
@@ -282,6 +450,10 @@ func (rt *Router) ensureAndProxy(w http.ResponseWriter, r *http.Request, e cache
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
 			pr.SetXForwarded()
+			// Never hand the orchestrator's preview-access credential to the
+			// previewed (untrusted) app — httputil forwards Cookie verbatim
+			// otherwise, letting a malicious backend replay it against the API.
+			stripCookie(pr.Out, previewGrantCookieName)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			rt.errorPage(w, r, http.StatusBadGateway, "Preview error", err.Error())

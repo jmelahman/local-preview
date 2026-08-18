@@ -44,9 +44,11 @@ func openCmd() *cobra.Command {
 }
 
 func runOpen(ctx context.Context, url string, out io.Writer, repoName, ref string, printOnly bool) error {
-	c := client.New(url, nil)
+	c, err := newClient(url)
+	if err != nil {
+		return err
+	}
 	if repoName == "" {
-		var err error
 		if repoName, err = detectRepo(ctx, c); err != nil {
 			return err
 		}

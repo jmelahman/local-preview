@@ -92,6 +92,13 @@ for lookup order and caching semantics.
 | `--github-webhook-secret` | (unset) | Shared secret validating [GitHub webhook](/guide/triggers#github-webhooks) deliveries; empty disables the endpoint. Prefer the environment variable — flags are visible in `ps` |
 | `--github-oidc-audience` | (unset) | Expected `aud` of [GitHub Actions OIDC](/guide/uploads#authenticating-with-github-actions-oidc) tokens. Setting it **requires uploads to authenticate**; use a value unique to this server (its URL is a good choice) |
 | `--github-oidc-issuer` | `https://token.actions.githubusercontent.com` | OIDC issuer; override only for GitHub Enterprise Server |
+| `--sso-github-client-id` | (unset) | GitHub OAuth App client ID. Setting it turns on [SSO login](/guide/sso) for the dashboard, API, and previews |
+| `--sso-github-client-secret` | (unset) | GitHub OAuth App client secret. Prefer the environment variable — flags are visible in `ps` |
+| `--sso-callback-url` | (unset) | Public OAuth callback URL, e.g. `https://preview.example.com/api/auth/callback`; must match the OAuth App exactly |
+| `--sso-allowed-org` | (unset) | Allow members of this GitHub org to sign in |
+| `--sso-allowed-team` | (unset) | Narrow `--sso-allowed-org` to one team slug |
+| `--sso-allowed-logins` | (unset) | Comma-separated GitHub usernames allowed to sign in |
+| `--sso-allowed-emails` | (unset) | Comma-separated verified emails allowed to sign in |
 
 ## Environment variables
 
@@ -105,7 +112,12 @@ for lookup order and caching semantics.
 | `PREVIEW_GITHUB_OIDC_AUDIENCE` | `preview serve`, `preview upload` | The OIDC audience: on the server it's the expected `aud` (an explicit `--github-oidc-audience` flag wins); on the client it's the audience requested for the token when `--oidc-audience` is unset |
 | `PREVIEW_GITHUB_OIDC_ISSUER` | `preview serve` | OIDC issuer override for GitHub Enterprise Server (an explicit `--github-oidc-issuer` flag wins) |
 | `PREVIEW_UPLOAD_TOKEN` | `preview upload` | A pre-fetched bearer token sent as-is; wins over `--oidc` and needs no runner |
+| `PREVIEW_SSO_GITHUB_CLIENT_ID` | `preview serve` | GitHub OAuth App client ID (an explicit `--sso-github-client-id` flag wins) |
+| `PREVIEW_SSO_GITHUB_CLIENT_SECRET` | `preview serve` | GitHub OAuth App client secret (an explicit `--sso-github-client-secret` flag wins) |
+| `PREVIEW_SSO_CALLBACK_URL` | `preview serve` | Public OAuth callback URL (an explicit `--sso-callback-url` flag wins) |
+| `PREVIEW_SSO_ALLOWED_ORG` / `_TEAM` / `_LOGINS` / `_EMAILS` | `preview serve` | Allowlist rules (the matching `--sso-allowed-*` flag wins) |
 | `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins; this in turn beats the config file) |
+| `PREVIEW_TOKEN` | CLI subcommands | Bearer token (a GitHub PAT) sent to an [SSO-protected](/guide/sso) server (wins over the config file's `token`) |
 | `PREVIEW_BACKEND` | `web/` dev server | Backend `host:port` the Vite proxy targets |
 
 ## Docker requirements
@@ -223,9 +235,22 @@ The full checklist for a hosted instance:
 - `preview configure https://preview.example.com` on each client, so the CLI
   talks to it.
 
+## Authentication
+
+By default the API has **no authentication**: anything that can reach it can
+register repositories and run their build and run commands on the host.
+
+Configure [GitHub SSO login](/guide/sso) to require a sign-in for the
+dashboard, the API, and the previews. Setting `--sso-github-client-id` turns it
+on; the server then refuses to start without a client secret, a callback URL,
+and a non-empty allowlist (it fails closed rather than admitting everyone).
+Browsers sign in with GitHub; the CLI presents a GitHub personal-access token
+(see [`preview configure --token`](/reference/cli#preview-configure)). The
+GitHub webhook keeps its HMAC signature and the upload endpoints keep their
+[GitHub Actions OIDC](/guide/uploads) gate — both stay reachable without a
+session.
+
 ::: warning
-The API has no authentication. Anything that can reach it can register
-repositories and run their build and run commands on the host. A
-publicly-routable instance needs authentication at the proxy — SSO, mTLS, or
-an IP allowlist — in front of both the dashboard and `/api/`.
+Until SSO (or another control at the proxy — mTLS, an IP allowlist) is
+configured, do not expose a `preview serve` instance to an untrusted network.
 :::

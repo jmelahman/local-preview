@@ -19,6 +19,11 @@ Start the orchestrator.
 | `--build-concurrency` | `2` | Number of deploys built in parallel |
 | `--poll-interval` | `1m` | How often watched repos are fetched for new commits (`0` disables watching) |
 | `--github-webhook-secret` | `$PREVIEW_GITHUB_WEBHOOK_SECRET` | Shared secret validating GitHub webhook deliveries (empty disables the endpoint) |
+| `--sso-github-client-id` | `$PREVIEW_SSO_GITHUB_CLIENT_ID` | GitHub OAuth App client ID; setting it turns on [SSO login](/guide/sso) for the dashboard, API, and previews |
+| `--sso-github-client-secret` | `$PREVIEW_SSO_GITHUB_CLIENT_SECRET` | GitHub OAuth App client secret |
+| `--sso-callback-url` | `$PREVIEW_SSO_CALLBACK_URL` | Public OAuth callback URL; must match the OAuth App exactly |
+| `--sso-allowed-org` / `--sso-allowed-team` | `$PREVIEW_SSO_ALLOWED_ORG` / `_TEAM` | Allow a GitHub org (optionally one team within it) |
+| `--sso-allowed-logins` / `--sso-allowed-emails` | `$PREVIEW_SSO_ALLOWED_LOGINS` / `_EMAILS` | Comma-separated usernames / verified emails |
 
 ## `preview repo`
 
@@ -129,15 +134,20 @@ before the server is up.
 
 | Flag | Description |
 | --- | --- |
-| `--show` | Print the config file's path, the stored server, and which source the effective server comes from |
+| `--show` | Print the config file's path, the stored server, whether a token is set, and which source the effective server comes from |
 | `--unset` | Remove the stored server, falling back to `http://localhost:8080` |
+| `--token <pat>` | Store a bearer token — a GitHub personal-access token — sent to a server that requires [SSO](/guide/sso); an empty value clears it. Distinct from `preview upload`'s `--oidc`/`$PREVIEW_UPLOAD_TOKEN`, which authenticate only uploads |
 
-Resolution order for every client subcommand, first match winning:
+Resolution order for the server URL, first match winning:
 
 1. `--server`
 2. `$PREVIEW_URL`
 3. the config file's `server`
 4. `http://localhost:8080`
+
+The bearer token is resolved similarly: `$PREVIEW_TOKEN`, then the config
+file's `token`. It is sent only when set, so it's harmless against a server
+without SSO.
 
 ## `preview install-hook`
 

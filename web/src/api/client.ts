@@ -194,6 +194,16 @@ export type DeployPage = {
   total: number;
 };
 
+// The current viewer. `anonymous` is true when the server has SSO disabled
+// (the API is open) — the dashboard then renders without a login wall. When
+// SSO is on, the fields describe the signed-in GitHub account.
+export type Me = {
+  anonymous?: boolean;
+  login?: string;
+  email?: string;
+  avatar_url?: string;
+};
+
 async function send(path: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -227,6 +237,8 @@ export type RepoUpdate = {
 
 export const api = {
   health: () => request<Health>("/api/health"),
+  me: () => request<Me>("/api/auth/me"),
+  logout: () => request<void>("/api/auth/logout", { method: "POST" }),
   listRepos: () => request<Repo[]>("/api/repos"),
   getRepo: (name: string) => request<Repo>(`/api/repos/${encodeURIComponent(name)}`),
   createRepo: (name: string, source: string) =>

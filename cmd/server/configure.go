@@ -21,6 +21,7 @@ const verifyTimeout = 5 * time.Second
 
 func configureCmd() *cobra.Command {
 	var show, unset bool
+	var token string
 
 	cmd := &cobra.Command{
 		Use:   "configure [url]",
@@ -50,15 +51,21 @@ func configureCmd() *cobra.Command {
 				}
 				return runConfigureUnset(out)
 			}
+			tokenChanged := cmd.Flags().Changed("token")
 			url := ""
 			if len(args) == 1 {
 				url = strings.TrimSpace(args[0])
 			}
-			return runConfigure(cmd.Context(), cmd.InOrStdin(), out, url)
+			// Setting only the token shouldn't prompt for a server URL.
+			if tokenChanged && url == "" {
+				return runConfigureToken(out, token)
+			}
+			return runConfigure(cmd.Context(), cmd.InOrStdin(), out, url, token, tokenChanged)
 		},
 	}
 	cmd.Flags().BoolVar(&show, "show", false, "Print the current configuration instead of changing it")
 	cmd.Flags().BoolVar(&unset, "unset", false, "Remove the configured server, falling back to "+defaultServerURL)
+	cmd.Flags().StringVar(&token, "token", "", "Store a bearer token (GitHub personal-access token) presented to a server that requires authentication; empty clears it")
 	return cmd
 }
 
@@ -82,6 +89,14 @@ func runConfigureShow(out io.Writer) error {
 		stored = "(unset)"
 	}
 	fmt.Fprintf(out, "configured server: %s\n", stored)
+	tokenState := "(unset)"
+	if cfg.Token != "" {
+		tokenState = "(set)"
+	}
+	if env := os.Getenv("PREVIEW_TOKEN"); env != "" {
+		tokenState = "(set via $PREVIEW_TOKEN)"
+	}
+	fmt.Fprintf(out, "configured token:  %s\n", tokenState)
 	url, source, err := effectiveServer()
 	if err != nil {
 		return err
@@ -108,9 +123,30 @@ func runConfigureUnset(out io.Writer) error {
 	return nil
 }
 
+// runConfigureToken stores (or, when empty, clears) the CLI's bearer token
+// without touching the server URL.
+func runConfigureToken(out io.Writer, token string) error {
+	cfg, err := config.LoadClientConfig()
+	if err != nil {
+		return err
+	}
+	cfg.Token = token
+	path, err := config.SaveClientConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		fmt.Fprintf(out, "cleared token in %s\n", path)
+	} else {
+		fmt.Fprintf(out, "stored token in %s\n", path)
+	}
+	return nil
+}
+
 // runConfigure stores url as the server, prompting for it when empty, then
-// pings it so a typo surfaces here rather than on the next command.
-func runConfigure(ctx context.Context, in io.Reader, out io.Writer, url string) error {
+// pings it so a typo surfaces here rather than on the next command. It also
+// updates the stored token when setToken is set.
+func runConfigure(ctx context.Context, in io.Reader, out io.Writer, url, token string, setToken bool) error {
 	cfg, err := config.LoadClientConfig()
 	if err != nil {
 		return err
@@ -128,11 +164,21 @@ func runConfigure(ctx context.Context, in io.Reader, out io.Writer, url string) 
 		return err
 	}
 	cfg.Server = strings.TrimRight(url, "/")
+	if setToken {
+		cfg.Token = token
+	}
 	path, err := config.SaveClientConfig(cfg)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "server set to %s in %s\n", cfg.Server, path)
+	if setToken {
+		if token == "" {
+			fmt.Fprintf(out, "cleared token\n")
+		} else {
+			fmt.Fprintf(out, "stored token\n")
+		}
+	}
 	if env := os.Getenv("PREVIEW_URL"); env != "" && env != cfg.Server {
 		fmt.Fprintf(out, "note: $PREVIEW_URL is set to %s and overrides this in the current shell\n", env)
 	}

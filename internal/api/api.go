@@ -24,6 +24,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/githuboidc"
+	"github.com/jmelahman/local-preview/internal/githubsso"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/retain"
 	"github.com/jmelahman/local-preview/internal/store"
@@ -69,6 +70,29 @@ type Deps struct {
 	// claim matches the target repo's source; nil leaves uploads
 	// unauthenticated (the default, matching the rest of the API).
 	UploadAuth UploadVerifier
+	// SSO authenticates interactive dashboard logins (browser session cookie)
+	// and programmatic callers (GitHub personal-access token as a bearer),
+	// both against one allowlist. nil disables authentication entirely — the
+	// API stays open, as it was before SSO existed.
+	SSO SSOProvider
+	// DashboardOrigin is the scheme://host the dashboard is served from,
+	// derived from --sso-callback-url. State-changing API requests must carry
+	// this Origin (CSRF defense), and preview-auth redirects target it.
+	DashboardOrigin string
+	// CookiesSecure marks session cookies Secure (HTTPS-only). Derived from the
+	// callback URL: true for https and for localhost (a secure context even
+	// over plain http).
+	CookiesSecure bool
+}
+
+// SSOProvider runs the GitHub OAuth web flow and resolves a token (an OAuth
+// code or a personal-access token) to an allowlisted identity.
+// *githubsso.Provider implements it; tests substitute a fake so no network or
+// GitHub app is needed.
+type SSOProvider interface {
+	AuthCodeURL(state string) string
+	Exchange(ctx context.Context, code string) (githubsso.Identity, error)
+	VerifyToken(ctx context.Context, token string) (githubsso.Identity, error)
 }
 
 // UploadVerifier verifies an upload's bearer token and returns the GitHub
@@ -82,6 +106,11 @@ type UploadVerifier interface {
 func NewMux(d Deps) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", d.handleHealth)
+	mux.HandleFunc("GET /api/auth/login", d.handleAuthLogin)
+	mux.HandleFunc("GET /api/auth/callback", d.handleAuthCallback)
+	mux.HandleFunc("POST /api/auth/logout", d.handleAuthLogout)
+	mux.HandleFunc("GET /api/auth/me", d.handleAuthMe)
+	mux.HandleFunc("GET /api/auth/preview-grant", d.handleAuthPreviewGrant)
 	mux.HandleFunc("POST /api/repos", d.handleCreateRepo)
 	mux.HandleFunc("GET /api/repos", d.handleListRepos)
 	mux.HandleFunc("GET /api/repos/{name}", d.handleGetRepo)

@@ -13,6 +13,51 @@ content-hashed); preview responses are served `no-cache` so a `--rebuild`
 of the same commit is picked up on the next request via a `304`
 revalidation.
 
+## Authentication
+
+By default the API is **open** — no credentials required. Starting the server
+with [GitHub SSO](/guide/sso) (`--sso-github-client-id`) gates every `/api/`
+endpoint behind either a browser **session cookie** or an
+`Authorization: Bearer <github-pat>` header, both resolved to a GitHub identity
+and checked against the allowlist.
+
+Exempt regardless of SSO: `GET /api/health`, the `/api/auth/*` endpoints below,
+`POST /api/webhooks/github` (HMAC-authenticated), and
+`POST /api/repos/{repo}/uploads/*` (GitHub Actions OIDC). A gated request with
+no valid credential gets `401`; a valid session on a state-changing
+(`POST`/`PUT`/`PATCH`/`DELETE`) request whose `Origin` isn't the dashboard gets
+`403` (CSRF defense). A signed-in account that isn't on the allowlist gets `403`
+at the callback.
+
+### `GET /api/auth/login`
+
+Starts the OAuth flow: sets a short-lived state cookie and `302`s to GitHub.
+`404` when SSO is disabled. Accepts an optional same-origin `?return_to=` path.
+
+### `GET /api/auth/callback`
+
+GitHub's redirect target. Verifies state, exchanges the code, applies the
+allowlist (`403` on rejection), sets the session cookie, and `302`s home.
+
+### `POST /api/auth/logout`
+
+Deletes the current session and clears its cookie. `204`.
+
+### `GET /api/auth/me`
+
+Returns the signed-in identity, or `{"anonymous": true}` when SSO is disabled,
+or `401` when SSO is on and the caller isn't signed in.
+
+```json
+{ "login": "octocat", "email": "octo@example.com", "avatar_url": "https://…" }
+```
+
+### `GET /api/auth/preview-grant`
+
+Internal to the [preview handshake](/guide/sso#viewing-previews): mints a
+single-use code and redirects back to a preview URL. Requires an apex session
+(bounces through `login` otherwise) and only ever redirects to a preview host.
+
 ## Health
 
 ### `GET /api/health`
