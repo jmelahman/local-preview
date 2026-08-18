@@ -94,6 +94,72 @@ variable "oidc_bypass_cidrs" {
   default     = []
 }
 
+variable "sso" {
+  description = <<-EOT
+    Sign in with GitHub, enforced by the server itself: the dashboard, the
+    `/api/` control plane, and the previews all require a signed-in user on
+    the allowlist. Unlike `oidc` above — which authenticates at the load
+    balancer and so cannot gate anything reaching the instance directly —
+    this covers every path into the server, and the CLI authenticates against
+    the same allowlist with a GitHub personal-access token.
+
+    The OAuth App's callback URL must equal `callback_url` exactly; leave it
+    null to use https://<preview_domain>/api/auth/callback, which is what the
+    module's own DNS and certificate cover.
+
+    The client secret is never a Terraform value — it would land in state and
+    in the process table. Put it in a SecureString SSM parameter and name it
+    here; the instance reads it at boot into an env file.
+
+    At least one allowlist rule is required: an empty allowlist would admit
+    every GitHub user, so the server refuses to start with one.
+  EOT
+  type = object({
+    github_client_id            = string
+    client_secret_ssm_parameter = string
+    callback_url                = optional(string)
+    allowed_org                 = optional(string)
+    allowed_team                = optional(string)
+    allowed_logins              = optional(list(string), [])
+    allowed_emails              = optional(list(string), [])
+  })
+  default = null
+
+  validation {
+    condition = var.sso == null || try(
+      var.sso.allowed_org != null ||
+      length(var.sso.allowed_logins) > 0 ||
+      length(var.sso.allowed_emails) > 0,
+    false)
+    error_message = "sso needs at least one allowlist rule (allowed_org, allowed_logins, or allowed_emails) — an empty allowlist admits every GitHub user."
+  }
+
+  validation {
+    condition     = var.sso == null || try(var.sso.allowed_team == null || var.sso.allowed_org != null, false)
+    error_message = "sso.allowed_team narrows an org, so it requires sso.allowed_org."
+  }
+}
+
+variable "github_oidc_audience" {
+  description = <<-EOT
+    Expected `aud` of the GitHub Actions OIDC tokens that authenticate
+    uploads. Setting it makes the upload endpoints require a token minted by
+    a workflow in the same GitHub repository the target repo was registered
+    from; leaving it null keeps uploads unauthenticated, which is only safe
+    while the security group is the whole gate.
+
+    Use a value unique to this server — its own URL,
+    https://<preview_domain>, is a good choice. GitHub's *default* audience
+    is the repository owner URL, which every workflow in the org can mint, so
+    a token minted for it would be replayable here from any repo in the org.
+
+    Uploads stay exempt from `sso`, so CI needs no session and no PAT. The
+    workflow passes the same value to `preview upload --oidc-audience`.
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "instance_type" {
   description = "Instance type. Previews build and run target repos, so size for the heaviest target build."
   type        = string

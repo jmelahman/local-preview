@@ -25,6 +25,11 @@ output "certificate_arn" {
   value       = var.enable_tls ? aws_acm_certificate.previews[0].arn : null
 }
 
+output "sso_callback_url" {
+  description = "The OAuth App's Authorization callback URL, which GitHub matches exactly. Null when sso isn't set."
+  value       = local.sso_callback_url
+}
+
 output "session_command" {
   description = "Open a shell on the instance without SSH."
   value       = "aws ssm start-session --region ${data.aws_region.current.name} --target ${aws_instance.server.id}"

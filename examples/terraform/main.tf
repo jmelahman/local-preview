@@ -45,6 +45,53 @@ locals {
     Name      = var.name
     ManagedBy = "terraform"
   }, var.tags)
+
+  # GitHub matches the OAuth App's callback URL exactly, so it has to be the
+  # public origin — the load balancer's scheme and the preview domain, which
+  # is what the module's certificate and records cover.
+  sso_callback_url = var.sso == null ? null : coalesce(
+    var.sso.callback_url,
+    "${local.scheme}://${var.preview_domain}/api/auth/callback",
+  )
+
+  # Non-secret flags only. The client secret arrives through the env file
+  # (PREVIEW_SSO_GITHUB_CLIENT_SECRET) so it stays out of `ps` and of state.
+  sso_args = var.sso == null ? [] : concat(
+    [
+      "--sso-github-client-id", var.sso.github_client_id,
+      "--sso-callback-url", local.sso_callback_url,
+    ],
+    var.sso.allowed_org != null ? ["--sso-allowed-org", var.sso.allowed_org] : [],
+    var.sso.allowed_team != null ? ["--sso-allowed-team", var.sso.allowed_team] : [],
+    length(var.sso.allowed_logins) > 0 ? ["--sso-allowed-logins", join(",", var.sso.allowed_logins)] : [],
+    length(var.sso.allowed_emails) > 0 ? ["--sso-allowed-emails", join(",", var.sso.allowed_emails)] : [],
+  )
+
+  oidc_upload_args = var.github_oidc_audience == null ? [] : [
+    "--github-oidc-audience", var.github_oidc_audience,
+  ]
+
+  # The server only ever sees plain HTTP, so left alone it hands out http://
+  # preview URLs even when the load balancer serves them over TLS. That is
+  # cosmetic until previews are gated — then the redirect handshake carries a
+  # Secure cookie, which an http:// URL doesn't. A caller who sets the flag
+  # in extra_server_args keeps their own value.
+  base_url = var.enable_tls || var.http_port == 80 ? (
+    "${local.scheme}://${var.preview_domain}"
+  ) : "http://${var.preview_domain}:${var.http_port}"
+
+  base_url_args = contains(var.extra_server_args, "--preview-base-url") ? [] : [
+    "--preview-base-url", local.base_url,
+  ]
+
+  server_args = concat(local.base_url_args, local.sso_args, local.oidc_upload_args, var.extra_server_args)
+
+  # Both are SecureString parameters the instance reads at boot; neither is a
+  # Terraform value, so neither reaches state.
+  secret_ssm_parameters = compact([
+    var.github_webhook_secret_ssm_parameter,
+    var.sso == null ? null : var.sso.client_secret_ssm_parameter,
+  ])
 }
 
 # The data volume is AZ-bound, so it has to land in the instance's AZ.
@@ -129,21 +176,26 @@ resource "aws_iam_role_policy_attachment" "ssm_core" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-data "aws_iam_policy_document" "webhook_secret" {
-  count = var.github_webhook_secret_ssm_parameter != null ? 1 : 0
+# One read per configured secret parameter: the webhook secret, the SSO
+# client secret, or both.
+data "aws_iam_policy_document" "secrets" {
+  count = length(local.secret_ssm_parameters) > 0 ? 1 : 0
 
   statement {
-    actions   = ["ssm:GetParameter"]
-    resources = ["arn:aws:ssm:${data.aws_region.current.name}:*:parameter/${trimprefix(var.github_webhook_secret_ssm_parameter, "/")}"]
+    actions = ["ssm:GetParameter"]
+    resources = [
+      for name in local.secret_ssm_parameters :
+      "arn:aws:ssm:${data.aws_region.current.name}:*:parameter/${trimprefix(name, "/")}"
+    ]
   }
 }
 
-resource "aws_iam_role_policy" "webhook_secret" {
-  count = var.github_webhook_secret_ssm_parameter != null ? 1 : 0
+resource "aws_iam_role_policy" "secrets" {
+  count = length(local.secret_ssm_parameters) > 0 ? 1 : 0
 
-  name   = "${var.name}-webhook-secret"
+  name   = "${var.name}-secrets"
   role   = aws_iam_role.instance.id
-  policy = data.aws_iam_policy_document.webhook_secret[0].json
+  policy = data.aws_iam_policy_document.secrets[0].json
 }
 
 resource "aws_iam_instance_profile" "instance" {
@@ -190,8 +242,9 @@ resource "aws_instance" "server" {
     image           = var.image
     local_manifests = var.local_manifests
     preview_domain  = var.preview_domain
-    server_args     = join(" ", var.extra_server_args)
+    server_args     = join(" ", local.server_args)
     webhook_ssm     = var.github_webhook_secret_ssm_parameter == null ? "" : var.github_webhook_secret_ssm_parameter
+    sso_secret_ssm  = var.sso == null ? "" : var.sso.client_secret_ssm_parameter
   }))
 
   # The image is baked into the unit file that user_data writes, so an image

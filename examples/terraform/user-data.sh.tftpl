@@ -28,16 +28,28 @@ if ! grep -q "$UUID" /etc/fstab; then
 fi
 mount -a
 
-# --- webhook secret --------------------------------------------------------
-# Pulled at boot instead of being passed as a Terraform variable, which would
-# persist it in state; the env file keeps it out of `ps` too.
-touch /etc/local-preview.env
-chmod 600 /etc/local-preview.env
+# --- secrets ---------------------------------------------------------------
+# The webhook secret and the SSO client secret, pulled at boot instead of
+# being passed as Terraform variables, which would persist them in state; the
+# env file keeps them out of `ps` too.
+#
+# Rewritten from scratch each boot, and tracing is off across every write:
+# xtrace expands the value, so a traced printf would publish the secret to the
+# cloud-init log — the one place this whole dance exists to avoid.
+install -m 600 /dev/null /etc/local-preview.env
 %{ if webhook_ssm != "" ~}
 SECRET=$(aws ssm get-parameter --region ${aws_region} \
   --name '${webhook_ssm}' --with-decryption --query Parameter.Value --output text)
-printf 'PREVIEW_GITHUB_WEBHOOK_SECRET=%s\n' "$SECRET" >/etc/local-preview.env
-chmod 600 /etc/local-preview.env
+set +x
+printf 'PREVIEW_GITHUB_WEBHOOK_SECRET=%s\n' "$SECRET" >>/etc/local-preview.env
+set -x
+%{ endif ~}
+%{ if sso_secret_ssm != "" ~}
+SSO_SECRET=$(aws ssm get-parameter --region ${aws_region} \
+  --name '${sso_secret_ssm}' --with-decryption --query Parameter.Value --output text)
+set +x
+printf 'PREVIEW_SSO_GITHUB_CLIENT_SECRET=%s\n' "$SSO_SECRET" >>/etc/local-preview.env
+set -x
 %{ endif ~}
 
 # --- out-of-repo manifests -------------------------------------------------

@@ -19,6 +19,8 @@ registered repo, artifact, and state dir intact.
 - An Elastic IP, plus optional Route 53 records
 - An ALB with an ACM wildcard certificate terminating HTTPS, and optional
   OIDC login in front of it (`enable_tls`, on by default)
+- Optional GitHub SSO in the server itself (`sso`) and GitHub Actions OIDC on
+  the upload endpoints (`github_oidc_audience`)
 
 ## Usage
 
@@ -44,15 +46,61 @@ Then register a repo against the dashboard the module printed:
 preview --server https://preview.example.com repo add my-app https://github.com/me/my-app
 ```
 
-## There is no authentication
+## Authentication
 
-The server ships none. Anyone who can reach the dashboard can register a
-repo and make this host run that repo's build commands — reaching it is
-equivalent to shell access. The module therefore requires
-`allowed_ingress_cidrs` and rejects `0.0.0.0/0`.
+An unconfigured server has none, and reaching it is equivalent to shell
+access on this host: anyone who can load the dashboard can register a repo
+and make the instance run that repo's build commands. The module therefore
+requires `allowed_ingress_cidrs` and rejects `0.0.0.0/0`.
 
-For a wider audience, authenticate in front of it — set `oidc` below, or use
-Tailscale or Cloudflare Access — and keep the security group closed.
+There are three ways to add authentication, and they gate different things:
+
+| | Gates | Covers the CLI? |
+| --- | --- | --- |
+| `sso` | dashboard, `/api/`, and previews, in the server | yes, with a GitHub PAT |
+| `oidc` | everything, at the load balancer | no — needs `oidc_bypass_cidrs` |
+| `allowed_ingress_cidrs` | everything, at the security group | yes |
+
+`sso` is the one to reach for: it is enforced by the server, so it holds for
+any path to the instance, and one allowlist covers browsers and the CLI
+alike. `oidc` stops requests earlier — before they reach the instance at all
+— but only browsers can complete its redirect. They compose; the security
+group stays closed either way unless you decide otherwise.
+
+### Sign in with GitHub (`sso`)
+
+Register an **OAuth App** whose Authorization callback URL is exactly the
+module's `sso_callback_url` output (by default
+`https://<preview_domain>/api/auth/callback`), then:
+
+```sh
+aws ssm put-parameter --name /local-preview/sso-client-secret \
+  --type SecureString --value "$GITHUB_OAUTH_CLIENT_SECRET"
+```
+
+```hcl
+sso = {
+  github_client_id            = "Iv1.0123456789abcdef"
+  client_secret_ssm_parameter = "/local-preview/sso-client-secret"
+  allowed_org                 = "my-org"
+  # allowed_team   = "platform"        # narrows the org
+  # allowed_logins = ["octocat"]       # or an explicit list
+}
+```
+
+The client secret is read from SSM at boot into a root-only env file, like
+the webhook secret — passing it as a Terraform value would persist it in
+state and expose it in `ps`. Everything else is a flag.
+
+At least one allowlist rule is required: an empty allowlist would admit every
+GitHub user, and both this module and the server refuse to start with one.
+
+Previews are gated too, so a browser bounces once through the dashboard to
+pick up a preview-scoped session the first time it opens one. That handshake
+needs the dashboard and the previews on the same site, which the module's own
+`<preview_domain>` / `*.<preview_domain>` layout already gives you.
+
+### Authenticating at the load balancer (`oidc`)
 
 ## DNS is two records, whatever the repo count
 
@@ -80,10 +128,7 @@ The certificate is DNS-validated, so this needs `route53_zone_id`. To manage
 DNS elsewhere, set `enable_tls = false` and terminate TLS yourself; the module
 then points the records at the instance's Elastic IP and serves plain HTTP.
 
-## Authenticating at the load balancer
-
-`allowed_ingress_cidrs` is the whole security boundary by default. To widen
-access, set `oidc` and the ALB requires a login before any request reaches the
+Set `oidc` and the ALB requires a login before any request reaches the
 server:
 
 ```hcl
@@ -183,6 +228,38 @@ Note that GitHub's webhook senders must reach the server — with a closed
 security group they can't, so webhook triggers suit a self-hosted forge or an
 allowlisted proxy. Watched repos (polling, `--poll-interval`) need no inbound
 access at all.
+
+## Uploads from GitHub Actions
+
+CI can publish what it already built — a frontend bundle, a backend tree, a
+downloadable artifact — into the server's content-addressed store, and a
+deploy of that commit then skips the build. Set an audience to require those
+uploads to authenticate:
+
+```hcl
+github_oidc_audience = "https://preview.example.com"
+```
+
+Every upload then needs a GitHub Actions OIDC token, and the server accepts
+one only for the registered repo whose `source` is the same GitHub repository
+the token was minted in. Pick a value unique to this server — its URL is the
+obvious one. GitHub's *default* audience is the repository owner URL, which
+any workflow in the org can mint, so leaving it at the default would let any
+org repo upload here.
+
+In the workflow, grant `id-token: write` and pass `--oidc`:
+
+```yaml
+- run: |
+    preview upload frontend web/dist "$GITHUB_SHA" \
+      --repo my-app --server "$PREVIEW_URL" --oidc --deploy
+```
+
+Uploads are exempt from `sso` — CI needs no session and no PAT — but they are
+*not* exempt from the security group. Hosted runners come from GitHub's
+ranges, so with `allowed_ingress_cidrs` closed to an office or VPN range they
+cannot reach the server at all; use a self-hosted runner inside an allowed
+range, or widen the ingress deliberately.
 
 ## Upgrades
 
