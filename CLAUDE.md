@@ -110,6 +110,10 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - A GitHub OIDC token authenticates but authorizes nothing on its own — accept
   one only on a route that names a repo, and bind it to that repo's registered
   source, or any repo's CI can act on any other's.
+- A derived runtime state can't be filtered by a stored-status predicate —
+  "crashed" lives in the supervisor, not the `status` column, so a listing
+  filter has to resolve it into a row predicate (never post-filter a page:
+  that breaks paging and `X-Total-Count`).
 - SSO's preview-access cookie must stay a separate scope from the apex session
   and be stripped in the proxy `Rewrite` — else the untrusted previewed backend
   receives (and can replay) the control-plane credential.

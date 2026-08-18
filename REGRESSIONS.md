@@ -283,3 +283,35 @@ token from any repo in the org.
 bind against, or accepting the claims in a handler without checking the binding
 — either authorizes every repo's CI for that route. On read paths, also
 returning `403` where `404` is required.
+
+## A derived runtime state can't be filtered by a stored-status predicate
+
+**Symptom.** With the deployments list filtered to "ready", crashed deploys
+showed up in it — the one state a user has to act on, hiding among the
+previews that can still serve. `preview deploy list` had the mirror-image bug:
+a crashed deploy printed as `ready`.
+
+**Root cause / fix.** "Crashed" is not a build status. The row's `status`
+column says `ready` (the build succeeded); the crash lives in the
+supervisor's in-memory `failures` map, and both UIs derive the displayed
+state by merging the row with the live process states. The filter, though,
+was a plain `d.status = ?` — it only ever saw the column, so every crashed
+deploy answered to `status=ready` and nothing answered to `status=crashed`.
+
+The API now bridges the two: `Manager.CrashedKeys` returns the currently
+crashed keys, the handler translates them into the deploy columns that
+identify them (`db.ProcKey`), and `deployWhere` renders them as an
+inclusion (`CrashedOnly`) or exclusion (`CrashedNone`) predicate. Keying
+matters: a backend is identified by `be_hash` alone — every deploy sharing
+that artifact is served by the same process, so all of them are crashed —
+while a process-mode frontend needs the `fe_hash`/`be_hash` pair, since the
+instance is specific to the backend it was started against. The predicate
+goes through `deployWhere` precisely so `ListDeploys` and `CountDeploys`
+can't disagree, which would corrupt the pager.
+
+**What would reintroduce it.** Adding another derived state to the status
+dropdown (`running`, `idle`, `starting` are the obvious next ones) and
+wiring it straight to `DeployFilter.Status`, or filtering the fetched page
+in the frontend instead — a client-side filter silently breaks paging and
+`X-Total-Count`. Any state the DB doesn't store has to be resolved into a
+row predicate before the query runs.
