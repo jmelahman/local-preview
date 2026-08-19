@@ -367,6 +367,13 @@ variable "workers" {
     root_volume_size_gb  = optional(number, 60)
     extra_server_args    = optional(list(string), [])
     stack_ingress_ports  = optional(list(number), [])
+    # Run workers as persistent spot instances (interruption behavior:
+    # stop). Workers are stateless by design — run specs arrive on the wire,
+    # artifact files hydrate from S3 — so an interruption only makes previews
+    # unavailable until capacity returns and AWS restarts the instance. A
+    # persistent request is what keeps user-initiated stop/start (the
+    # business-hours schedule) working and the pinned private IP stable.
+    spot = optional(bool, false)
     # Images pre-pulled (best-effort, in the background) at worker boot, so
     # the first preview on a fresh worker doesn't pay the multi-GB
     # devcontainer pull. Digest-pinned manifests still pull what they name;
