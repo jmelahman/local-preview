@@ -447,3 +447,33 @@ Watch for it whenever a new server arg is threaded through `extra_server_args`.
 The tell is in the plan: an instance whose `user_data_base64` shows
 `-> (known after apply)` under `will be updated in-place` is a no-op apply, not
 a config change.
+
+## Every path that extracts a committed tree must reject escaping symlinks
+
+`gitrepo.Archive` walks the *full committed tree* of an untrusted target repo
+and, for each symlink entry, recreated it verbatim with `os.Symlink(linkTarget,
+target)`. `linkTarget` is the blob content — fully attacker-controlled by
+anyone who can get a commit built (a push to a watched branch, a webhook, a
+deploy request). A committed `dist/leak -> /etc/passwd` (or a `../`-escape) was
+recreated in the build scratch dir and then *followed* by two serving sinks:
+`http.FileServer(http.Dir(FrontendDir(...)))` streams the host file to any
+anonymous preview visitor (previews are public unless SSO is configured), and
+`PublishArtifactFiles` did `os.Stat`+`copyFile`, publishing the target's real
+content as a downloadable artifact. Either one discloses the orchestrator's
+SQLite DB (session-token hashes), env secrets, and mounted cloud credentials to
+an unauthenticated network client.
+
+The hardened tar extractor (`store.ExtractTar`) already defended against exactly
+this — reject an absolute link target, and refuse any relative target that
+resolves outside the extraction root (`withinRoot`) — but that hardening was
+never applied to `gitrepo.Archive`. The fix mirrors it: `extractSymlink` now
+takes the absolute `root`, rejects absolute targets, and refuses a target whose
+`filepath.Join(dir(target), link)` escapes root. Defense in depth in
+`PublishArtifactFiles`: `os.Lstat` (not `os.Stat`) the declared source and
+refuse a symlink outright — a build's declared `files` must be genuine outputs.
+
+The lesson generalizes: *any* code that materializes an untrusted repo tree or
+archive onto disk is a link-following surface. There must be exactly one
+hardened rule (absolute-reject + within-root), and every extractor must apply
+it — a tar extractor being hardened says nothing about a git-tree extractor
+sharing the same scratch dir and the same public file server.

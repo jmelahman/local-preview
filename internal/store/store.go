@@ -167,9 +167,16 @@ func (s *Store) PublishArtifactFiles(repo, hash, builtDir string, files []string
 	defer os.RemoveAll(staging)
 	for _, f := range files {
 		src := filepath.Join(builtDir, filepath.FromSlash(f))
-		info, err := os.Stat(src)
+		// Lstat, not Stat: a declared artifact file must be a genuine build
+		// output, never a symlink. os.Stat would follow the link and happily
+		// publish the target's content — a committed symlink to a host file
+		// (/etc/passwd, cloud credentials) then leaks via artifact download.
+		info, err := os.Lstat(src)
 		if err != nil {
 			return fmt.Errorf("artifact file %q was not produced by the build", f)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("artifact file %q is a symlink", f)
 		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("artifact file %q is not a regular file", f)

@@ -627,6 +627,10 @@ func (r Repo) Archive(ctx context.Context, sha, dest string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return fmt.Errorf("create archive dest: %w", err)
 	}
+	root, err := filepath.Abs(dest)
+	if err != nil {
+		return fmt.Errorf("archive dest: %w", err)
+	}
 	repo, err := r.open()
 	if err != nil {
 		return err
@@ -652,12 +656,12 @@ func (r Repo) Archive(ctx context.Context, sha, dest string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		target := filepath.Join(dest, filepath.FromSlash(name))
+		target := filepath.Join(root, filepath.FromSlash(name))
 		switch entry.Mode {
 		case filemode.Dir, filemode.Submodule:
 			err = os.MkdirAll(target, 0o755)
 		case filemode.Symlink:
-			err = extractSymlink(repo, entry.Hash, target)
+			err = extractSymlink(repo, entry.Hash, root, target)
 		default:
 			err = extractBlob(repo, entry.Hash, target, entry.Mode)
 		}
@@ -667,16 +671,38 @@ func (r Repo) Archive(ctx context.Context, sha, dest string) error {
 	}
 }
 
-func extractSymlink(repo *git.Repository, hash plumbing.Hash, target string) error {
+// extractSymlink recreates a committed symlink whose blob content is the link
+// target. The target is fully attacker-controlled (a repo owner commits it), so
+// it is validated before creation the same way store.ExtractTar validates tar
+// symlinks: an absolute target always escapes and is rejected, and a relative
+// target is refused if it resolves outside root. Without this a committed
+// symlink to /etc/passwd (or a ../ escape) would be recreated verbatim and then
+// followed by the frontend file server / artifact publisher, disclosing host
+// files to unauthenticated preview visitors.
+func extractSymlink(repo *git.Repository, hash plumbing.Hash, root, target string) error {
 	linkTarget, err := blobContent(repo, hash)
 	if err != nil {
 		return err
+	}
+	link := string(linkTarget)
+	if filepath.IsAbs(link) || strings.HasPrefix(link, "/") {
+		return fmt.Errorf("absolute symlink target %q", link)
+	}
+	resolved := filepath.Join(filepath.Dir(target), filepath.FromSlash(link))
+	if !withinRoot(root, resolved) {
+		return fmt.Errorf("symlink target %q escapes archive root", link)
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
 	os.Remove(target)
-	return os.Symlink(string(linkTarget), target)
+	return os.Symlink(link, target)
+}
+
+// withinRoot reports whether p is root itself or lies beneath it. Both must be
+// clean absolute paths (Archive derives target from an absolute root).
+func withinRoot(root, p string) bool {
+	return p == root || strings.HasPrefix(p, root+string(os.PathSeparator))
 }
 
 func extractBlob(repo *git.Repository, hash plumbing.Hash, target string, mode filemode.FileMode) error {

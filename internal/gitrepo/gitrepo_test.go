@@ -355,6 +355,66 @@ func TestLsTreeReadFileArchive(t *testing.T) {
 	}
 }
 
+// TestArchiveRejectsEscapingSymlinks pins the C1 hardening: a committed symlink
+// whose target is an absolute host path or a ../ escape must not be recreated
+// pointing outside the extraction root, or an unauthenticated preview visitor
+// could read host files through the frontend file server / artifact download.
+// A safe in-tree symlink must still extract normally.
+func TestArchiveRejectsEscapingSymlinks(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name       string
+		linkTarget string
+		reject     bool
+	}{
+		{"absolute", "/etc/passwd", true},
+		{"dotdot-escape", "../../../../etc/passwd", true},
+		{"in-tree", "real.txt", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := t.TempDir()
+			runTestGit(t, src, "init", "-q", "-b", "main")
+			writeFile(t, src, "real.txt", "safe content")
+			if err := os.Symlink(tc.linkTarget, filepath.Join(src, "leak")); err != nil {
+				t.Fatal(err)
+			}
+			runTestGit(t, src, "add", "-A")
+			runTestGit(t, src, "commit", "-q", "-m", "symlink")
+
+			mgr := NewManager(filepath.Join(t.TempDir(), "repos"))
+			repo, err := mgr.Add(ctx, "demo", src, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sha, err := repo.ResolveRef(ctx, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			dest := filepath.Join(t.TempDir(), "extract")
+			err = repo.Archive(ctx, sha, dest)
+			if tc.reject {
+				if err == nil {
+					t.Fatal("Archive should reject an escaping symlink")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Archive of a safe symlink failed: %v", err)
+			}
+			got, err := os.ReadFile(filepath.Join(dest, "leak"))
+			if err != nil {
+				t.Fatalf("read in-tree symlink: %v", err)
+			}
+			if string(got) != "safe content" {
+				t.Fatalf("in-tree symlink resolved to %q", got)
+			}
+		})
+	}
+}
+
 // TestLsTreeMatchesGit pins LsTree to real `git ls-tree -r` output — order,
 // modes, and OIDs feed content-address hashes (see hashkey), so any drift
 // silently invalidates every cached build. The fixture exercises git's tree

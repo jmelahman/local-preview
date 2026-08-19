@@ -139,6 +139,10 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   pair shares a per-deploy docker network that lives on one node, so a frontend
   hashes on its backend's hash (`Peer`), never its own. Splitting them across
   workers breaks `{backend_url}` and the deploy network.
+- Every path that extracts an untrusted repo tree must reject escaping symlinks
+  — `gitrepo.Archive` recreated a committed `leak -> /etc/passwd` verbatim, then
+  the public frontend file server / artifact publisher followed it; apply the
+  same absolute-reject + within-root rule `store.ExtractTar` already enforces.
 - A `nofail` data volume must gate the service that bind-mounts it — without
   `RequiresMountsFor=`, a boot that races the volume attach starts the
   orchestrator on an empty dir with a fresh SQLite DB, and a later mount can't

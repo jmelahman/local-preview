@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -178,6 +179,29 @@ func TestListArtifactFilesCached(t *testing.T) {
 	s.mu.Unlock()
 	if got := s.ListArtifactFiles("app", "h1"); got != nil {
 		t.Fatalf("expired listing after removal = %v, want nil", got)
+	}
+}
+
+// TestPublishArtifactFilesRejectsSymlink pins the C1 defense-in-depth: a
+// declared artifact file that is a symlink (e.g. a committed leak -> /etc/passwd
+// surviving into the build dir) must be refused, never dereferenced and
+// published as a downloadable file.
+func TestPublishArtifactFilesRejectsSymlink(t *testing.T) {
+	s := newTestStore(t)
+	built := t.TempDir()
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("host secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(built, "leak.bin")); err != nil {
+		t.Fatal(err)
+	}
+	err := s.PublishArtifactFiles("app", "h1", built, []string{"leak.bin"}, false)
+	if err == nil {
+		t.Fatal("PublishArtifactFiles should refuse a symlinked artifact file")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("error = %v, want it to mention symlink", err)
 	}
 }
 
