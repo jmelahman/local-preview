@@ -66,6 +66,9 @@ func (rt *Router) interimResponse(w http.ResponseWriter, r *http.Request, status
 		rt.pollJSON(w, r, status, it)
 		return
 	}
+	// Interim states are moments, not resources: any cache (browser, proxy)
+	// replaying one would show "Building…" long after the preview is ready.
+	w.Header().Set("Cache-Control", "no-store")
 	if !wantsHTML(r) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "2")
@@ -105,6 +108,7 @@ func (rt *Router) pollJSON(w http.ResponseWriter, r *http.Request, status int, i
 		}
 	}
 	w.Header().Set(interimHeader, it.state)
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(p)

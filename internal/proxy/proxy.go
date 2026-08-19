@@ -580,6 +580,9 @@ func wantsHTML(r *http.Request) bool {
 // here comes back without the interim marker, so the interim page reloads
 // onto it.
 func (rt *Router) errorPage(w http.ResponseWriter, r *http.Request, status int, title, detail string) {
+	// Terminal for this request, but not for the address: a redeploy or
+	// retry changes the answer, so nothing may cache this page.
+	w.Header().Set("Cache-Control", "no-store")
 	if !wantsHTML(r) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)

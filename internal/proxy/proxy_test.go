@@ -610,3 +610,39 @@ func TestPreviewGrantCookieStrippedFromBackend(t *testing.T) {
 		t.Fatalf("backend should still receive the app's own cookies: %q", gotCookie)
 	}
 }
+
+// TestInterimAndErrorPagesAreUncacheable: interim states are moments, and an
+// error page changes on redeploy — a cached copy of either would show
+// "Building…" or "Build failed" long after reality moved on.
+func TestInterimAndErrorPagesAreUncacheable(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+
+	// Interim HTML page (browser, still starting).
+	e.fake.slow = true
+	req := httptest.NewRequest("GET", "http://"+host+"/api/x", nil)
+	req.Host = host
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	if cc := rec.Result().Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("interim page Cache-Control = %q, want no-store", cc)
+	}
+
+	// Poll JSON.
+	_, _, hdr := doPoll(t, e.router, host, "/api/x", 0, 0)
+	if cc := hdr.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("poll Cache-Control = %q, want no-store", cc)
+	}
+
+	// Error page (unknown preview).
+	req = httptest.NewRequest("GET", "http://nope-demo.preview.localhost:8080/", nil)
+	req.Host = "nope-demo.preview.localhost:8080"
+	req.Header.Set("Accept", "text/html")
+	rec = httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	if cc := rec.Result().Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("error page Cache-Control = %q, want no-store", cc)
+	}
+}
