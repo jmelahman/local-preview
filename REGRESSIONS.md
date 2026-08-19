@@ -521,3 +521,15 @@ must hold:
 - **Keep the regression test honest**: `TestEnsureWireSpecOnEmptyDB` drives a
   real Manager over an empty DB through the real Client/Server. A fake
   supervisor can never see this class of gap.
+
+## Every publish path must persist to the durable tier — reconcile is repair
+
+`enqueuePersist` ran only on the build path; a CI *upload* published locally
+and relied on the periodic reconcile pass to reach the S3 tier. On a worker
+tier that gap is user-visible: a worker serves a freshly uploaded deploy by
+hydrating from the tier, so every cold start between the upload and the next
+reconcile tick failed "artifact not present in durable tier" → 502. The fix
+enqueues a persist after each upload publish (fe/be/dl), same as a build.
+The rule: reconcile exists to close crash windows and pre-tier history, not
+to be any publish path's primary route to the tier — anything that lands an
+artifact locally must enqueue its persist in the same breath.

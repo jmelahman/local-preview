@@ -89,6 +89,10 @@ func (q *Queue) Upload(ctx context.Context, repoName, ref, side, name string, bo
 			return UploadResult{}, err
 		}
 		res.Published = true
+		// Persist to the durable tier now, exactly like a build's publish —
+		// a worker serving this deploy hydrates from the tier, and waiting
+		// for the next reconcile pass would 502 every cold start until then.
+		q.enqueuePersist(repoName, "fe", res.Hash)
 	case SideBackend:
 		if res.Hash, err = beHashOf(m, env, entries); err != nil {
 			return UploadResult{}, err
@@ -107,6 +111,7 @@ func (q *Queue) Upload(ctx context.Context, repoName, ref, side, name string, bo
 			return UploadResult{}, err
 		}
 		res.Published = true
+		q.enqueuePersist(repoName, "be", res.Hash)
 	case SideArtifact:
 		spec, ok := m.Artifacts[name]
 		if !ok {
@@ -133,6 +138,7 @@ func (q *Queue) Upload(ctx context.Context, repoName, ref, side, name string, bo
 		}
 		res.Published = true
 		res.Files = toUploadFiles(q.files.ListArtifactFiles(repoName, res.Hash))
+		q.enqueuePersist(repoName, "dl", res.Hash)
 	default:
 		return UploadResult{}, fmt.Errorf("unknown upload side %q", side)
 	}

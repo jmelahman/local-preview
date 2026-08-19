@@ -264,3 +264,23 @@ func TestPersistPoolDrainsOnStop(t *testing.T) {
 		t.Fatalf("expected drained upload of demo/fe/abcd, got %v", keys)
 	}
 }
+
+// TestUploadPersistsToTier: a CI upload lands in the durable tier just like a
+// build's publish — a worker serving the freshly uploaded deploy hydrates
+// immediately, not after the next reconcile pass.
+func TestUploadPersistsToTier(t *testing.T) {
+	src := newFixtureRepo(t)
+	tier := &fakeTier{}
+	e := newEnv(t, src, func(q *Queue) {
+		q.SetAutoStart(false)
+		q.SetArtifactTier(tier)
+	})
+	body := tarGzBytes(t, map[string]string{"marker": "UPLOADED"})
+	res, err := upload(t, e, "main", SideBackend, "", body, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "uploaded backend persisted", func() bool {
+		return tier.has("demo", "be", res.Hash)
+	})
+}
