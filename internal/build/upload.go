@@ -96,7 +96,9 @@ func (q *Queue) Upload(ctx context.Context, repoName, ref, side, name string, bo
 		if !overwrite && q.files.HasBackend(repoName, res.Hash) {
 			return res, nil
 		}
-		dir, cleanup, err := q.stageUpload(body)
+		// Payload symlink policy: a backend venv legitimately links to paths
+		// that only resolve inside its run container (see ExtractTarPayload).
+		dir, cleanup, err := q.stagePayloadUpload(body)
 		if err != nil {
 			return UploadResult{}, err
 		}
@@ -142,11 +144,21 @@ func (q *Queue) Upload(ctx context.Context, repoName, ref, side, name string, bo
 // declared files are copied out of (artifact). The cleanup is safe after a
 // successful publish, whose rename moves the dir out from under it.
 func (q *Queue) stageUpload(body io.Reader) (string, func(), error) {
+	return q.stage(body, q.files.ExtractTar)
+}
+
+// stagePayloadUpload is stageUpload under the payload symlink policy —
+// backend uploads only.
+func (q *Queue) stagePayloadUpload(body io.Reader) (string, func(), error) {
+	return q.stage(body, q.files.ExtractTarPayload)
+}
+
+func (q *Queue) stage(body io.Reader, extract func(io.Reader, string) error) (string, func(), error) {
 	dir, cleanup, err := q.files.NewScratchDir("upload")
 	if err != nil {
 		return "", nil, err
 	}
-	if err := q.files.ExtractTar(body, dir); err != nil {
+	if err := extract(body, dir); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("extract upload: %w", err)
 	}

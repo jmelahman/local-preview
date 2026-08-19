@@ -96,6 +96,12 @@ func (s *Store) ExtractTar(r io.Reader, destDir string) error {
 	return ExtractTar(r, destDir, s.maxExtractBytes)
 }
 
+// ExtractTarPayload is ExtractTar under the payload symlink policy — backend
+// artifact trees only. See the package-level ExtractTarPayload for why.
+func (s *Store) ExtractTarPayload(r io.Reader, destDir string) error {
+	return ExtractTarPayload(r, destDir, s.maxExtractBytes)
+}
+
 // FrontendDir returns the artifact path for a frontend hash.
 func (s *Store) FrontendDir(repo, hash string) string {
 	return filepath.Join(s.artifactsDir, repo, "fe", hash)

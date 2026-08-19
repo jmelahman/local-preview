@@ -143,10 +143,18 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   — `gitrepo.Archive` recreated a committed `leak -> /etc/passwd` verbatim, then
   the public frontend file server / artifact publisher followed it; apply the
   same absolute-reject + within-root rule `store.ExtractTar` already enforces.
+  One deliberate carve-out: backend artifacts are executed payloads whose venv
+  symlinks legitimately point into their run image, so they extract via
+  `ExtractTarPayload` (names/hardlinks still strict) — don't re-unify the two
+  policies in either direction.
 - A worker resolves run specs from the wire, not its own DB — artifact rows
   never replicate; the ensure request carries the control-resolved `WireSpec`
   (state dir as identity, sticky per-node `InitDone`), and the regression test
   must drive a real `supervise.Manager` over an empty DB, never just `fakeSup`.
+- Containered preview ports publish on loopback by default — a worker must
+  also publish on its routable address (derived from `--worker-listen`) or the
+  control node's proxy dials a port nothing answers; local health checks still
+  poll 127.0.0.1, so the loopback binding must survive alongside it.
 - A `nofail` data volume must gate the service that bind-mounts it — without
   `RequiresMountsFor=`, a boot that races the volume attach starts the
   orchestrator on an empty dir with a fresh SQLite DB, and a later mount can't

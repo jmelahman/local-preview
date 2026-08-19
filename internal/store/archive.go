@@ -34,6 +34,33 @@ var ErrArchiveTooLarge = errors.New("archive exceeds decompression cap")
 // lives here in store — the one package both callers already import — and is
 // the single hardened extractor neither may duplicate.
 func ExtractTar(r io.Reader, destDir string, maxBytes int64) error {
+	return extractTar(r, destDir, maxBytes, false)
+}
+
+// ExtractTarPayload is ExtractTar with the symlink-target restriction lifted:
+// symlinks are recreated verbatim, wherever they point. It exists for exactly
+// one class of tree — a *backend artifact*, which is an executed payload, not
+// served data. A backend venv legitimately carries absolute symlinks that
+// resolve inside its run container (onyx: .venv/bin/python → the devcontainer's
+// /opt/uv/...), so the strict rule would refuse every hydrate and CI upload of
+// it.
+//
+// Why this does not reopen the escaping-symlink hole the strict rule closed
+// (see REGRESSIONS.md): the danger of a hostile symlink is a *trusted host-side
+// reader following it* — the public frontend file server and the artifact
+// publisher, both of which serve only frontend/artifact trees, which stay
+// strict. Nothing on the host follows a backend tree's links: run containers
+// resolve them in their own filesystem, the persist tar-writer Readlinks
+// without following, eviction removes without following, and a host-run
+// preview is the repo's own code executing anyway. Entry *names* are still
+// confined to destDir, and hardlinks stay strict on every path — os.Link
+// resolves host-side at extract time, so an out-of-root hardlink would BE the
+// host file.
+func ExtractTarPayload(r io.Reader, destDir string, maxBytes int64) error {
+	return extractTar(r, destDir, maxBytes, true)
+}
+
+func extractTar(r io.Reader, destDir string, maxBytes int64, payloadLinks bool) error {
 	br := bufio.NewReader(r)
 	// Sniff the gzip magic so raw .tar and .tar.gz both work.
 	if magic, err := br.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
@@ -42,12 +69,12 @@ func ExtractTar(r io.Reader, destDir string, maxBytes int64) error {
 			return fmt.Errorf("gzip: %w", err)
 		}
 		defer gz.Close()
-		return extractTarStream(gz, destDir, maxBytes)
+		return extractTarStream(gz, destDir, maxBytes, payloadLinks)
 	}
-	return extractTarStream(br, destDir, maxBytes)
+	return extractTarStream(br, destDir, maxBytes, payloadLinks)
 }
 
-func extractTarStream(r io.Reader, destDir string, maxBytes int64) error {
+func extractTarStream(r io.Reader, destDir string, maxBytes int64, payloadLinks bool) error {
 	root, err := filepath.Abs(destDir)
 	if err != nil {
 		return err
@@ -87,9 +114,14 @@ func extractTarStream(r io.Reader, destDir string, maxBytes int64) error {
 			// hardlink targets are archive paths relative to root. Either way
 			// the resolved target must stay inside destDir — and an absolute
 			// target always escapes, so reject it before it becomes a symlink
-			// literally pointing outside the tree.
-			if filepath.IsAbs(hdr.Linkname) || strings.HasPrefix(hdr.Linkname, "/") {
-				return fmt.Errorf("absolute link target %q in archive", hdr.Name)
+			// literally pointing outside the tree. The one exception is a
+			// payload tree's symlinks (never a hardlink) — see
+			// ExtractTarPayload for the argument.
+			payloadSymlink := payloadLinks && hdr.Typeflag == tar.TypeSymlink
+			if !payloadSymlink {
+				if filepath.IsAbs(hdr.Linkname) || strings.HasPrefix(hdr.Linkname, "/") {
+					return fmt.Errorf("absolute link target %q in archive", hdr.Name)
+				}
 			}
 			var resolved string
 			if hdr.Typeflag == tar.TypeSymlink {
@@ -97,7 +129,7 @@ func extractTarStream(r io.Reader, destDir string, maxBytes int64) error {
 			} else if resolved, err = safeJoin(root, hdr.Linkname); err != nil {
 				return err
 			}
-			if !withinRoot(root, resolved) {
+			if !payloadSymlink && !withinRoot(root, resolved) {
 				return fmt.Errorf("unsafe link target %q in archive", hdr.Name)
 			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {

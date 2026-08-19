@@ -478,6 +478,19 @@ hardened rule (absolute-reject + within-root), and every extractor must apply
 it — a tar extractor being hardened says nothing about a git-tree extractor
 sharing the same scratch dir and the same public file server.
 
+**Carve-out, learned when the rule broke production hydration:** the rule's
+danger model is a *trusted host-side reader following the link* — the public
+frontend file server and the artifact publisher. A **backend artifact** is an
+executed payload with no such reader (run containers resolve links in their own
+filesystem; the persist tar-writer Readlinks without following; eviction
+removes without following), and a venv legitimately carries absolute symlinks
+into its run image (onyx: `.venv/bin/python → /opt/uv/...`). Blanket-rejecting
+those made every backend hydrate and CI upload fail. `ExtractTarPayload` lifts
+the symlink-target restriction for backend trees only; entry names and
+hardlinks (which `os.Link` resolves host-side at extract time) stay strict
+everywhere, and frontend/artifact trees keep the full rule. Do not "simplify"
+the two policies back into one in either direction.
+
 ## A worker resolves run specs from the wire, not its own DB
 
 Artifact *files* travel to a worker through the S3 tier (hydrate-on-serve),

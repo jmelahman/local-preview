@@ -68,6 +68,44 @@ func TestExtractTarRejectsUnsafeArchives(t *testing.T) {
 	}
 }
 
+// The payload policy (backend artifacts): symlinks extract verbatim wherever
+// they point — a venv's absolute link into its run container is legitimate —
+// while entry names and hardlinks keep the strict rules.
+func TestExtractTarPayloadSymlinkPolicy(t *testing.T) {
+	dst := t.TempDir()
+	entries := []tarEntry{
+		{name: ".venv/bin/python3", body: "elf"},
+		{name: ".venv/bin/python", link: "/opt/uv/python/bin/python3"},
+		{name: "rel-escape", link: "../outside"},
+	}
+	if err := ExtractTarPayload(bytes.NewReader(rawTar(entries)), dst, 0); err != nil {
+		t.Fatalf("payload extract: %v", err)
+	}
+	got, err := os.Readlink(filepath.Join(dst, ".venv/bin/python"))
+	if err != nil || got != "/opt/uv/python/bin/python3" {
+		t.Fatalf("symlink = %q, %v", got, err)
+	}
+
+	// Entry-name escapes stay rejected even under the payload policy.
+	if err := ExtractTarPayload(bytes.NewReader(rawTar([]tarEntry{{name: "../evil", body: "x"}})), t.TempDir(), 0); err == nil {
+		t.Fatal("payload extract accepted an escaping entry name")
+	}
+
+	// Hardlinks stay strict: os.Link resolves host-side at extract time.
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	tw.WriteHeader(&tar.Header{Name: "hard", Typeflag: tar.TypeLink, Linkname: "../../etc/passwd", Mode: 0o644})
+	tw.Close()
+	if err := ExtractTarPayload(bytes.NewReader(buf.Bytes()), t.TempDir(), 0); err == nil {
+		t.Fatal("payload extract accepted an escaping hardlink")
+	}
+
+	// And the strict extractor still refuses what the payload one allows.
+	if err := ExtractTar(bytes.NewReader(rawTar(entries)), t.TempDir(), 0); err == nil {
+		t.Fatal("strict extract accepted an absolute symlink")
+	}
+}
+
 // A tar whose cumulative decompressed size exceeds maxBytes aborts with
 // ErrArchiveTooLarge and leaves no over-cap file behind — the gzip-bomb guard.
 func TestExtractTarEnforcesDecompressionCap(t *testing.T) {

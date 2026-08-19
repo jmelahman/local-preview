@@ -98,7 +98,15 @@ func (s *Store) Hydrate(ctx context.Context, repo, side, hash string) error {
 			return nil, fmt.Errorf("hydrate %s %s/%s: scratch: %w", repo, side, hash, err)
 		}
 		defer cleanup()
-		extractErr := s.ExtractTar(rc, dir)
+		// Backend trees are executed payloads whose symlinks may legitimately
+		// point outside the tree (resolved inside their run container); every
+		// other side keeps the strict policy. See ExtractTarPayload.
+		var extractErr error
+		if side == "be" {
+			extractErr = s.ExtractTarPayload(rc, dir)
+		} else {
+			extractErr = s.ExtractTar(rc, dir)
+		}
 		// Close both releases the connection and verifies the decompressed
 		// length against the size recorded at Save time — a truncated object
 		// must never land under a content-addressed key.
