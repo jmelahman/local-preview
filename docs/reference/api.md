@@ -2,7 +2,9 @@
 
 All endpoints are JSON over HTTP, rooted at `/api/` on the apex host (any
 Host that isn't a preview subdomain). Errors return a JSON body of the form
-`{"error": "message"}`.
+`{"error": "message"}`. JSON request bodies are capped at 1&nbsp;MiB; a
+larger body is rejected with `413` before it is decoded. (Upload bodies are a
+separate, larger cap — see [Uploads](#uploads).)
 
 Responses larger than 1&nbsp;KiB are gzipped when the client sends
 `Accept-Encoding: gzip`; smaller ones are sent plain (compressing them costs

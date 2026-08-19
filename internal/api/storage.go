@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/jmelahman/local-preview/internal/retain"
@@ -57,8 +56,7 @@ func (d Deps) handleGetRetention(w http.ResponseWriter, r *http.Request) {
 // tightening limits never surprise-evicts on save.
 func (d Deps) handlePutRetention(w http.ResponseWriter, r *http.Request) {
 	var p retain.Policy
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		httpError(w, http.StatusBadRequest, "invalid JSON body")
+	if !decodeJSON(w, r, &p) {
 		return
 	}
 	if err := p.Validate(); err != nil {

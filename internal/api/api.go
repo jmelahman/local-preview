@@ -181,8 +181,7 @@ func (d Deps) handleCreateRepo(w http.ResponseWriter, r *http.Request) {
 		// changes from now on.
 		Backfill bool `json:"backfill"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpError(w, http.StatusBadRequest, "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
@@ -238,8 +237,7 @@ func (d Deps) handleUpdateRepo(w http.ResponseWriter, r *http.Request) {
 		WatchBranches *string `json:"watch_branches"`
 		Backfill      bool    `json:"backfill"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpError(w, http.StatusBadRequest, "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Watch == nil && req.WatchBranches == nil {
@@ -435,8 +433,7 @@ func (d Deps) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 		Ref     string `json:"ref"`
 		Rebuild bool   `json:"rebuild"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpError(w, http.StatusBadRequest, "invalid JSON body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Repo == "" || req.Ref == "" {
@@ -831,6 +828,29 @@ func (d Deps) handleDeployStats(w http.ResponseWriter, r *http.Request) {
 		resp.Frontend = sample(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash))
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// maxJSONBody caps a JSON request body before decoding. The API's payloads
+// are all small (repo/deploy/retention descriptors), so 1 MiB is generous
+// while still denying an unauthenticated caller an unbounded-allocation lever.
+const maxJSONBody = 1 << 20
+
+// decodeJSON reads and decodes a JSON request body under a fixed size cap.
+// It mirrors the webhook handler's MaxBytesReader guard so no handler decodes
+// an unbounded stream; an oversized body returns 413, malformed JSON 400. On
+// error it has already written the response — the caller just returns.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			httpError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return false
+		}
+		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return false
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

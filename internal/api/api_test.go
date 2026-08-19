@@ -256,6 +256,19 @@ func TestRepoEndpoints(t *testing.T) {
 	}
 }
 
+// TestJSONBodySizeCap checks that a JSON handler rejects an oversized body
+// with 413 before decoding, rather than allocating proportional to the input.
+func TestJSONBodySizeCap(t *testing.T) {
+	mux, _ := newTestMux(t)
+
+	// A body just past maxJSONBody: valid JSON prefix followed by filler so
+	// the decoder can't short-circuit before hitting the cap.
+	big := `{"name":"demo","source":"` + strings.Repeat("a", (1<<20)+16) + `"}`
+	if rec := doJSON(t, mux, "POST", "/api/repos", big); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized POST /api/repos: %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
 // A source that can't be cloned surfaces asynchronously: the repo row turns
 // failed with the clone error, deploys against it are refused, and deleting
 // it frees the name for another attempt.
