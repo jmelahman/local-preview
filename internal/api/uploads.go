@@ -10,6 +10,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/build"
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/githuboidc"
+	"github.com/jmelahman/local-preview/internal/store"
 )
 
 // handleUploadFrontend, handleUploadBackend, and handleUploadArtifact publish a
@@ -44,7 +45,15 @@ func (d Deps) handleUpload(w http.ResponseWriter, r *http.Request, side, name st
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	res, err := d.Queue.Upload(r.Context(), repo, ref, side, name, r.Body, overwrite)
+	// Cap the compressed body on the wire; the store's ExtractTar cap bounds the
+	// decompressed expansion (a gzip bomb slips under a wire cap). Both surface
+	// as 413 below so an oversized upload is rejected, never streamed to disk.
+	body := r.Body
+	if d.MaxUploadBytes > 0 {
+		body = http.MaxBytesReader(w, r.Body, d.MaxUploadBytes)
+	}
+	res, err := d.Queue.Upload(r.Context(), repo, ref, side, name, body, overwrite)
+	var maxBytesErr *http.MaxBytesError
 	switch {
 	case errors.Is(err, db.ErrNotFound):
 		httpError(w, http.StatusNotFound, fmt.Sprintf("repo %q is not registered", repo))
@@ -52,6 +61,10 @@ func (d Deps) handleUpload(w http.ResponseWriter, r *http.Request, side, name st
 		httpError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, build.ErrRepoNotReady):
 		httpError(w, http.StatusConflict, err.Error())
+	case errors.As(err, &maxBytesErr):
+		httpError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("upload exceeds the %d-byte limit", d.MaxUploadBytes))
+	case errors.Is(err, store.ErrArchiveTooLarge):
+		httpError(w, http.StatusRequestEntityTooLarge, "upload's decompressed size exceeds the configured limit")
 	case err != nil:
 		// Unresolvable ref, manifest parse error, malformed tar, or a declared
 		// artifact file missing from the upload — all caller-fixable input.

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,6 +168,38 @@ files = ["mycli"]
 			t.Fatalf("%s: got %d, want %d (%s)", tc.name, rec.Code, tc.code, rec.Body)
 		}
 	}
+}
+
+// TestUploadRejectsOversized covers both size caps on the upload path: the wire
+// cap (compressed request body → 413 via MaxBytesReader) and the decompression
+// cap (a small gzip expanding past the store's limit → 413 via
+// store.ErrArchiveTooLarge). Neither may stream to disk.
+func TestUploadRejectsOversized(t *testing.T) {
+	t.Run("oversized request body is 413", func(t *testing.T) {
+		deps, _ := newTestDeps(t)
+		deps.MaxUploadBytes = 10 // any real tar.gz exceeds this on the wire
+		mux := NewMux(deps)
+		registerRepo(t, mux, "demo", newSourceRepo(t))
+		fe := tarGz(t, map[string]string{"index.html": "hello world"})
+		rec := doUpload(t, mux, "/api/repos/demo/uploads/frontend?ref=main", fe)
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("got %d, want 413 (%s)", rec.Code, rec.Body)
+		}
+	})
+
+	t.Run("gzip bomb over the decompression cap is 413", func(t *testing.T) {
+		deps, _ := newTestDeps(t)
+		deps.MaxUploadBytes = 10 << 20      // wire cap far above the compressed body
+		deps.Files.SetMaxExtractBytes(1024) // but the decompressed tree may not exceed 1 KiB
+		mux := NewMux(deps)
+		registerRepo(t, mux, "demo", newSourceRepo(t))
+		// ~64 KiB of highly-compressible content: tiny on the wire, well past the cap decompressed.
+		fe := tarGz(t, map[string]string{"index.html": strings.Repeat("A", 64<<10)})
+		rec := doUpload(t, mux, "/api/repos/demo/uploads/frontend?ref=main", fe)
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("got %d, want 413 (%s)", rec.Code, rec.Body)
+		}
+	})
 }
 
 // fakeVerifier is a stand-in UploadVerifier so the auth tests need no network

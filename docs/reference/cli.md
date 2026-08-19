@@ -19,6 +19,7 @@ Start the orchestrator.
 | `--build-concurrency` | `2` | Number of deploys built in parallel |
 | `--poll-interval` | `1m` | How often watched repos are fetched for new commits (`0` disables watching) |
 | `--github-webhook-secret` | `$PREVIEW_GITHUB_WEBHOOK_SECRET` | Shared secret validating GitHub webhook deliveries (empty disables the endpoint) |
+| `--max-upload-bytes` | `$PREVIEW_MAX_UPLOAD_BYTES` (`2147483648`, 2 GiB) | Maximum bytes a CI [upload](/reference/api#uploads) may stream: the compressed request body is rejected with `413` above it, and extraction aborts if the decompressed tar exceeds it (guards against a gzip bomb filling the disk). Raise it for larger legitimate artifacts; `0` disables both caps |
 | `--sso-github-client-id` | `$PREVIEW_SSO_GITHUB_CLIENT_ID` | GitHub OAuth App client ID; setting it turns on [SSO login](/guide/sso) for the dashboard, API, and previews |
 | `--sso-github-client-secret` | `$PREVIEW_SSO_GITHUB_CLIENT_SECRET` | GitHub OAuth App client secret |
 | `--sso-callback-url` | `$PREVIEW_SSO_CALLBACK_URL` | Public OAuth callback URL; must match the OAuth App exactly |

@@ -37,6 +37,11 @@ type Store struct {
 	// authoritative (today's single-node default); non-nil makes local disk a
 	// cache that Hydrate refills and EvictCacheToWatermark reclaims.
 	tier ArtifactTier
+	// maxExtractBytes caps the decompressed size ExtractTar writes before
+	// aborting with ErrArchiveTooLarge — the ceiling on an untrusted upload's
+	// (or a hydrated object's) expansion. 0 disables the cap. Set via
+	// SetMaxExtractBytes.
+	maxExtractBytes int64
 	// sf deduplicates concurrent hydrations of the same content-address.
 	sf singleflight.Group
 
@@ -74,6 +79,21 @@ func New(artifactsDir, stateDir, tmpDir string) *Store {
 		accessed:     map[string]time.Time{},
 		sizeCache:    map[string]sizeCacheEntry{},
 	}
+}
+
+// SetMaxExtractBytes sets the cap ExtractTar applies to the decompressed size
+// of an extracted tar (0 disables it). It backs both the upload and hydrate
+// paths, so a single knob bounds every extraction this Store performs.
+func (s *Store) SetMaxExtractBytes(n int64) {
+	s.maxExtractBytes = n
+}
+
+// ExtractTar extracts a tar(.gz) stream into destDir under this Store's
+// configured decompression cap (see SetMaxExtractBytes). It is the entry point
+// upload and hydrate use so both honor the same ceiling; the package-level
+// ExtractTar takes an explicit cap for callers that manage their own.
+func (s *Store) ExtractTar(r io.Reader, destDir string) error {
+	return ExtractTar(r, destDir, s.maxExtractBytes)
 }
 
 // FrontendDir returns the artifact path for a frontend hash.

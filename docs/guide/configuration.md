@@ -91,6 +91,7 @@ for lookup order and caching semantics.
 | `--poll-interval` | `1m` | How often [watched repos](/guide/triggers#watched-repos) are fetched for new commits (`0` disables watching) |
 | `--github-webhook-secret` | (unset) | Shared secret validating [GitHub webhook](/guide/triggers#github-webhooks) deliveries; empty disables the endpoint. Prefer the environment variable — flags are visible in `ps` |
 | `--github-oidc-audience` | (unset) | Expected `aud` of [GitHub Actions OIDC](/guide/uploads#authenticating-with-github-actions-oidc) tokens. Setting it **requires uploads to authenticate**; use a value unique to this server (its URL is a good choice) |
+| `--max-upload-bytes` | `2147483648` (2 GiB) | Maximum bytes a CI [upload](/guide/uploads) may stream: the compressed request body is rejected with `413` above it, and extraction aborts if the decompressed tar exceeds it — a bound on an untrusted client's disk use and the guard against a gzip bomb. Raise it for larger artifacts; `0` disables both caps |
 | `--github-oidc-issuer` | `https://token.actions.githubusercontent.com` | OIDC issuer; override only for GitHub Enterprise Server |
 | `--sso-github-client-id` | (unset) | GitHub OAuth App client ID. Setting it turns on [SSO login](/guide/sso) for the dashboard, API, and previews |
 | `--sso-github-client-secret` | (unset) | GitHub OAuth App client secret. Prefer the environment variable — flags are visible in `ps` |
@@ -116,6 +117,7 @@ for lookup order and caching semantics.
 | `PREVIEW_DOMAIN` | `preview serve` | Preview base domain (an explicit `--preview-domain` flag wins) |
 | `PREVIEW_BASE_URL` | `preview serve` | Public base URL of previews (an explicit `--preview-base-url` flag wins). Not to be confused with `PREVIEW_URL`, which is a client setting |
 | `PREVIEW_GITHUB_WEBHOOK_SECRET` | `preview serve` | GitHub webhook shared secret (an explicit `--github-webhook-secret` flag wins) |
+| `PREVIEW_MAX_UPLOAD_BYTES` | `preview serve` | Maximum bytes a CI upload may stream, both compressed on the wire and decompressed on disk (an explicit `--max-upload-bytes` flag wins). Defaults to 2 GiB; `0` disables both caps |
 | `PREVIEW_GITHUB_OIDC_AUDIENCE` | `preview serve`, `preview upload` | The OIDC audience: on the server it's the expected `aud` (an explicit `--github-oidc-audience` flag wins); on the client it's the audience requested for the token when `--oidc-audience` is unset |
 | `PREVIEW_GITHUB_OIDC_ISSUER` | `preview serve` | OIDC issuer override for GitHub Enterprise Server (an explicit `--github-oidc-issuer` flag wins) |
 | `PREVIEW_UPLOAD_TOKEN` | `preview upload` | A pre-fetched bearer token sent as-is; wins over `--oidc` and needs no runner |

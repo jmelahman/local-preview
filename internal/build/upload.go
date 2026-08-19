@@ -146,7 +146,7 @@ func (q *Queue) stageUpload(body io.Reader) (string, func(), error) {
 	if err != nil {
 		return "", nil, err
 	}
-	if err := store.ExtractTar(body, dir); err != nil {
+	if err := q.files.ExtractTar(body, dir); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("extract upload: %w", err)
 	}

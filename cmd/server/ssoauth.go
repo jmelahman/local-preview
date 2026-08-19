@@ -35,6 +35,22 @@ func envDefaultInt64(p *int64, key string) {
 	}
 }
 
+// envOverrideInt64 applies key from the environment to *p only while *p still
+// holds def (the flag's compiled-in default). This gives a non-zero-default
+// flag a $PREVIEW_* fallback while letting an explicit flag — including an
+// explicit 0 that disables the limit — win over the environment. A malformed
+// value is ignored.
+func envOverrideInt64(p *int64, key string, def int64) {
+	if *p != def {
+		return
+	}
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			*p = n
+		}
+	}
+}
+
 // buildSSO validates the SSO flags and constructs the provider, deriving the
 // dashboard origin and cookie-security flag from the callback URL. It fails
 // closed: any missing secret, callback URL, or allowlist is an error rather

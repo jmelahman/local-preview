@@ -70,6 +70,11 @@ type Deps struct {
 	// claim matches the target repo's source; nil leaves uploads
 	// unauthenticated (the default, matching the rest of the API).
 	UploadAuth UploadVerifier
+	// MaxUploadBytes caps the compressed request body an upload may stream
+	// before the server rejects it with 413, bounding the bytes an untrusted
+	// (auth-exempt by default) client can push before extraction. 0 disables
+	// the wire cap; the store's decompression cap still bounds expansion.
+	MaxUploadBytes int64
 	// SSO authenticates interactive dashboard logins (browser session cookie)
 	// and programmatic callers (GitHub personal-access token as a bearer),
 	// both against one allowlist. nil disables authentication entirely — the

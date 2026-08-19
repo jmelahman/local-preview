@@ -106,6 +106,7 @@ type serveOptions struct {
 	s3UseSSL         bool
 
 	cacheMaxArtifactBytes int64
+	maxUploadBytes        int64
 
 	role            string
 	workerSecret    string
@@ -157,6 +158,7 @@ func Root() *cobra.Command {
 	serve.Flags().StringVar(&opts.s3SecretKey, "s3-secret-key", "", "Secret key for the artifact tier (default: $PREVIEW_S3_SECRET_KEY; must be set together with --s3-access-key)")
 	serve.Flags().BoolVar(&opts.s3UseSSL, "s3-use-ssl", true, "Use TLS for the artifact-tier endpoint (set false for local MinIO over http)")
 	serve.Flags().Int64Var(&opts.cacheMaxArtifactBytes, "cache-max-artifact-bytes", 0, "Soft cap on resident (local-disk) artifact bytes; the coldest artifacts are swept back to the durable tier above it. Requires the artifact tier; 0 disables cache eviction and keeps every artifact resident (default: $PREVIEW_CACHE_MAX_ARTIFACT_BYTES)")
+	serve.Flags().Int64Var(&opts.maxUploadBytes, "max-upload-bytes", defaultMaxUploadBytes, "Maximum bytes a CI upload may stream: the compressed request body is rejected with 413 above it, and extraction aborts if the decompressed tar exceeds it (guards against a gzip bomb filling the disk). Raise it for larger legitimate artifacts; 0 disables both caps (default: $PREVIEW_MAX_UPLOAD_BYTES)")
 	serve.Flags().StringVar(&opts.role, "role", "all", "Serving role: 'all' (single node — API, dashboard, proxy, and local process supervision), 'control' (route previews to a worker tier), or 'worker' (supervise processes on behalf of a control node)")
 	serve.Flags().StringVar(&opts.workerSecret, "worker-secret", "", "Shared secret authenticating the internal worker API in both directions (default: $PREVIEW_WORKER_SECRET)")
 	serve.Flags().StringVar(&opts.workerListen, "worker-listen", "", "Private address to expose the internal worker API on, e.g. :9100 — MUST NOT be internet/ALB-reachable; empty disables it (roles 'worker'/'all')")
@@ -208,6 +210,7 @@ func run(opts serveOptions) error {
 	envDefault(&opts.s3AccessKey, "PREVIEW_S3_ACCESS_KEY")
 	envDefault(&opts.s3SecretKey, "PREVIEW_S3_SECRET_KEY")
 	envDefaultInt64(&opts.cacheMaxArtifactBytes, "PREVIEW_CACHE_MAX_ARTIFACT_BYTES")
+	envOverrideInt64(&opts.maxUploadBytes, "PREVIEW_MAX_UPLOAD_BYTES", defaultMaxUploadBytes)
 	envDefault(&opts.workerSecret, "PREVIEW_WORKER_SECRET")
 	envDefault(&opts.workerEndpoint, "PREVIEW_WORKER_ENDPOINT")
 	envDefault(&opts.workerEndpoints, "PREVIEW_WORKER_ENDPOINTS")
@@ -259,6 +262,9 @@ func run(opts serveOptions) error {
 	defer database.Close()
 
 	files := store.New(cfg.ArtifactsDir(), cfg.StateDir(), cfg.TmpDir())
+	// Bound tar expansion for every extraction this Store performs — upload and
+	// durable-tier hydrate alike — so a gzip bomb can't fill the disk.
+	files.SetMaxExtractBytes(opts.maxUploadBytes)
 	if err := files.SweepTmp(24 * time.Hour); err != nil {
 		log.Printf("sweep tmp: %v", err)
 	}
@@ -337,6 +343,7 @@ func run(opts serveOptions) error {
 		DBPath:              dbPath,
 		GitHubWebhookSecret: opts.githubSecret,
 		UploadAuth:          uploadAuth,
+		MaxUploadBytes:      opts.maxUploadBytes,
 		SSO:                 sso,
 		DashboardOrigin:     dashboardOrigin,
 		CookiesSecure:       cookiesSecure,
@@ -505,6 +512,13 @@ func startCacheSweeper(ctx context.Context, files *store.Store, super *supervise
 // reconcileInterval is how often the durable tier is reconciled against the
 // live deploy set after the initial startup pass.
 const reconcileInterval = time.Hour
+
+// defaultMaxUploadBytes bounds a CI upload's compressed body and its
+// decompressed expansion out of the box, so an unauthenticated (auth-exempt by
+// default) client can't stream an unbounded tar or a gzip bomb to disk. It is
+// generous enough for real frontend/backend/artifact tars; deployments with
+// larger legitimate artifacts raise --max-upload-bytes.
+const defaultMaxUploadBytes int64 = 2 << 30 // 2 GiB
 
 // startReconciler runs an initial reconcile pass, then repeats it on an
 // interval. Returns immediately; the loop stops when ctx is cancelled. A gap

@@ -421,6 +421,12 @@ the `dist` tree (or the built `path` tree for a process-mode frontend) for
 `frontend`, the built `backend.path` tree for `backend`, and the artifact's
 declared `files` at their `path`-relative locations for an artifact.
 
+The body is size-capped: an upload streaming more than `--max-upload-bytes`
+(default 2 GiB) of compressed body is rejected with `413`, and extraction aborts
+with `413` if the decompressed tar exceeds the same cap — a gzip bomb is stopped
+before it fills the disk. Raise the limit for larger artifacts (see
+[configuration](/guide/configuration#flags)).
+
 | Query param | Meaning |
 | --- | --- |
 | `ref` | Required — the branch, tag, or (abbreviated) sha to resolve and hash |
@@ -451,6 +457,7 @@ An artifact upload additionally echoes the published files:
 
 Errors: `404` for an unknown repo or an artifact name the manifest doesn't
 declare; `409` if the repo isn't `ready` (still cloning, or its clone failed);
+`413` if the request body or its decompressed size exceeds `--max-upload-bytes`;
 `400` for a missing/unresolvable `ref`, a manifest error, a malformed tar, or a
 tar missing a declared artifact file.
 
