@@ -153,12 +153,12 @@ func (q *Queue) stagePayloadUpload(body io.Reader) (string, func(), error) {
 	return q.stage(body, q.files.ExtractTarPayload)
 }
 
-func (q *Queue) stage(body io.Reader, extract func(io.Reader, string) error) (string, func(), error) {
+func (q *Queue) stage(body io.Reader, extract func(io.Reader, string) (int64, error)) (string, func(), error) {
 	dir, cleanup, err := q.files.NewScratchDir("upload")
 	if err != nil {
 		return "", nil, err
 	}
-	if err := extract(body, dir); err != nil {
+	if _, err := extract(body, dir); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("extract upload: %w", err)
 	}

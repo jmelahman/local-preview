@@ -55,12 +55,12 @@ func (m *memTier) putDir(t *testing.T, repo, side, hash, dir string) {
 
 func (m *memTier) Save(_ context.Context, repo, side, hash, srcDir string) error { return nil }
 
-func (m *memTier) Open(_ context.Context, repo, side, hash string) (io.ReadCloser, bool, error) {
+func (m *memTier) Open(_ context.Context, repo, side, hash string) (io.ReadCloser, int64, bool, error) {
 	b, ok := m.blobs[mkey(repo, side, hash)]
 	if !ok {
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
-	return io.NopCloser(bytes.NewReader(b)), true, nil
+	return io.NopCloser(bytes.NewReader(b)), 0, true, nil
 }
 
 // A static frontend whose local files were swept by the cache sweeper (but whose

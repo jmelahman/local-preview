@@ -92,13 +92,13 @@ func (s *Store) SetMaxExtractBytes(n int64) {
 // configured decompression cap (see SetMaxExtractBytes). It is the entry point
 // upload and hydrate use so both honor the same ceiling; the package-level
 // ExtractTar takes an explicit cap for callers that manage their own.
-func (s *Store) ExtractTar(r io.Reader, destDir string) error {
+func (s *Store) ExtractTar(r io.Reader, destDir string) (int64, error) {
 	return ExtractTar(r, destDir, s.maxExtractBytes)
 }
 
 // ExtractTarPayload is ExtractTar under the payload symlink policy — backend
 // artifact trees only. See the package-level ExtractTarPayload for why.
-func (s *Store) ExtractTarPayload(r io.Reader, destDir string) error {
+func (s *Store) ExtractTarPayload(r io.Reader, destDir string) (int64, error) {
 	return ExtractTarPayload(r, destDir, s.maxExtractBytes)
 }
 

@@ -62,7 +62,7 @@ func TestSaveOpenRoundTrip(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	rc, found, err := tier.Open(ctx, "demo", "fe", "roundtriphash")
+	rc, _, found, err := tier.Open(ctx, "demo", "fe", "roundtriphash")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestSaveOpenRoundTrip(t *testing.T) {
 
 func TestOpenMissingReturnsNotFound(t *testing.T) {
 	tier := newTestTier(t)
-	rc, found, err := tier.Open(context.Background(), "demo", "fe", "definitelymissing")
+	rc, _, found, err := tier.Open(context.Background(), "demo", "fe", "definitelymissing")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

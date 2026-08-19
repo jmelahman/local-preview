@@ -250,54 +250,46 @@ func (t *Tier) Delete(ctx context.Context, repo, side, hash string) error {
 }
 
 // Open returns a reader over the artifact's decompressed tar bytes, or
-// found=false (not an error) when the object is absent. The returned
-// ReadCloser's Close verifies the decompressed length matches the size
-// recorded at Save time — a mismatch is returned as an error so the caller
-// discards the extraction and rebuilds. The caller is responsible for the
-// hardened filesystem extraction of the tar stream.
-func (t *Tier) Open(ctx context.Context, repo, side, hash string) (io.ReadCloser, bool, error) {
+// found=false (not an error) when the object is absent. want is the
+// regular-file content byte count recorded at Save time (0 for an object
+// predating the metadata): the *caller* verifies it against what extraction
+// wrote, because only the extractor counts the same quantity Save's tar
+// writer did — an earlier version compared the raw decompressed stream length
+// (headers and padding included) against content bytes and failed every
+// large-artifact hydrate. The caller is responsible for the hardened
+// filesystem extraction of the tar stream.
+func (t *Tier) Open(ctx context.Context, repo, side, hash string) (io.ReadCloser, int64, bool, error) {
 	key := t.key(repo, side, hash)
 	info, err := t.client.StatObject(ctx, t.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		if isNotFound(err) {
-			return nil, false, nil
+			return nil, 0, false, nil
 		}
-		return nil, false, fmt.Errorf("s3 tier: stat %s: %w", key, err)
+		return nil, 0, false, fmt.Errorf("s3 tier: stat %s: %w", key, err)
 	}
 	obj, err := t.client.GetObject(ctx, t.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, false, fmt.Errorf("s3 tier: get %s: %w", key, err)
+		return nil, 0, false, fmt.Errorf("s3 tier: get %s: %w", key, err)
 	}
 	zr, err := zstd.NewReader(obj)
 	if err != nil {
 		obj.Close()
-		return nil, false, fmt.Errorf("s3 tier: zstd %s: %w", key, err)
+		return nil, 0, false, fmt.Errorf("s3 tier: zstd %s: %w", key, err)
 	}
-	return &verifyReadCloser{zr: zr, obj: obj, want: metaInt(info.UserMetadata, metaUncompressedSize)}, true, nil
+	return &tierReadCloser{zr: zr, obj: obj}, metaInt(info.UserMetadata, metaUncompressedSize), true, nil
 }
 
-// verifyReadCloser exposes the decompressed tar stream and, on Close, checks
-// that the number of bytes read matches the expected uncompressed size.
-type verifyReadCloser struct {
-	zr   *zstd.Decoder
-	obj  *minio.Object
-	want int64
-	read int64
+// tierReadCloser exposes the decompressed tar stream and closes both layers.
+type tierReadCloser struct {
+	zr  *zstd.Decoder
+	obj *minio.Object
 }
 
-func (v *verifyReadCloser) Read(p []byte) (int, error) {
-	n, err := v.zr.Read(p)
-	v.read += int64(n)
-	return n, err
-}
+func (v *tierReadCloser) Read(p []byte) (int, error) { return v.zr.Read(p) }
 
-func (v *verifyReadCloser) Close() error {
+func (v *tierReadCloser) Close() error {
 	v.zr.Close()
-	err := v.obj.Close()
-	if v.want > 0 && v.read != v.want {
-		return fmt.Errorf("s3 tier: integrity check failed: decompressed %d bytes, expected %d", v.read, v.want)
-	}
-	return err
+	return v.obj.Close()
 }
 
 // isNotFound reports whether err is S3's "no such key" (a genuinely absent

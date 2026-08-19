@@ -91,14 +91,14 @@ func (f *fakeTier) Save(_ context.Context, repo, side, hash, srcDir string) erro
 	return err
 }
 
-func (f *fakeTier) Open(_ context.Context, repo, side, hash string) (io.ReadCloser, bool, error) {
+func (f *fakeTier) Open(_ context.Context, repo, side, hash string) (io.ReadCloser, int64, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	b, ok := f.blobs[fkey(repo, side, hash)]
 	if !ok {
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
-	return io.NopCloser(bytes.NewReader(b)), true, nil
+	return io.NopCloser(bytes.NewReader(b)), 0, true, nil
 }
 
 func (f *fakeTier) has(repo, side, hash string) bool {

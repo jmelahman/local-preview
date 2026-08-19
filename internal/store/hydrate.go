@@ -34,8 +34,12 @@ type ArtifactTier interface {
 	// idempotently.
 	Save(ctx context.Context, repo, side, hash, srcDir string) error
 	// Open returns a reader over the artifact's decompressed tar bytes, or
-	// found=false when absent. Close verifies integrity.
-	Open(ctx context.Context, repo, side, hash string) (rc io.ReadCloser, found bool, err error)
+	// found=false when absent. want is the regular-file content byte count
+	// recorded at Save time (0 when the object predates the metadata): the
+	// caller compares it against what extraction actually wrote — the two
+	// sides of the integrity check counting the same quantity. Close reports
+	// transport/decompression errors.
+	Open(ctx context.Context, repo, side, hash string) (rc io.ReadCloser, want int64, found bool, err error)
 }
 
 // SetArtifactTier attaches the durable tier. nil (the default) leaves local
@@ -85,7 +89,7 @@ func (s *Store) Hydrate(ctx context.Context, repo, side, hash string) error {
 		if s.hasSide(repo, side, hash) {
 			return nil, nil
 		}
-		rc, found, err := s.tier.Open(fctx, repo, side, hash)
+		rc, want, found, err := s.tier.Open(fctx, repo, side, hash)
 		if err != nil {
 			return nil, fmt.Errorf("hydrate %s %s/%s: open: %w", repo, side, hash, err)
 		}
@@ -101,21 +105,25 @@ func (s *Store) Hydrate(ctx context.Context, repo, side, hash string) error {
 		// Backend trees are executed payloads whose symlinks may legitimately
 		// point outside the tree (resolved inside their run container); every
 		// other side keeps the strict policy. See ExtractTarPayload.
+		var extracted int64
 		var extractErr error
 		if side == "be" {
-			extractErr = s.ExtractTarPayload(rc, dir)
+			extracted, extractErr = s.ExtractTarPayload(rc, dir)
 		} else {
-			extractErr = s.ExtractTar(rc, dir)
+			extracted, extractErr = s.ExtractTar(rc, dir)
 		}
-		// Close both releases the connection and verifies the decompressed
-		// length against the size recorded at Save time — a truncated object
-		// must never land under a content-addressed key.
 		closeErr := rc.Close()
 		if extractErr != nil {
 			return nil, fmt.Errorf("hydrate %s %s/%s: extract: %w", repo, side, hash, extractErr)
 		}
 		if closeErr != nil {
-			return nil, fmt.Errorf("hydrate %s %s/%s: verify: %w", repo, side, hash, closeErr)
+			return nil, fmt.Errorf("hydrate %s %s/%s: close: %w", repo, side, hash, closeErr)
+		}
+		// Integrity: the content bytes extraction wrote must equal what Save
+		// recorded — a truncated object must never publish under a
+		// content-addressed key, where skip-if-exists would make it permanent.
+		if want > 0 && extracted != want {
+			return nil, fmt.Errorf("hydrate %s %s/%s: integrity check failed: extracted %d content bytes, expected %d", repo, side, hash, extracted, want)
 		}
 		if err := s.publishSide(repo, side, hash, dir); err != nil {
 			return nil, fmt.Errorf("hydrate %s %s/%s: publish: %w", repo, side, hash, err)

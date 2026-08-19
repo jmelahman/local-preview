@@ -56,7 +56,7 @@ func TestExtractTarRejectsUnsafeArchives(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dst := t.TempDir()
-			err := ExtractTar(bytes.NewReader(rawTar(tc.entries)), dst, 0)
+			_, err := ExtractTar(bytes.NewReader(rawTar(tc.entries)), dst, 0)
 			if tc.wantErr != (err != nil) {
 				t.Fatalf("ExtractTar err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -78,7 +78,7 @@ func TestExtractTarPayloadSymlinkPolicy(t *testing.T) {
 		{name: ".venv/bin/python", link: "/opt/uv/python/bin/python3"},
 		{name: "rel-escape", link: "../outside"},
 	}
-	if err := ExtractTarPayload(bytes.NewReader(rawTar(entries)), dst, 0); err != nil {
+	if _, err := ExtractTarPayload(bytes.NewReader(rawTar(entries)), dst, 0); err != nil {
 		t.Fatalf("payload extract: %v", err)
 	}
 	got, err := os.Readlink(filepath.Join(dst, ".venv/bin/python"))
@@ -87,7 +87,7 @@ func TestExtractTarPayloadSymlinkPolicy(t *testing.T) {
 	}
 
 	// Entry-name escapes stay rejected even under the payload policy.
-	if err := ExtractTarPayload(bytes.NewReader(rawTar([]tarEntry{{name: "../evil", body: "x"}})), t.TempDir(), 0); err == nil {
+	if _, err := ExtractTarPayload(bytes.NewReader(rawTar([]tarEntry{{name: "../evil", body: "x"}})), t.TempDir(), 0); err == nil {
 		t.Fatal("payload extract accepted an escaping entry name")
 	}
 
@@ -96,12 +96,12 @@ func TestExtractTarPayloadSymlinkPolicy(t *testing.T) {
 	tw := tar.NewWriter(&buf)
 	tw.WriteHeader(&tar.Header{Name: "hard", Typeflag: tar.TypeLink, Linkname: "../../etc/passwd", Mode: 0o644})
 	tw.Close()
-	if err := ExtractTarPayload(bytes.NewReader(buf.Bytes()), t.TempDir(), 0); err == nil {
+	if _, err := ExtractTarPayload(bytes.NewReader(buf.Bytes()), t.TempDir(), 0); err == nil {
 		t.Fatal("payload extract accepted an escaping hardlink")
 	}
 
 	// And the strict extractor still refuses what the payload one allows.
-	if err := ExtractTar(bytes.NewReader(rawTar(entries)), t.TempDir(), 0); err == nil {
+	if _, err := ExtractTar(bytes.NewReader(rawTar(entries)), t.TempDir(), 0); err == nil {
 		t.Fatal("strict extract accepted an absolute symlink")
 	}
 }
@@ -128,7 +128,7 @@ func TestExtractTarEnforcesDecompressionCap(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dst := t.TempDir()
-			err := ExtractTar(bytes.NewReader(rawTar(entries)), dst, tc.max)
+			_, err := ExtractTar(bytes.NewReader(rawTar(entries)), dst, tc.max)
 			if tc.wantErr {
 				if !errors.Is(err, ErrArchiveTooLarge) {
 					t.Fatalf("ExtractTar err = %v, want ErrArchiveTooLarge", err)
@@ -159,7 +159,7 @@ func TestExtractTarStopsGzipBomb(t *testing.T) {
 		t.Fatalf("compressed bomb is %d bytes; expected it to compress well under the cap", gzBuf.Len())
 	}
 	dst := t.TempDir()
-	if err := ExtractTar(bytes.NewReader(gzBuf.Bytes()), dst, 1<<20); !errors.Is(err, ErrArchiveTooLarge) {
+	if _, err := ExtractTar(bytes.NewReader(gzBuf.Bytes()), dst, 1<<20); !errors.Is(err, ErrArchiveTooLarge) {
 		t.Fatalf("ExtractTar err = %v, want ErrArchiveTooLarge", err)
 	}
 }
@@ -176,7 +176,7 @@ func (zeroReader) Read(p []byte) (int, error) {
 // ExtractTar accepts raw (uncompressed) tar as well as gzip.
 func TestExtractTarAcceptsRawTar(t *testing.T) {
 	dst := t.TempDir()
-	if err := ExtractTar(bytes.NewReader(rawTar([]tarEntry{{name: "f.txt", body: "raw"}})), dst, 0); err != nil {
+	if _, err := ExtractTar(bytes.NewReader(rawTar([]tarEntry{{name: "f.txt", body: "raw"}})), dst, 0); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(dst, "f.txt"))

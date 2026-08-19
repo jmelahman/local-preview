@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -65,7 +66,8 @@ func tarDirRaw(t *testing.T, srcDir string) []byte {
 type fakeTier struct {
 	mu    sync.Mutex
 	blobs map[string][]byte
-	opens int32 // count of Open calls, to observe singleflight dedup
+	wants map[string]int64 // per-key expected content bytes (0 = unchecked)
+	opens int32            // count of Open calls, to observe singleflight dedup
 }
 
 func fkey(repo, side, hash string) string { return repo + "/" + side + "/" + hash }
@@ -83,15 +85,15 @@ func (f *fakeTier) Save(_ context.Context, repo, side, hash, srcDir string) erro
 	return nil
 }
 
-func (f *fakeTier) Open(_ context.Context, repo, side, hash string) (io.ReadCloser, bool, error) {
+func (f *fakeTier) Open(_ context.Context, repo, side, hash string) (io.ReadCloser, int64, bool, error) {
 	atomic.AddInt32(&f.opens, 1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	b, ok := f.blobs[fkey(repo, side, hash)]
 	if !ok {
-		return nil, false, nil
+		return nil, 0, false, nil
 	}
-	return io.NopCloser(bytes.NewReader(b)), true, nil
+	return io.NopCloser(bytes.NewReader(b)), f.wants[fkey(repo, side, hash)], true, nil
 }
 
 func newStore(t *testing.T) *Store {
@@ -109,6 +111,37 @@ func writeTree(t *testing.T, dir string, files map[string]string) {
 		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// The integrity check compares like with like: the tier's recorded size and
+// the extractor's count are both regular-file content bytes — tar headers and
+// padding must not enter the comparison (they once did, failing every
+// large-artifact hydrate), and a genuine content mismatch must refuse to
+// publish.
+func TestHydrateVerifiesContentBytes(t *testing.T) {
+	src := t.TempDir()
+	writeTree(t, src, map[string]string{"index.html": "hello", "assets/app.js": "x"})
+	blob := tarDirRaw(t, src)
+
+	s := newStore(t)
+	tier := &fakeTier{wants: map[string]int64{fkey("demo", "fe", "good"): 6}} // "hello" + "x"
+	s.SetArtifactTier(tier)
+	tier.put("demo", "fe", "good", blob)
+	if err := s.Hydrate(context.Background(), "demo", "fe", "good"); err != nil {
+		t.Fatalf("hydrate with exact content-byte size: %v", err)
+	}
+
+	s2 := newStore(t)
+	tier2 := &fakeTier{wants: map[string]int64{fkey("demo", "fe", "bad"): 999}}
+	s2.SetArtifactTier(tier2)
+	tier2.put("demo", "fe", "bad", blob)
+	err := s2.Hydrate(context.Background(), "demo", "fe", "bad")
+	if err == nil || !strings.Contains(err.Error(), "integrity check failed") {
+		t.Fatalf("hydrate with wrong size = %v, want integrity failure", err)
+	}
+	if s2.HasFrontend("demo", "bad") {
+		t.Fatal("a failed integrity check must not publish")
 	}
 }
 
@@ -178,16 +211,16 @@ type gatedTier struct {
 
 func (g *gatedTier) Save(context.Context, string, string, string, string) error { return nil }
 
-func (g *gatedTier) Open(ctx context.Context, _, _, _ string) (io.ReadCloser, bool, error) {
+func (g *gatedTier) Open(ctx context.Context, _, _, _ string) (io.ReadCloser, int64, bool, error) {
 	select {
 	case g.opened <- struct{}{}:
 	default:
 	}
 	select {
 	case <-g.release:
-		return io.NopCloser(bytes.NewReader(g.blob)), true, nil
+		return io.NopCloser(bytes.NewReader(g.blob)), 0, true, nil
 	case <-ctx.Done():
-		return nil, false, ctx.Err()
+		return nil, 0, false, ctx.Err()
 	}
 }
 

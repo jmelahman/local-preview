@@ -33,7 +33,10 @@ var ErrArchiveTooLarge = errors.New("archive exceeds decompression cap")
 // It backs both CI uploads (internal/build) and durable-tier hydration, so it
 // lives here in store — the one package both callers already import — and is
 // the single hardened extractor neither may duplicate.
-func ExtractTar(r io.Reader, destDir string, maxBytes int64) error {
+// Both extractors return the number of regular-file content bytes written —
+// the same quantity the durable tier records at Save time, so hydration can
+// verify integrity by comparing like with like.
+func ExtractTar(r io.Reader, destDir string, maxBytes int64) (int64, error) {
 	return extractTar(r, destDir, maxBytes, false)
 }
 
@@ -56,17 +59,17 @@ func ExtractTar(r io.Reader, destDir string, maxBytes int64) error {
 // confined to destDir, and hardlinks stay strict on every path — os.Link
 // resolves host-side at extract time, so an out-of-root hardlink would BE the
 // host file.
-func ExtractTarPayload(r io.Reader, destDir string, maxBytes int64) error {
+func ExtractTarPayload(r io.Reader, destDir string, maxBytes int64) (int64, error) {
 	return extractTar(r, destDir, maxBytes, true)
 }
 
-func extractTar(r io.Reader, destDir string, maxBytes int64, payloadLinks bool) error {
+func extractTar(r io.Reader, destDir string, maxBytes int64, payloadLinks bool) (int64, error) {
 	br := bufio.NewReader(r)
 	// Sniff the gzip magic so raw .tar and .tar.gz both work.
 	if magic, err := br.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
 		gz, err := gzip.NewReader(br)
 		if err != nil {
-			return fmt.Errorf("gzip: %w", err)
+			return 0, fmt.Errorf("gzip: %w", err)
 		}
 		defer gz.Close()
 		return extractTarStream(gz, destDir, maxBytes, payloadLinks)
@@ -74,10 +77,10 @@ func extractTar(r io.Reader, destDir string, maxBytes int64, payloadLinks bool) 
 	return extractTarStream(br, destDir, maxBytes, payloadLinks)
 }
 
-func extractTarStream(r io.Reader, destDir string, maxBytes int64, payloadLinks bool) error {
+func extractTarStream(r io.Reader, destDir string, maxBytes int64, payloadLinks bool) (int64, error) {
 	root, err := filepath.Abs(destDir)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	tr := tar.NewReader(r)
 	seen := false
@@ -88,25 +91,25 @@ func extractTarStream(r io.Reader, destDir string, maxBytes int64, payloadLinks 
 			break
 		}
 		if err != nil {
-			return err
+			return total, err
 		}
 		target, err := safeJoin(root, hdr.Name)
 		if err != nil {
-			return err
+			return total, err
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
+				return total, err
 			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
+				return total, err
 			}
 			n, err := writeFileFrom(tr, target, hdr.FileInfo().Mode().Perm(), maxBytes, total)
 			total += n
 			if err != nil {
-				return err
+				return total, err
 			}
 			seen = true
 		case tar.TypeSymlink, tar.TypeLink:
@@ -120,20 +123,20 @@ func extractTarStream(r io.Reader, destDir string, maxBytes int64, payloadLinks 
 			payloadSymlink := payloadLinks && hdr.Typeflag == tar.TypeSymlink
 			if !payloadSymlink {
 				if filepath.IsAbs(hdr.Linkname) || strings.HasPrefix(hdr.Linkname, "/") {
-					return fmt.Errorf("absolute link target %q in archive", hdr.Name)
+					return total, fmt.Errorf("absolute link target %q in archive", hdr.Name)
 				}
 			}
 			var resolved string
 			if hdr.Typeflag == tar.TypeSymlink {
 				resolved = filepath.Join(filepath.Dir(target), filepath.FromSlash(hdr.Linkname))
 			} else if resolved, err = safeJoin(root, hdr.Linkname); err != nil {
-				return err
+				return total, err
 			}
 			if !payloadSymlink && !withinRoot(root, resolved) {
-				return fmt.Errorf("unsafe link target %q in archive", hdr.Name)
+				return total, fmt.Errorf("unsafe link target %q in archive", hdr.Name)
 			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
+				return total, err
 			}
 			os.Remove(target) // tolerate a re-extraction over an existing entry
 			if hdr.Typeflag == tar.TypeSymlink {
@@ -142,7 +145,7 @@ func extractTarStream(r io.Reader, destDir string, maxBytes int64, payloadLinks 
 				err = os.Link(resolved, target)
 			}
 			if err != nil {
-				return err
+				return total, err
 			}
 			seen = true
 		default:
@@ -150,9 +153,9 @@ func extractTarStream(r io.Reader, destDir string, maxBytes int64, payloadLinks 
 		}
 	}
 	if !seen {
-		return fmt.Errorf("archive contained no files")
+		return total, fmt.Errorf("archive contained no files")
 	}
-	return nil
+	return total, nil
 }
 
 // safeJoin joins a tar entry name onto root, rejecting absolute paths and ".."
