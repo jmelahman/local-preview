@@ -362,7 +362,9 @@ func (o *Orchestrator) Close() error {
 // subdomain (<sha>-<repo>.<domain>) are served by the orchestrator;
 // everything else falls through to next.
 func (o *Orchestrator) WrapHost(next http.Handler) http.Handler {
-	return proxy.New(o.database, o.files, supervise.LocalBackends{M: o.super}, o.opts.PreviewDomain, next)
+	rt := proxy.New(o.database, o.files, supervise.LocalBackends{M: o.super}, o.opts.PreviewDomain, next)
+	rt.SetRunLogs(o.super)
+	return rt
 }
 
 // RegisterRepo registers a repository (mirror clone of source, a local path

@@ -466,6 +466,9 @@ func run(opts serveOptions) error {
 	}
 	apex := api.AuthMiddleware(deps, api.NewMux(deps))
 	router := proxy.New(database, files, backends, cfg.Preview.Domain, apex)
+	// Interim "starting" pages stream the run log from wherever the process
+	// runs — the local manager, or the fleet view on a control node.
+	router.SetRunLogs(runtime)
 	if sso != nil {
 		router.SetPreviewAuth(true, dashboardOrigin, cookiesSecure)
 		startSessionGC(workCtx, database)

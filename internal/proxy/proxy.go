@@ -39,8 +39,8 @@ import (
 // background either way.
 const coldStartWait = 1500 * time.Millisecond
 
-// cacheTTL bounds staleness of the routing cache; preview status pages
-// refresh on the same order, so transitions surface promptly.
+// cacheTTL bounds staleness of the routing cache; interim status pages poll
+// on the same order, so transitions surface promptly.
 const cacheTTL = 2 * time.Second
 
 // previewSessionTTL is how long a preview-access session lasts before the
@@ -82,6 +82,10 @@ type Router struct {
 	authEnabled bool
 	authBaseURL string
 	authSecure  bool
+
+	// runLogs, when set, lets the interim "starting" pages stream the
+	// process's run log while it boots. See SetRunLogs.
+	runLogs RunLogs
 
 	mu    sync.Mutex
 	cache map[string]cacheEntry
@@ -390,8 +394,10 @@ func (rt *Router) servePreview(w http.ResponseWriter, r *http.Request, e cacheEn
 	repoName := e.repoName
 	switch d.Status {
 	case db.DeployQueued, db.DeployBuilding:
-		rt.refreshPage(w, r, http.StatusServiceUnavailable, "Building preview…",
-			fmt.Sprintf("Deploy %s of %s is %s. This page refreshes automatically.", d.ShortSHA, repoName, d.Status))
+		rt.interimResponse(w, r, http.StatusServiceUnavailable, interim{
+			state: "building", title: "Building preview…",
+			detail: fmt.Sprintf("Deploy %s of %s is %s.", d.ShortSHA, repoName, d.Status),
+		})
 	case db.DeployFailed:
 		rt.errorPage(w, r, http.StatusBadGateway, "Build failed",
 			fmt.Sprintf("Deploy %s failed: %s (full logs: preview deploy logs %d)", d.ShortSHA, d.Error, d.ID))
@@ -437,14 +443,25 @@ func (rt *Router) ensureAndProxy(w http.ResponseWriter, r *http.Request, e cache
 	addr, err := rt.backends.EnsureRunning(ctx, k, repoName)
 	if err != nil {
 		if ctx.Err() != nil && r.Context().Err() == nil {
-			// Still starting — tell the client to come back shortly.
-			w.Header().Set("Retry-After", "2")
-			rt.refreshPage(w, r, http.StatusServiceUnavailable, "Starting "+what+"…",
-				"The preview "+what+" is starting. This page refreshes automatically.")
+			// Still starting — an interim page whose polls stream the run log.
+			rt.interimResponse(w, r, http.StatusServiceUnavailable, interim{
+				state: "starting", title: "Starting " + what + "…",
+				detail: "The preview " + what + " is starting.",
+				repo:   repoName, side: string(k.Side), hash: k.Hash,
+			})
 			return
 		}
-		rt.errorPage(w, r, http.StatusBadGateway, "Preview unavailable",
-			fmt.Sprintf("The preview %s failed to start: %s (run logs: preview deploy logs %d)", what, err, e.deploy.ID))
+		detail := fmt.Sprintf("The preview %s failed to start: %s (run logs: preview deploy logs %d)", what, err, e.deploy.ID)
+		if isPoll(r) {
+			// The interim page is watching: report the failure (with the final
+			// log chunk) in place instead of reloading onto a bare error page.
+			rt.pollJSON(w, r, http.StatusBadGateway, interim{
+				state: "failed", title: "Preview unavailable", detail: detail,
+				repo: repoName, side: string(k.Side), hash: k.Hash,
+			})
+			return
+		}
+		rt.errorPage(w, r, http.StatusBadGateway, "Preview unavailable", detail)
 		return
 	}
 	target := &url.URL{Scheme: "http", Host: addr}
@@ -498,9 +515,10 @@ func (rt *Router) serveStatic(w http.ResponseWriter, r *http.Request, repoName, 
 						"The preview frontend is missing from durable storage. Redeploy to rebuild it.")
 				case ctx.Err() != nil && r.Context().Err() == nil:
 					// Still landing — tell the client to come back shortly.
-					w.Header().Set("Retry-After", "2")
-					rt.refreshPage(w, r, http.StatusServiceUnavailable, "Loading preview…",
-						"The preview frontend is being restored from durable storage. This page refreshes automatically.")
+					rt.interimResponse(w, r, http.StatusServiceUnavailable, interim{
+						state: "hydrating", title: "Loading preview…",
+						detail: "The preview frontend is being restored from durable storage.",
+					})
 				default:
 					rt.errorPage(w, r, http.StatusBadGateway, "Preview unavailable",
 						"The preview frontend could not be restored: "+err.Error())
@@ -558,33 +576,21 @@ func wantsHTML(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
+// errorPage is a terminal status: no polling, no refresh. A poll that lands
+// here comes back without the interim marker, so the interim page reloads
+// onto it.
 func (rt *Router) errorPage(w http.ResponseWriter, r *http.Request, status int, title, detail string) {
-	rt.statusResponse(w, r, status, title, detail, false)
-}
-
-func (rt *Router) refreshPage(w http.ResponseWriter, r *http.Request, status int, title, detail string) {
-	rt.statusResponse(w, r, status, title, detail, true)
-}
-
-func (rt *Router) statusResponse(w http.ResponseWriter, r *http.Request, status int, title, detail string, refresh bool) {
 	if !wantsHTML(r) {
 		w.Header().Set("Content-Type", "application/json")
-		if refresh {
-			w.Header().Set("Retry-After", "2")
-		}
 		w.WriteHeader(status)
 		fmt.Fprintf(w, `{"error":%q}`+"\n", title+": "+detail)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	meta := ""
-	if refresh {
-		meta = `<meta http-equiv="refresh" content="2">`
-	}
-	fmt.Fprintf(w, `<!doctype html><html><head><title>%s</title>%s
+	fmt.Fprintf(w, `<!doctype html><html><head><title>%s</title>
 <style>body{font-family:system-ui,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;background:#111;color:#eee}
 main{max-width:36rem;padding:2rem}h1{font-size:1.25rem}p{color:#aaa;line-height:1.5}</style>
 </head><body><main><h1>%s</h1><p>%s</p></main></body></html>
-`, html.EscapeString(title), meta, html.EscapeString(title), html.EscapeString(detail))
+`, html.EscapeString(title), html.EscapeString(title), html.EscapeString(detail))
 }

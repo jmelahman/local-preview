@@ -273,6 +273,98 @@ func TestColdStartAndCrash(t *testing.T) {
 	}
 }
 
+// fakeRunLogs satisfies RunLogs, recording the cursor it was asked for.
+type fakeRunLogs struct {
+	side        string
+	hash        string
+	lastAttempt int
+	lastOffset  int64
+}
+
+func (f *fakeRunLogs) RunLog(repo, side, hash string, attempt int, offset int64) (supervise.RunLog, error) {
+	f.side, f.hash = side, hash
+	f.lastAttempt, f.lastOffset = attempt, offset
+	return supervise.RunLog{Attempt: 3, Offset: offset + 12, Content: "boot line\n"}, nil
+}
+
+func doPoll(t *testing.T, router *Router, host, path string, attempt int, offset int64) (int, string, http.Header) {
+	t.Helper()
+	req := httptest.NewRequest("GET", "http://"+host+path, nil)
+	req.Host = host
+	req.Header.Set("X-Preview-Poll", "1")
+	req.Header.Set("X-Preview-Log-Attempt", strconv.Itoa(attempt))
+	req.Header.Set("X-Preview-Log-Offset", strconv.FormatInt(offset, 10))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	body, _ := io.ReadAll(rec.Result().Body)
+	return rec.Code, string(body), rec.Result().Header
+}
+
+// TestInterimPoll covers the interim page's poll protocol: while the process
+// starts, polls stream incremental run-log chunks; a start failure reports
+// "failed" in place; a ready preview answers without the interim marker (the
+// page's cue to reload).
+func TestInterimPoll(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	logs := &fakeRunLogs{}
+	e.router.SetRunLogs(logs)
+
+	// Still starting: JSON with the interim marker and the log slice from the
+	// echoed cursor.
+	e.fake.slow = true
+	code, body, hdr := doPoll(t, e.router, host, "/api/x", 3, 100)
+	if code != 503 || hdr.Get("X-Preview-Interim") != "starting" {
+		t.Fatalf("starting poll: %d %v", code, hdr)
+	}
+	if !strings.Contains(body, `"state":"starting"`) || !strings.Contains(body, "boot line") ||
+		!strings.Contains(body, `"attempt":3`) || !strings.Contains(body, `"offset":112`) {
+		t.Fatalf("starting poll body: %q", body)
+	}
+	if logs.side != "be" || logs.hash != d.BeHash || logs.lastAttempt != 3 || logs.lastOffset != 100 {
+		t.Fatalf("run-log cursor: %+v", logs)
+	}
+
+	// Start failure: reported in place as "failed", still marked interim so
+	// the page shows the error beside the captured logs instead of reloading.
+	e.fake.slow = false
+	e.fake.err = errors.New("backend exited during startup")
+	code, body, hdr = doPoll(t, e.router, host, "/api/x", 3, 112)
+	if code != 502 || hdr.Get("X-Preview-Interim") != "failed" ||
+		!strings.Contains(body, `"state":"failed"`) || !strings.Contains(body, "exited") {
+		t.Fatalf("failed poll: %d %v %q", code, hdr, body)
+	}
+
+	// Ready: the poll reaches the app, with no interim marker → the page reloads.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "app answer")
+	}))
+	t.Cleanup(upstream.Close)
+	u, _ := url.Parse(upstream.URL)
+	e.fake.err = nil
+	e.fake.port, _ = strconv.Atoi(u.Port())
+	code, body, hdr = doPoll(t, e.router, host, "/api/x", 3, 112)
+	if code != 200 || hdr.Get("X-Preview-Interim") != "" || body != "app answer" {
+		t.Fatalf("ready poll: %d %v %q", code, hdr, body)
+	}
+}
+
+// The browser-facing "starting" page is the poller, not a meta refresh.
+func TestColdStartBrowserGetsPollerPage(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	e.fake.slow = true
+
+	code, body, hdr := doReq(t, e.router, host, "/api/x", true)
+	if code != 503 || hdr.Get("X-Preview-Interim") != "starting" ||
+		!strings.Contains(body, "Starting backend") ||
+		!strings.Contains(body, "X-Preview-Poll") || strings.Contains(body, "http-equiv") {
+		t.Fatalf("starting page: %d %v %q", code, hdr, body)
+	}
+}
+
 func TestNonReadyStatuses(t *testing.T) {
 	e := newTestEnv(t)
 	d, err := e.db.CreateDeploy(e.repoID, shaOne, db.DeployMeta{})
@@ -281,9 +373,12 @@ func TestNonReadyStatuses(t *testing.T) {
 	}
 	host := d.ShortSHA + "-demo.preview.localhost:8080"
 
-	code, body, _ := doReq(t, e.router, host, "/", true)
-	if code != 503 || !strings.Contains(body, "refresh") {
-		t.Fatalf("queued page: %d %q", code, body)
+	// Browsers get the polling interim page (marked with the interim header),
+	// not a meta refresh — Firefox's autorefresh blocker prompts on those.
+	code, body, hdr := doReq(t, e.router, host, "/", true)
+	if code != 503 || hdr.Get("X-Preview-Interim") != "building" ||
+		!strings.Contains(body, "X-Preview-Poll") || strings.Contains(body, "http-equiv") {
+		t.Fatalf("queued page: %d %v %q", code, hdr, body)
 	}
 
 	if err := e.db.SetDeployFailed(d.ID, "compile exploded"); err != nil {

@@ -58,8 +58,9 @@ A new deploy's processes start automatically as soon as its build turns
 ready, so the first visit usually hits a warm process. Anything not
 running — stopped by the idle timeout or warm cap, or after a server
 restart — starts on demand instead: the first `/api/*` request boots the
-backend (the proxy waits briefly, then shows a self-refreshing "starting"
-page) and later requests hit the warm process. Backends bind loopback-only;
+backend (the proxy waits briefly, then shows a "starting" page that streams
+the process's startup log and loads the preview as soon as it answers) and
+later requests hit the warm process. Backends bind loopback-only;
 the only exposed listener is the orchestrator's own address.
 
 A process that exits on its own with a non-zero status — or a start attempt
