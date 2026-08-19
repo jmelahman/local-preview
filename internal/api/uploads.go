@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jmelahman/local-preview/internal/build"
 	"github.com/jmelahman/local-preview/internal/db"
@@ -45,6 +46,12 @@ func (d Deps) handleUpload(w http.ResponseWriter, r *http.Request, side, name st
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// The server's ReadTimeout bounds slow-body clients for ordinary requests,
+	// but an upload streams a large tar that can legitimately take longer than
+	// that on a slow link. Clear the per-connection read deadline for this
+	// (authenticated, byte-capped) request so a real upload isn't truncated
+	// mid-stream; MaxBytesReader below and the ExtractTar cap keep it bounded.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 	// Cap the compressed body on the wire; the store's ExtractTar cap bounds the
 	// decompressed expansion (a gzip bomb slips under a wire cap). Both surface
 	// as 413 below so an oversized upload is rejected, never streamed to disk.

@@ -392,6 +392,12 @@ func run(opts serveOptions) error {
 			Addr:              opts.workerListen,
 			Handler:           workerapi.NewServer(super, opts.workerSecret).Handler(),
 			ReadHeaderTimeout: 10 * time.Second,
+			// Bound the full request-read and idle-keepalive phases so a slow-body
+			// or idle client can't pin a connection open indefinitely. No
+			// WriteTimeout: worker responses can stream and a blanket write
+			// deadline would truncate them.
+			ReadTimeout: 60 * time.Second,
+			IdleTimeout: 120 * time.Second,
 		}
 		go func() {
 			log.Printf("worker API listening on %s (private; shared-secret auth)", opts.workerListen)
@@ -405,6 +411,13 @@ func run(opts serveOptions) error {
 		Addr:              opts.addr,
 		Handler:           recoverPanics(logRequests(compressResponses(router))),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Bound request-read and idle-keepalive so a slow-body or idle client
+		// can't hold connections open indefinitely. No WriteTimeout: the proxy
+		// streams long-lived preview responses and the cold-start flow relies on
+		// Retry-After, both of which a blanket write deadline would truncate;
+		// per-request deadlines live in the proxy (ensureAndProxy) instead.
+		ReadTimeout: 60 * time.Second,
+		IdleTimeout: 120 * time.Second,
 	}
 
 	go func() {
