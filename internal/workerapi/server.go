@@ -114,11 +114,18 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// maxWorkerBody caps request bodies before decoding. Every request shape here
+// is tiny (a key plus a flag or two), so a low cap is ample and keeps a
+// compromised or misconfigured-network peer from forcing unbounded allocation
+// against this RCE-adjacent surface.
+const maxWorkerBody = 64 << 10 // 64 KiB
+
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return false
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxWorkerBody)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return false
