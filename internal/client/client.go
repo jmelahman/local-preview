@@ -442,6 +442,16 @@ func (c *Client) doStream(ctx context.Context, method, path, contentType string,
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(raw, &e) == nil && e.Error != "" {
+			if resp.StatusCode == http.StatusUnauthorized {
+				// The server wants a credential this client didn't (or
+				// couldn't) present — say how to fix it instead of leaving a
+				// bare "authentication required".
+				hint := "sign in to the GitHub CLI (`gh auth login`) so its token is used automatically, or set one explicitly: `preview configure --token <github-pat>` / $PREVIEW_TOKEN"
+				if c.token != "" {
+					hint = "the presented GitHub token was rejected — it may be expired, revoked, or its account not on the server's allowlist"
+				}
+				return nil, fmt.Errorf("%s %s: %s (%s)", method, path, e.Error, hint)
+			}
 			return nil, fmt.Errorf("%s %s: %s", method, path, e.Error)
 		}
 		return nil, fmt.Errorf("%s %s: unexpected status %d", method, path, resp.StatusCode)

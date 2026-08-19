@@ -1,7 +1,11 @@
 package server
 
 import (
+	"context"
 	"os"
+	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -51,8 +55,14 @@ func effectiveServer() (url, source string, err error) {
 }
 
 // effectiveToken resolves the bearer token CLI subcommands present, in
-// precedence order: $PREVIEW_TOKEN, then the config file's token. Empty means
-// send none, which is correct against a server without SSO.
+// precedence order: $PREVIEW_TOKEN, the config file's token, then the GitHub
+// CLI's stored credential (`gh auth token`) when gh is installed and signed
+// in. Empty means send none, which is correct against a server without SSO.
+//
+// The gh fallback is what makes an SSO-gated server work with zero client
+// setup: gh's OAuth token carries read:org — enough for the server's
+// org-allowlist check — so anyone already using gh authenticates without
+// minting a PAT or running preview configure --token.
 func effectiveToken() (string, error) {
 	if env := os.Getenv("PREVIEW_TOKEN"); env != "" {
 		return env, nil
@@ -61,7 +71,27 @@ func effectiveToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return cfg.Token, nil
+	if cfg.Token != "" {
+		return cfg.Token, nil
+	}
+	return ghAuthToken(), nil
+}
+
+// ghAuthToken returns the GitHub CLI's stored token, or "" when gh is
+// missing, signed out, or slow — the fallback must never break a CLI that
+// worked without it.
+func ghAuthToken() string {
+	gh, err := exec.LookPath("gh")
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, gh, "auth", "token").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // newClient builds an HTTP client for the server at url, attaching the

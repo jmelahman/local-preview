@@ -57,21 +57,29 @@ the signer's org membership; a login/email-only allowlist needs only
 `read:user` and `user:email`. An org's third-party-application policy may
 require an owner to approve the OAuth App before members can sign in.
 
-## The CLI (personal-access token)
+## The CLI (GitHub token)
 
 The interactive flow needs a browser, so scripts and CLI commands present a
-**GitHub personal-access token** instead. The server verifies it against the
-GitHub API and the *same* allowlist, so a token authorizes exactly the accounts
-a browser login would.
+**GitHub token** instead. The server verifies it against the GitHub API and
+the *same* allowlist, so a token authorizes exactly the accounts a browser
+login would.
 
-Store it once (or set `$PREVIEW_TOKEN`):
+**If you use the [GitHub CLI](https://cli.github.com), you're already done**:
+with no token configured, `preview` automatically presents `gh auth token`.
+gh's OAuth token carries `read:org`, which covers org/team allowlists (an
+email-only allowlist still needs a PAT with `user:email` — gh's token can't
+read verified emails).
+
+To pin an explicit token instead, store a personal-access token once (or set
+`$PREVIEW_TOKEN`):
 
 ```bash
 preview configure --token ghp_yourPersonalAccessToken
 ```
 
-The token needs `read:user` (and `read:org` when the allowlist gates by
-org/team). `$PREVIEW_TOKEN` overrides the stored value.
+A PAT needs `read:user` (and `read:org` when the allowlist gates by
+org/team). Precedence: `$PREVIEW_TOKEN`, then the stored token, then
+`gh auth token`.
 
 CI **uploads** are unaffected: the upload endpoints keep their own
 [GitHub Actions OIDC](/guide/uploads) authentication and never require a session

@@ -135,7 +135,7 @@ for lookup order and caching semantics.
 | `PREVIEW_WORKER_ENDPOINTS` | `preview serve --role=control` | Comma-separated worker-API base URLs forming the fleet (an explicit `--worker-endpoints` flag wins) |
 | `PREVIEW_SECRET_*` | `preview serve` | Values a manifest's `{secret:NAME}` env placeholder may reference (`NAME` maps to `PREVIEW_SECRET_NAME`); set identically on every serving node. See [env placeholders](/reference/preview-toml#env-placeholders) |
 | `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins; this in turn beats the config file) |
-| `PREVIEW_TOKEN` | CLI subcommands | Bearer token (a GitHub PAT) sent to an [SSO-protected](/guide/sso) server (wins over the config file's `token`) |
+| `PREVIEW_TOKEN` | CLI subcommands | Bearer token (a GitHub PAT) sent to an [SSO-protected](/guide/sso) server (wins over the config file's `token`; with neither set, the GitHub CLI's `gh auth token` is used automatically when available) |
 | `PREVIEW_BACKEND` | `web/` dev server | Backend `host:port` the Vite proxy targets |
 
 ## Docker requirements

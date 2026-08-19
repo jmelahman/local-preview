@@ -141,3 +141,40 @@ func TestResolveURL(t *testing.T) {
 		}
 	})
 }
+
+// TestEffectiveTokenFallsBackToGH: with no $PREVIEW_TOKEN and no configured
+// token, the CLI presents the GitHub CLI's stored credential — the
+// zero-setup path for an SSO-gated server. Explicit sources still win.
+func TestEffectiveTokenFallsBackToGH(t *testing.T) {
+	// A fake gh on PATH that prints a token.
+	bin := t.TempDir()
+	fake := filepath.Join(bin, "gh")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho gho_from_gh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("PREVIEW_CONFIG_DIR", t.TempDir()) // no config file, no token
+	t.Setenv("PREVIEW_TOKEN", "")
+
+	tok, err := effectiveToken()
+	if err != nil || tok != "gho_from_gh" {
+		t.Fatalf("token = %q, %v; want the gh fallback", tok, err)
+	}
+
+	// $PREVIEW_TOKEN beats gh.
+	t.Setenv("PREVIEW_TOKEN", "ghp_explicit")
+	if tok, _ := effectiveToken(); tok != "ghp_explicit" {
+		t.Fatalf("token = %q, want $PREVIEW_TOKEN to win", tok)
+	}
+}
+
+// TestEffectiveTokenNoGH: a machine without gh (or signed out) sends no
+// token, exactly as before the fallback existed.
+func TestEffectiveTokenNoGH(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no gh anywhere
+	t.Setenv("PREVIEW_CONFIG_DIR", t.TempDir())
+	t.Setenv("PREVIEW_TOKEN", "")
+	if tok, err := effectiveToken(); err != nil || tok != "" {
+		t.Fatalf("token = %q, %v; want empty", tok, err)
+	}
+}
