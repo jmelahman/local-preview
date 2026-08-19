@@ -143,6 +143,10 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   — `gitrepo.Archive` recreated a committed `leak -> /etc/passwd` verbatim, then
   the public frontend file server / artifact publisher followed it; apply the
   same absolute-reject + within-root rule `store.ExtractTar` already enforces.
+- A worker resolves run specs from the wire, not its own DB — artifact rows
+  never replicate; the ensure request carries the control-resolved `WireSpec`
+  (state dir as identity, sticky per-node `InitDone`), and the regression test
+  must drive a real `supervise.Manager` over an empty DB, never just `fakeSup`.
 - A `nofail` data volume must gate the service that bind-mounts it — without
   `RequiresMountsFor=`, a boot that races the volume attach starts the
   orchestrator on an empty dir with a fresh SQLite DB, and a later mount can't

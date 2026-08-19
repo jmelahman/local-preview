@@ -49,9 +49,18 @@ func (w WireKey) toKey() supervise.Key {
 // ensureReq/ensureResp: start or reuse a process, returning the port it serves
 // on (loopback on the worker; the control-side Client pairs it with the
 // worker's routable host).
+//
+// Spec carries the control-resolved run contract for Key — a worker's DB has
+// no artifact rows, so without it every ensure fails "artifact not
+// provisioned". PeerSpec is the same for a process-mode frontend's co-placed
+// backend, which the worker's own Manager starts to satisfy {backend_url}.
+// Both are optional additions to the v1 shape: an old control node omits them
+// (the worker fails exactly as before), and an old worker ignores them.
 type ensureReq struct {
-	Key  WireKey `json:"key"`
-	Repo string  `json:"repo"`
+	Key      WireKey             `json:"key"`
+	Repo     string              `json:"repo"`
+	Spec     *supervise.WireSpec `json:"spec,omitempty"`
+	PeerSpec *supervise.WireSpec `json:"peer_spec,omitempty"`
 }
 type ensureResp struct {
 	Port int `json:"port"`

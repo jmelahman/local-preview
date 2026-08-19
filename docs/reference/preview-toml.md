@@ -109,6 +109,15 @@ so `POSTGRES_DB = "preview_{hash}"` gives isolation that follows artifact
 identity. `{backend_url}` requires `frontend.run` and both sides on the
 same runtime (both `run_image` or neither).
 
+::: warning `{state_dir}` and worker tiers
+State directories are node-local. On a single node (`--role=all`) they fork
+along git lineage, but a worker tier (`--role=control` + workers) gives each
+worker a fresh, empty state dir per artifact — no lineage forking, and state
+does not follow a preview across workers. Repos serving from a worker tier
+should keep per-commit state in external services keyed by `{hash}` (as in
+the `POSTGRES_DB` example above) rather than in `{state_dir}`.
+:::
+
 ### Init commands
 
 One-time setup — schema migrations, seed data — that shouldn't re-run on

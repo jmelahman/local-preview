@@ -94,11 +94,14 @@ type Manager struct {
 	reapInterval   time.Duration
 	maxWarm        int // LRU cap on running processes; 0 = unlimited
 
-	mu       sync.Mutex
-	procs    map[Key]*process
-	locks    map[Key]*sync.Mutex
-	failures map[Key]Failure // last unexpected exit / failed start, per key
-	stopping bool            // set by StopAll; refuses new starts during shutdown
+	mu        sync.Mutex
+	procs     map[Key]*process
+	locks     map[Key]*sync.Mutex
+	failures  map[Key]Failure  // last unexpected exit / failed start, per key
+	wireSpecs map[Key]WireSpec // control-supplied run specs (worker serving)
+	stopping  bool             // set by StopAll; refuses new starts during shutdown
+
+	stateDirWarned bool // one {state_dir}-over-workers warning per process
 
 	dockerMu     sync.Mutex
 	dockerProbed bool
@@ -117,6 +120,7 @@ func New(database *db.Store, files *store.Store, logsDir string) *Manager {
 		procs:          make(map[Key]*process),
 		locks:          make(map[Key]*sync.Mutex),
 		failures:       make(map[Key]Failure),
+		wireSpecs:      make(map[Key]WireSpec),
 	}
 }
 
@@ -406,6 +410,10 @@ type runSpec struct {
 	init        [][]string
 	initTimeout time.Duration
 	initDone    bool
+
+	// fromWire marks a spec served from the wire cache rather than this
+	// node's DB — init completion is then recorded there too.
+	fromWire bool
 }
 
 // Stored run_config shapes: the manifest section plus the top-level
@@ -423,15 +431,104 @@ type frontendRunConfig struct {
 	Devcontainer *devcontainer.Config `json:"devcontainer,omitempty"`
 }
 
-// loadRunSpec resolves the artifact's run contract for either side.
-func (m *Manager) loadRunSpec(k Key, repoName string) (runSpec, error) {
+// WireSpec is the transportable run contract for one supervised process: the
+// artifact-row fields a node needs to start it, independent of any control
+// DB. It exists because a worker's DB never sees builds — the control node
+// resolves the spec from its own DB (ResolveWireSpec) and ships it with the
+// ensure request; the worker offers it to its Manager (OfferWireSpec), whose
+// spec lookup falls back to it when the DB row is absent. RunConfig is the
+// stored run_config JSON; InitDone mirrors init_done_at (backend only). The
+// state dir deliberately does not travel: it is stored as an absolute
+// control-node path, so each node recomputes it from identity (repo, hash)
+// against its own store root.
+type WireSpec struct {
+	RunConfig string `json:"run_config"`
+	InitDone  bool   `json:"init_done,omitempty"`
+}
+
+// ResolveWireSpec is the control-side half of the wire: the DB-backed run
+// spec for k in transportable form, or an error naming the missing artifact.
+func (m *Manager) ResolveWireSpec(k Key) (WireSpec, error) {
 	if k.Side == SideFrontend {
 		art, err := m.db.GetFrontendArtifact(k.RepoID, k.Hash)
 		if err != nil {
-			return runSpec{}, fmt.Errorf("frontend artifact %s not provisioned: %w", k.Hash[:12], err)
+			return WireSpec{}, fmt.Errorf("frontend artifact %s not provisioned: %w", shortHash(k.Hash), err)
+		}
+		return WireSpec{RunConfig: art.RunConfig}, nil
+	}
+	art, err := m.db.GetBackendArtifact(k.RepoID, k.Hash)
+	if err != nil {
+		return WireSpec{}, fmt.Errorf("backend artifact %s not provisioned: %w", shortHash(k.Hash), err)
+	}
+	if strings.Contains(art.RunConfig, "{state_dir}") {
+		// Resolving for the wire means a worker will serve this, where state
+		// dirs start fresh per node — no lineage forking, no cross-worker
+		// state. Loud once so registering such a repo is a decision, not a
+		// silent correctness bug.
+		m.mu.Lock()
+		warned := m.stateDirWarned
+		m.stateDirWarned = true
+		m.mu.Unlock()
+		if !warned {
+			log.Printf("WARNING: a manifest uses {state_dir} and previews are served by workers — worker state dirs start fresh per node (no lineage forking); key per-commit state on {hash} in external services instead")
+		}
+	}
+	return WireSpec{RunConfig: art.RunConfig, InitDone: art.InitDoneAt != ""}, nil
+}
+
+// OfferWireSpec caches a control-resolved run spec for k. The DB stays the
+// authority — spec lookup consults it first — so offering a spec on a node
+// that also builds changes nothing. InitDone is sticky: the control node has
+// no record of an init that ran on this node, so a later offer with
+// InitDone=false must not make every cold start here re-run init.
+func (m *Manager) OfferWireSpec(k Key, s WireSpec) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if prev, ok := m.wireSpecs[k]; ok && prev.InitDone {
+		s.InitDone = true
+	}
+	m.wireSpecs[k] = s
+}
+
+func (m *Manager) wireSpec(k Key) (WireSpec, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.wireSpecs[k]
+	return s, ok
+}
+
+// markInitDone records a completed init where the spec came from: the DB row
+// on a node that builds, or the wire cache on a worker (whose DB has no row
+// to update — OfferWireSpec's stickiness is what keeps init from re-running
+// on this node's later cold starts).
+func (m *Manager) markInitDone(k Key, spec runSpec) error {
+	if !spec.fromWire {
+		return m.db.MarkBackendInitDone(k.RepoID, k.Hash)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.wireSpecs[k]; ok {
+		s.InitDone = true
+		m.wireSpecs[k] = s
+	}
+	return nil
+}
+
+// loadRunSpec resolves the artifact's run contract for either side: the DB
+// row when this node has it, else the control-supplied wire spec. Both
+// sources carry the same run_config JSON and feed the same construction
+// below, so the two transports cannot drift.
+func (m *Manager) loadRunSpec(k Key, repoName string) (runSpec, error) {
+	if k.Side == SideFrontend {
+		ws := WireSpec{}
+		fromWire := false
+		if art, err := m.db.GetFrontendArtifact(k.RepoID, k.Hash); err == nil {
+			ws.RunConfig = art.RunConfig
+		} else if ws, fromWire = m.wireSpec(k); !fromWire {
+			return runSpec{}, fmt.Errorf("frontend artifact %s not provisioned: %w", shortHash(k.Hash), err)
 		}
 		var cfg frontendRunConfig
-		if err := json.Unmarshal([]byte(art.RunConfig), &cfg); err != nil {
+		if err := json.Unmarshal([]byte(ws.RunConfig), &cfg); err != nil {
 			return runSpec{}, fmt.Errorf("parse run config: %w", err)
 		}
 		return runSpec{
@@ -444,14 +541,30 @@ func (m *Manager) loadRunSpec(k Key, repoName string) (runSpec, error) {
 			idleTimeout:  idleOrDefault(time.Duration(cfg.IdleTimeout)),
 			dir:          m.files.FrontendDir(repoName, k.Hash),
 			networks:     cfg.Networks,
+			fromWire:     fromWire,
 		}, nil
 	}
-	art, err := m.db.GetBackendArtifact(k.RepoID, k.Hash)
-	if err != nil {
-		return runSpec{}, fmt.Errorf("backend artifact %s not provisioned: %w", k.Hash[:12], err)
+	ws := WireSpec{}
+	fromWire := false
+	stateDir := ""
+	if art, err := m.db.GetBackendArtifact(k.RepoID, k.Hash); err == nil {
+		ws = WireSpec{RunConfig: art.RunConfig, InitDone: art.InitDoneAt != ""}
+		stateDir = art.StateDir
+	} else if ws, fromWire = m.wireSpec(k); !fromWire {
+		return runSpec{}, fmt.Errorf("backend artifact %s not provisioned: %w", shortHash(k.Hash), err)
+	} else {
+		// The wire carries no state-dir path: state is node-local, and a
+		// worker's starts fresh (lineage forking is a build-time, control-node
+		// concern — see the {state_dir} limitation in the worker docs).
+		// Recompute against this node's store root and make sure the dir
+		// exists: init steps and container bind mounts expect a directory.
+		if err := m.files.InitFreshStateDir(repoName, k.Hash); err != nil {
+			return runSpec{}, err
+		}
+		stateDir = m.files.StateDirPath(repoName, k.Hash)
 	}
 	var cfg backendRunConfig
-	if err := json.Unmarshal([]byte(art.RunConfig), &cfg); err != nil {
+	if err := json.Unmarshal([]byte(ws.RunConfig), &cfg); err != nil {
 		return runSpec{}, fmt.Errorf("parse run config: %w", err)
 	}
 	return runSpec{
@@ -463,12 +576,21 @@ func (m *Manager) loadRunSpec(k Key, repoName string) (runSpec, error) {
 		startTimeout: time.Duration(cfg.StartTimeout),
 		idleTimeout:  idleOrDefault(time.Duration(cfg.IdleTimeout)),
 		dir:          m.files.BackendDir(repoName, k.Hash),
-		stateDir:     art.StateDir,
+		stateDir:     stateDir,
 		networks:     cfg.Networks,
 		init:         cfg.Init,
 		initTimeout:  time.Duration(cfg.InitTimeout),
-		initDone:     art.InitDoneAt != "",
+		initDone:     ws.InitDone,
+		fromWire:     fromWire,
 	}, nil
+}
+
+// shortHash truncates a hash for error text without assuming its length.
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }
 
 // idleOrDefault covers run configs stored before idle enforcement existed.
@@ -606,7 +728,7 @@ func (m *Manager) start(k Key, p *process) {
 			fail("init_failed", err)
 			return
 		}
-		if err := m.db.MarkBackendInitDone(k.RepoID, k.Hash); err != nil {
+		if err := m.markInitDone(k, spec); err != nil {
 			logFile.Close()
 			fail("init_failed", fmt.Errorf("record init success: %w", err))
 			return

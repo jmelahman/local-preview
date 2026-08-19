@@ -23,6 +23,13 @@ type Client struct {
 	host   string // routable host for the worker's processes, e.g. 10.0.1.5
 	secret string
 	hc     *http.Client
+
+	// SpecResolver resolves the control-side run spec shipped with each
+	// ensure request (plus the peer backend's, for a process-mode frontend) —
+	// supervise.(*Manager).ResolveWireSpec in production. Nil sends none,
+	// which only serves against a worker whose own DB knows the artifact;
+	// outside tests that means every ensure fails "not provisioned".
+	SpecResolver func(k supervise.Key) (supervise.WireSpec, error)
 }
 
 // NewClient dials a worker. baseURL is its private worker-API URL; host is the
@@ -38,8 +45,24 @@ func NewClient(baseURL, host, secret string, hc *http.Client) *Client {
 // EnsureRunning starts (or reuses) the keyed process on the worker and returns
 // the "host:port" the control node's proxy dials.
 func (c *Client) EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (string, error) {
+	req := ensureReq{Key: fromKey(k), Repo: repoName}
+	if c.SpecResolver != nil {
+		spec, err := c.SpecResolver(k)
+		if err != nil {
+			// Same failure a local start would report — don't bother the worker.
+			return "", err
+		}
+		req.Spec = &spec
+		if k.Side == supervise.SideFrontend && k.Peer != "" {
+			peer, err := c.SpecResolver(supervise.BackendKey(k.RepoID, k.Peer))
+			if err != nil {
+				return "", err
+			}
+			req.PeerSpec = &peer
+		}
+	}
 	var resp ensureResp
-	if err := c.post(ctx, pathEnsure, ensureReq{Key: fromKey(k), Repo: repoName}, &resp); err != nil {
+	if err := c.post(ctx, pathEnsure, req, &resp); err != nil {
 		return "", err
 	}
 	return c.host + ":" + strconv.Itoa(resp.Port), nil

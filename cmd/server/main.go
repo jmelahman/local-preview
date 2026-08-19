@@ -363,7 +363,11 @@ func run(opts serveOptions) error {
 				if host == "" || len(endpoints) > 1 {
 					host = hostOf(ep)
 				}
-				reg.Add(ep, workerapi.NewClient(ep, host, opts.workerSecret, nil))
+				wc := workerapi.NewClient(ep, host, opts.workerSecret, nil)
+				// The worker has no artifact rows: every ensure carries the
+				// control-DB-resolved run spec.
+				wc.SpecResolver = super.ResolveWireSpec
+				reg.Add(ep, wc)
 				log.Printf("role=control: registered worker %s (processes at %s)", ep, host)
 			}
 			reg.StartHeartbeats(workCtx, fleetHeartbeatInterval)

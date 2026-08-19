@@ -477,3 +477,34 @@ archive onto disk is a link-following surface. There must be exactly one
 hardened rule (absolute-reject + within-root), and every extractor must apply
 it — a tar extractor being hardened says nothing about a git-tree extractor
 sharing the same scratch dir and the same public file server.
+
+## A worker resolves run specs from the wire, not its own DB
+
+Artifact *files* travel to a worker through the S3 tier (hydrate-on-serve),
+but the run *contract* — argv, run image, devcontainer, env, health path,
+timeouts, init steps, `InitDoneAt`, the state dir — lived only in the control
+node's `frontend_artifacts`/`backend_artifacts` rows. A `--role=worker` node
+has a fresh, empty SQLite DB, so `loadRunSpec` failed "artifact not
+provisioned" and every remote ensure was a 502. The transport tests never
+caught it because `workerapi_test` exercised only a `fakeSup` — the HTTP
+plumbing was covered, a real `supervise.Manager` on a row-less node never was.
+
+The fix keeps the control node the single authority and the worker a dumb
+executor: the control node resolves `supervise.WireSpec` from its DB
+(`ResolveWireSpec`) and ships it inside every ensure request (plus the peer
+backend's spec for a process-mode frontend, which the worker starts itself for
+`{backend_url}`); the worker offers it to its Manager (`OfferWireSpec`), whose
+spec lookup consults the DB first and falls back to the wire cache. Rules that
+must hold:
+
+- **The state dir never travels as a path.** The control row stores an
+  absolute control-node path; each node recomputes it from identity
+  (repo, hash) against its own store root, and creates it fresh — lineage
+  forking is a build-time, control-node concern (documented `{state_dir}`
+  worker limitation).
+- **Wire `InitDone` is sticky per node.** The control node has no record of an
+  init that ran on a worker and re-sends `InitDone=false` forever; without
+  stickiness in `OfferWireSpec`, every cold start re-runs init.
+- **Keep the regression test honest**: `TestEnsureWireSpecOnEmptyDB` drives a
+  real Manager over an empty DB through the real Client/Server. A fake
+  supervisor can never see this class of gap.

@@ -2,14 +2,37 @@ package workerapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/manifest"
+	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
 )
+
+// TestMain doubles as the supervised child (same trick as the supervise
+// package's tests): re-executed with --helper-server it serves a health
+// endpoint, so the worker-over-empty-DB test starts a real process.
+func TestMain(m *testing.M) {
+	if i := slices.Index(os.Args, "--helper-server"); i >= 0 && i+1 < len(os.Args) {
+		http.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		http.ListenAndServe("127.0.0.1:"+os.Args[i+1], nil) //nolint:errcheck
+		return
+	}
+	os.Exit(m.Run())
+}
 
 // fakeSup records calls and returns programmed results.
 type fakeSup struct {
@@ -18,10 +41,20 @@ type fakeSup struct {
 	ensureRepo string
 	ensurePort int
 	ensureErr  error
+	offered    map[supervise.Key]supervise.WireSpec
 	stopped    []supervise.Key
 	status     string
 	running    int
 	maxWarm    int
+}
+
+func (f *fakeSup) OfferWireSpec(k supervise.Key, s supervise.WireSpec) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.offered == nil {
+		f.offered = map[supervise.Key]supervise.WireSpec{}
+	}
+	f.offered[k] = s
 }
 
 func (f *fakeSup) EnsureRunning(_ context.Context, k supervise.Key, repo string) (int, error) {
@@ -105,6 +138,101 @@ func TestHeartbeat(t *testing.T) {
 	}
 	if hb.Running != 5 || hb.MaxWarm != 12 || hb.Draining {
 		t.Fatalf("heartbeat = %+v", hb)
+	}
+}
+
+// TestEnsureWireSpecOnEmptyDB is the regression test for the worker-tier gap
+// the fakes cannot see: a real supervise.Manager over a fresh, empty DB — a
+// --role=worker node — must start a process from the wire-supplied spec
+// alone. Before specs traveled on the wire, this failed "backend artifact not
+// provisioned" and every remote ensure was a 502.
+func TestEnsureWireSpecOnEmptyDB(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	root := t.TempDir()
+	files := store.New(
+		filepath.Join(root, "artifacts"),
+		filepath.Join(root, "state"),
+		filepath.Join(root, "tmp"),
+	)
+	m := supervise.New(database, files, filepath.Join(root, "logs"))
+	t.Cleanup(m.StopAll)
+
+	// The artifact *files* are resident (in production: hydrated from the S3
+	// tier); only the DB rows are absent.
+	const beHash = "behash4worker001"
+	scratch, _, err := files.NewScratchDir("be")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := files.PublishBackend("demo", beHash, scratch, false); err != nil {
+		t.Fatal(err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(manifest.Backend{
+		Run:          []string{exe, "--helper-server", "{port}"},
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(NewServer(m, secret).Handler())
+	defer srv.Close()
+	c := NewClient(srv.URL, "127.0.0.1", secret, srv.Client())
+	c.SpecResolver = func(k supervise.Key) (supervise.WireSpec, error) {
+		return supervise.WireSpec{RunConfig: string(raw)}, nil
+	}
+
+	addr, err := c.EnsureRunning(context.Background(), supervise.BackendKey(1, beHash), "demo")
+	if err != nil {
+		t.Fatalf("ensure over empty DB with wire spec: %v", err)
+	}
+	res, err := http.Get(fmt.Sprintf("http://%s/api/health", addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("health = %d, want 200", res.StatusCode)
+	}
+	// The worker recomputed the state dir against its own store root.
+	if _, err := os.Stat(files.StateDirPath("demo", beHash)); err != nil {
+		t.Fatalf("worker-local state dir: %v", err)
+	}
+}
+
+// TestEnsureCarriesSpecs asserts the wire shape: the resolver's spec (and the
+// peer backend's, for a process-mode frontend) reach the worker's supervisor.
+func TestEnsureCarriesSpecs(t *testing.T) {
+	sup := &fakeSup{ensurePort: 1}
+	c, done := testServer(t, sup)
+	defer done()
+	c.SpecResolver = func(k supervise.Key) (supervise.WireSpec, error) {
+		return supervise.WireSpec{RunConfig: `{"side":"` + string(k.Side) + `"}`, InitDone: k.Side == supervise.SideBackend}, nil
+	}
+
+	k := supervise.FrontendKey(7, "feHASH", "beHASH")
+	if _, err := c.EnsureRunning(context.Background(), k, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	sup.mu.Lock()
+	defer sup.mu.Unlock()
+	fe, ok := sup.offered[k]
+	if !ok || fe.RunConfig != `{"side":"fe"}` || fe.InitDone {
+		t.Fatalf("frontend spec = %+v, %v", fe, ok)
+	}
+	be, ok := sup.offered[supervise.BackendKey(7, "beHASH")]
+	if !ok || be.RunConfig != `{"side":"be"}` || !be.InitDone {
+		t.Fatalf("peer backend spec = %+v, %v", be, ok)
 	}
 }
 

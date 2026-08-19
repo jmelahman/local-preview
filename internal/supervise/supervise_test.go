@@ -430,6 +430,112 @@ func TestInitRunsOncePerArtifact(t *testing.T) {
 	}
 }
 
+// publishFiles publishes only the artifact *files* — the worker case, where
+// files hydrate from the tier but no DB row exists.
+func (f *fixture) publishFiles(t *testing.T, beHash string) {
+	t.Helper()
+	scratch, _, err := f.files.NewScratchDir("be")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.files.PublishBackend("demo", beHash, scratch, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func wireCfg(t *testing.T, cfg manifest.Backend) WireSpec {
+	t.Helper()
+	raw, err := json.Marshal(backendRunConfig{Backend: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return WireSpec{RunConfig: string(raw)}
+}
+
+// TestWireSpecServesWithoutDBRow: a Manager whose DB has no artifact rows (a
+// worker) serves from an offered wire spec, recomputing the state dir against
+// its own store root.
+func TestWireSpecServesWithoutDBRow(t *testing.T) {
+	f := newFixture(t)
+	const beHash = "be-wire"
+	f.publishFiles(t, beHash)
+	k := BackendKey(f.repoID, beHash)
+	f.m.OfferWireSpec(k, wireCfg(t, manifest.Backend{
+		Run:          serverArgv(t),
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	}))
+
+	port, err := f.m.EnsureRunning(context.Background(), k, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := get(t, port, "/api/health"); code != 200 {
+		t.Fatalf("health = %d", code)
+	}
+	if !f.files.HasStateDir("demo", beHash) {
+		t.Fatal("wire-served start did not create a node-local state dir")
+	}
+}
+
+// TestWireSpecInitSticky: the control node never learns an init ran on this
+// node, so it re-sends InitDone=false with every ensure — a re-offer must not
+// make the next cold start re-run init.
+func TestWireSpecInitSticky(t *testing.T) {
+	f := newFixture(t)
+	const beHash = "be-wire-init"
+	f.publishFiles(t, beHash)
+	k := BackendKey(f.repoID, beHash)
+	spec := wireCfg(t, manifest.Backend{
+		Init:         [][]string{initArgv(t, "ok")},
+		Run:          serverArgv(t),
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	})
+	ctx := context.Background()
+
+	f.m.OfferWireSpec(k, spec)
+	if _, err := f.m.EnsureRunning(ctx, k, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if runs := f.initRuns(t, beHash); runs != 1 {
+		t.Fatalf("init runs after first start = %d, want 1", runs)
+	}
+
+	// Cold start after a fresh offer with InitDone=false (what control sends).
+	f.m.Stop(k, "test")
+	f.m.OfferWireSpec(k, spec)
+	if _, err := f.m.EnsureRunning(ctx, k, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if runs := f.initRuns(t, beHash); runs != 1 {
+		t.Fatalf("init runs after re-offer + cold start = %d, want still 1", runs)
+	}
+}
+
+// TestWireSpecDBWins: on a node that builds (control / --role=all), the DB row
+// stays authoritative over any offered spec.
+func TestWireSpecDBWins(t *testing.T) {
+	f := newFixture(t)
+	const beHash = "be-db-wins"
+	f.provision(t, beHash, serverArgv(t))
+	k := BackendKey(f.repoID, beHash)
+	// A bogus wire spec that could never start a process.
+	f.m.OfferWireSpec(k, wireCfg(t, manifest.Backend{
+		Run:          []string{"/nonexistent-binary"},
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(2 * time.Second),
+	}))
+
+	port, err := f.m.EnsureRunning(context.Background(), k, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := get(t, port, "/api/health"); code != 200 {
+		t.Fatalf("health = %d", code)
+	}
+}
+
 func TestInitFailureRetriesNextStart(t *testing.T) {
 	f := newFixture(t)
 	f.provisionCfg(t, "be-init-retry", manifest.Backend{

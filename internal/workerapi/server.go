@@ -15,6 +15,7 @@ import (
 // *supervise.Manager satisfies it and tests can substitute a fake.
 type Supervisor interface {
 	EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (int, error)
+	OfferWireSpec(k supervise.Key, s supervise.WireSpec)
 	Stop(k supervise.Key, reason string)
 	Status(k supervise.Key) string
 	Running() int
@@ -69,6 +70,14 @@ func (s *Server) handleEnsure(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
+	// Offer the control-resolved specs before the ensure so the Manager's
+	// spec lookup finds them; its own (empty) DB is still consulted first.
+	if req.Spec != nil {
+		s.sup.OfferWireSpec(req.Key.toKey(), *req.Spec)
+	}
+	if req.PeerSpec != nil && req.Key.Peer != "" {
+		s.sup.OfferWireSpec(supervise.BackendKey(req.Key.RepoID, req.Key.Peer), *req.PeerSpec)
+	}
 	port, err := s.sup.EnsureRunning(r.Context(), req.Key.toKey(), req.Repo)
 	if err != nil {
 		// A failed start is a normal outcome (crash, missing artifact), reported
@@ -114,11 +123,12 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// maxWorkerBody caps request bodies before decoding. Every request shape here
-// is tiny (a key plus a flag or two), so a low cap is ample and keeps a
+// maxWorkerBody caps request bodies before decoding. The largest request is
+// an ensure carrying two run-config JSON blobs (argv + env from the manifest,
+// a few KiB in practice), so 1 MiB is ample headroom while still keeping a
 // compromised or misconfigured-network peer from forcing unbounded allocation
 // against this RCE-adjacent surface.
-const maxWorkerBody = 64 << 10 // 64 KiB
+const maxWorkerBody = 1 << 20 // 1 MiB
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if r.Method != http.MethodPost {
