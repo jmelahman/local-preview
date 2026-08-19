@@ -51,6 +51,8 @@ type fakeSup struct {
 	maxWarm      int
 	minWarm      int
 	idleOverride time.Duration
+	warmHits     int64
+	coldStarts   int64
 }
 
 func (f *fakeSup) OfferWireSpec(k supervise.Key, s supervise.WireSpec) {
@@ -89,6 +91,7 @@ func (f *fakeSup) IdleOverride() time.Duration     { return f.idleOverride }
 func (f *fakeSup) SetIdleOverride(d time.Duration) { f.idleOverride = d }
 func (f *fakeSup) Running() int                    { return f.running }
 func (f *fakeSup) MaxWarm() int                    { return f.maxWarm }
+func (f *fakeSup) HitStats() (warm, cold int64)    { return f.warmHits, f.coldStarts }
 
 const secret = "s3cr3t"
 

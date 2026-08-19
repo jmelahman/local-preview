@@ -595,6 +595,34 @@ deploys a branch alias routes to.
 }
 ```
 
+## Statistics
+
+### `GET /api/stats`
+
+Instance-wide statistics for the dashboard's **Statistics** view.
+
+- **`startup`** — cold-start latency, in seconds, over the last 30 days,
+  derived from the `start_attempt`→`healthy` process-event trail (each
+  successful start is one sample). Percentile fields are omitted when `count`
+  is `0`.
+- **`hits`** — cumulative warm-vs-cold outcomes since the serving process
+  started (per-worker counters, summed across the fleet on a control node). A
+  warm hit is a preview request served by an already-running process; a cold
+  start is one that had to launch a process. `warm_ratio` is
+  `warm / (warm + cold)`, omitted until there has been at least one request.
+  These counters reset when a worker restarts.
+- **`runtime`** — the live serving footprint: `workers` fresh serving nodes
+  (`1` on a single node), `running` warm processes right now, and `capacity`
+  the total bounded warm-process capacity (`0` = unlimited).
+
+```json
+{
+  "startup": { "count": 42, "p50_seconds": 1.8, "p90_seconds": 4.2, "p99_seconds": 9.1 },
+  "hits": { "warm": 152, "cold": 20, "warm_ratio": 0.883 },
+  "runtime": { "workers": 3, "running": 7, "capacity": 30 }
+}
+```
+
 ## Webhooks
 
 ### `POST /api/webhooks/github`

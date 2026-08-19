@@ -433,6 +433,7 @@ func run(opts serveOptions) error {
 		SSO:                 sso,
 		DashboardOrigin:     dashboardOrigin,
 		CookiesSecure:       cookiesSecure,
+		FleetStats:          fleetStatsFn(reg),
 		WarmPolicy: func() api.WarmPolicy {
 			return api.WarmPolicy{
 				MaxWarm:            super.MaxWarm(),
@@ -722,6 +723,25 @@ func workerEndpoints(opts serveOptions) []string {
 // slots ÷ capacity) — the signal a scale-out policy (e.g. a CloudWatch
 // target-tracking alarm scraping this line, or a sidecar publishing it as a
 // custom metric) drives autoscaling from. Returns immediately.
+// fleetStatsFn adapts a fleet registry to the api.Deps.FleetStats accessor,
+// or returns nil when there is no fleet (single node), so the stats handler
+// falls back to the local Manager.
+func fleetStatsFn(reg *fleet.Registry) func() api.FleetSummary {
+	if reg == nil {
+		return nil
+	}
+	return func() api.FleetSummary {
+		s := reg.Stat()
+		return api.FleetSummary{
+			Workers:    s.Workers,
+			Running:    s.Running,
+			Capacity:   s.Capacity,
+			WarmHits:   s.WarmHits,
+			ColdStarts: s.ColdStarts,
+		}
+	}
+}
+
 func startFleetSignal(ctx context.Context, reg *fleet.Registry) {
 	go func() {
 		t := time.NewTicker(fleetSignalInterval)

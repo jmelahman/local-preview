@@ -144,6 +144,29 @@ func TestCapacityAndLoad(t *testing.T) {
 	}
 }
 
+func TestStat(t *testing.T) {
+	r, _ := regFresh(t, map[string]workerapi.Heartbeat{
+		"a": {Running: 3, MaxWarm: 10, WarmHits: 40, ColdStarts: 5},
+		"b": {Running: 5, MaxWarm: 10, WarmHits: 50, ColdStarts: 5},
+	})
+	st := r.Stat()
+	if st.Workers != 2 || st.Running != 8 || st.Capacity != 20 {
+		t.Fatalf("stat = %+v, want workers=2 running=8 capacity=20", st)
+	}
+	if st.WarmHits != 90 || st.ColdStarts != 10 {
+		t.Fatalf("stat hits = %d/%d, want 90/10", st.WarmHits, st.ColdStarts)
+	}
+
+	// An unbounded worker zeroes the finite capacity figure (matches Capacity).
+	unb, _ := regFresh(t, map[string]workerapi.Heartbeat{
+		"full":      {Running: 10, MaxWarm: 10},
+		"unbounded": {Running: 3, MaxWarm: 0},
+	})
+	if got := unb.Stat(); got.Capacity != 0 || got.Workers != 2 {
+		t.Fatalf("unbounded stat = %+v, want capacity=0 workers=2", got)
+	}
+}
+
 func TestLoadRatioUnboundedIsHeadroom(t *testing.T) {
 	// An unlimited worker (max_warm 0) means the fleet has spare room, so the
 	// scale-out signal must read 0, not running/running = 1 ("scale forever").

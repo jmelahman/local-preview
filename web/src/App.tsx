@@ -11,6 +11,7 @@ import {
   type ProcessState,
   type Repo,
   type SideStats,
+  type StatsReport,
 } from "@/api/client";
 
 const THEME_KEY = "app.themeMode";
@@ -1471,6 +1472,155 @@ function RetentionForm() {
   );
 }
 
+// formatSeconds renders a duration for the stats view: sub-second as ms,
+// otherwise seconds (or minutes past a minute).
+function formatSeconds(s: number): string {
+  if (s < 1) return `${Math.round(s * 1000)}ms`;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${Math.round(s - m * 60)}s`;
+}
+
+// StatCard is a labelled headline figure with an optional sub-line, the unit
+// tile the statistics view is built from.
+function StatCard({
+  label,
+  value,
+  sub,
+  title,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  title?: string;
+}) {
+  return (
+    <div
+      className="flex flex-col gap-0.5 rounded border border-border bg-surface-2 px-3 py-2"
+      title={title}
+    >
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-fg-muted">
+        {label}
+      </span>
+      <span className="text-xl font-semibold tabular-nums">{value}</span>
+      {sub && <span className="text-[11px] text-fg-muted">{sub}</span>}
+    </div>
+  );
+}
+
+// StatisticsDialog surfaces instance-wide metrics: cold-start latency
+// percentiles, the warm-cache hit ratio, and the live serving footprint.
+// Runtime figures are live, so the query refetches on an interval.
+function StatisticsDialog({ onClose }: { onClose: () => void }) {
+  const stats = useQuery<StatsReport>({
+    queryKey: ["stats"],
+    queryFn: api.getStats,
+    refetchInterval: 5000,
+  });
+  const s = stats.data;
+
+  const warmPct = s && s.hits.warm_ratio != null ? `${(s.hits.warm_ratio * 100).toFixed(1)}%` : "—";
+  const totalHits = s ? s.hits.warm + s.hits.cold : 0;
+
+  return (
+    <Modal title="Statistics" onClose={onClose} wide>
+      <div className="flex flex-col gap-5 p-4 text-sm">
+        {stats.isError && (
+          <p className="text-fg-danger">Failed to load statistics: {String(stats.error)}</p>
+        )}
+        {!s && !stats.isError && <p className="text-xs text-fg-muted">measuring…</p>}
+        {s && (
+          <>
+            <section className="flex flex-col gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+                Cold-start latency
+                <span className="ml-2 font-normal normal-case text-fg-muted">
+                  last 30 days · {s.startup.count} start{s.startup.count === 1 ? "" : "s"}
+                </span>
+              </h3>
+              {s.startup.count > 0 ? (
+                <div className="grid grid-cols-3 gap-2">
+                  <StatCard
+                    label="p50"
+                    value={formatSeconds(s.startup.p50_seconds ?? 0)}
+                    title="Median time from process start to first healthy response"
+                  />
+                  <StatCard
+                    label="p90"
+                    value={formatSeconds(s.startup.p90_seconds ?? 0)}
+                    title="90th-percentile cold-start time"
+                  />
+                  <StatCard
+                    label="p99"
+                    value={formatSeconds(s.startup.p99_seconds ?? 0)}
+                    title="99th-percentile cold-start time"
+                  />
+                </div>
+              ) : (
+                <p className="text-xs text-fg-muted">
+                  No cold starts recorded yet — deploy and open a preview to populate this.
+                </p>
+              )}
+            </section>
+
+            <section className="flex flex-col gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+                Warm cache
+                <span className="ml-2 font-normal normal-case text-fg-muted">since startup</span>
+              </h3>
+              <div className="grid grid-cols-3 gap-2">
+                <StatCard
+                  label="warm hit rate"
+                  value={warmPct}
+                  sub={`${totalHits.toLocaleString()} request${totalHits === 1 ? "" : "s"}`}
+                  title="Share of preview requests served by an already-running process (no cold start)"
+                />
+                <StatCard
+                  label="warm hits"
+                  value={s.hits.warm.toLocaleString()}
+                  title="Requests served by an already-running preview process"
+                />
+                <StatCard
+                  label="cold starts"
+                  value={s.hits.cold.toLocaleString()}
+                  title="Requests that had to start a preview process"
+                />
+              </div>
+            </section>
+
+            <section className="flex flex-col gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+                Runtime
+              </h3>
+              <div className="grid grid-cols-3 gap-2">
+                <StatCard
+                  label={s.runtime.workers === 1 ? "node" : "workers"}
+                  value={s.runtime.workers.toLocaleString()}
+                  title="Serving nodes currently reporting healthy"
+                />
+                <StatCard
+                  label="running"
+                  value={s.runtime.running.toLocaleString()}
+                  sub="warm processes"
+                  title="Preview processes currently running (committed warm slots)"
+                />
+                <StatCard
+                  label="capacity"
+                  value={
+                    s.runtime.capacity === 0 ? "unlimited" : s.runtime.capacity.toLocaleString()
+                  }
+                  sub={s.runtime.capacity === 0 ? undefined : "warm slots"}
+                  title="Total bounded warm-process capacity across serving nodes (0 = unlimited)"
+                />
+              </div>
+            </section>
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 // StorageDialog is the instance-management view: how much disk the data
 // directory uses (by category and by repo), the retention policy, and a
 // manual GC trigger.
@@ -1651,7 +1801,9 @@ const deployStatuses: DeployStatusFilter[] = [
 const pageSize = 50;
 
 export default function App() {
-  const [dialog, setDialog] = useState<"register" | "deploy" | "repos" | "storage" | null>(null);
+  const [dialog, setDialog] = useState<
+    "register" | "deploy" | "repos" | "storage" | "stats" | null
+  >(null);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<DeployStatusFilter | "">("");
@@ -1745,6 +1897,15 @@ export default function App() {
             className="inline-flex h-7 w-7 items-center justify-center rounded bg-surface-2 text-fg transition-colors duration-150 hover:bg-surface-3"
           >
             <IconSettings />
+          </button>
+          <button
+            type="button"
+            onClick={() => setDialog("stats")}
+            title="Statistics"
+            aria-label="Statistics"
+            className="inline-flex h-7 w-7 items-center justify-center rounded bg-surface-2 text-fg transition-colors duration-150 hover:bg-surface-3"
+          >
+            <IconChart />
           </button>
           <button
             type="button"
@@ -1997,6 +2158,7 @@ export default function App() {
       {dialog === "register" && <RegisterRepoDialog onClose={() => setDialog(null)} />}
       {dialog === "repos" && <ManageReposDialog onClose={() => setDialog(null)} />}
       {dialog === "storage" && <StorageDialog onClose={() => setDialog(null)} />}
+      {dialog === "stats" && <StatisticsDialog onClose={() => setDialog(null)} />}
       {dialog === "deploy" && (
         <DeployDialog
           repos={repos.data ?? []}
@@ -2288,6 +2450,26 @@ function IconTrash({ className = "" }: { className?: string }) {
     >
       <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6" />
       <path d="M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
+function IconChart() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 3v18h18" />
+      <rect x="7" y="12" width="3" height="6" />
+      <rect x="12" y="8" width="3" height="10" />
+      <rect x="17" y="4" width="3" height="14" />
     </svg>
   );
 }

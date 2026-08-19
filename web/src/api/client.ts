@@ -120,6 +120,27 @@ export type DeployStats = {
   frontend: SideStats | null;
 };
 
+// Instance-wide statistics (GET /api/stats). Percentile and ratio fields are
+// absent until there's data to compute them from.
+export type StatsReport = {
+  startup: {
+    count: number;
+    p50_seconds?: number;
+    p90_seconds?: number;
+    p99_seconds?: number;
+  };
+  hits: {
+    warm: number;
+    cold: number;
+    warm_ratio?: number;
+  };
+  runtime: {
+    workers: number;
+    running: number;
+    capacity: number; // 0 = unlimited
+  };
+};
+
 export type LogSide = "be" | "fe";
 
 // An incremental slice of a process run log (the supervised server's
@@ -304,6 +325,7 @@ export const api = {
   getRetention: () => request<RetentionPolicy>("/api/retention"),
   putRetention: (policy: RetentionPolicy) =>
     request<RetentionPolicy>("/api/retention", { method: "PUT", body: JSON.stringify(policy) }),
+  getStats: () => request<StatsReport>("/api/stats"),
   getWarm: () => request<WarmPolicy>("/api/warm"),
   putWarm: (policy: WarmPolicy) =>
     request<WarmPolicy>("/api/warm", { method: "PUT", body: JSON.stringify(policy) }),

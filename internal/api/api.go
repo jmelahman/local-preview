@@ -114,6 +114,10 @@ type Deps struct {
 	// endpoints (tests that don't care).
 	WarmPolicy    func() WarmPolicy
 	SetWarmPolicy func(p WarmPolicy) error
+	// FleetStats returns the control node's fleet runtime rollup for the
+	// statistics view (worker count, capacity, warm/cold totals). nil on a
+	// single node, where handleStats falls back to the local Manager.
+	FleetStats func() FleetSummary
 }
 
 // WarmPolicy shapes the warm-process footprint at runtime, per serving node:
@@ -180,6 +184,7 @@ func NewMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("PUT /api/retention", d.handlePutRetention)
 	mux.HandleFunc("GET /api/warm", d.handleGetWarm)
 	mux.HandleFunc("PUT /api/warm", d.handlePutWarm)
+	mux.HandleFunc("GET /api/stats", d.handleStats)
 	mux.HandleFunc("POST /api/gc", d.handleRunGC)
 	mux.Handle("/", web.Handler())
 	return mux

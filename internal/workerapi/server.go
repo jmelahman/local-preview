@@ -29,6 +29,7 @@ type Supervisor interface {
 	SetMinWarm(n int)
 	IdleOverride() time.Duration
 	SetIdleOverride(d time.Duration)
+	HitStats() (warm, cold int64)
 }
 
 // Server exposes a Supervisor over HTTP behind a shared-secret check. Mount
@@ -150,12 +151,15 @@ func (s *Server) handleRunLog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	warm, cold := s.sup.HitStats()
 	writeJSON(w, Heartbeat{
 		Running:            s.sup.Running(),
 		MaxWarm:            s.sup.MaxWarm(),
 		MinWarm:            s.sup.MinWarm(),
 		IdleTimeoutSeconds: int(s.sup.IdleOverride() / time.Second),
 		Draining:           s.draining.Load(),
+		WarmHits:           warm,
+		ColdStarts:         cold,
 	})
 }
 

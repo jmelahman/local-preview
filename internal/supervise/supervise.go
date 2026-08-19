@@ -98,6 +98,13 @@ type Manager struct {
 	minWarm        atomic.Int64 // floor: this many most-recent processes never idle out
 	idleOverride   atomic.Int64 // ns; > 0 overrides every manifest idle_timeout
 
+	// warmHits and coldStarts count EnsureRunning outcomes since this
+	// Manager started: a warm hit reused an already-tracked process, a cold
+	// start kicked off a new one. Reported in the worker heartbeat so the
+	// control node can aggregate a fleet-wide warm ratio.
+	warmHits   atomic.Int64
+	coldStarts atomic.Int64
+
 	mu        sync.Mutex
 	procs     map[Key]*process
 	locks     map[Key]*sync.Mutex
@@ -283,6 +290,13 @@ func (m *Manager) Running() int {
 	return len(m.procs)
 }
 
+// HitStats returns the cumulative warm-hit and cold-start counts since this
+// Manager started. Reported in the worker heartbeat so the control node can
+// compute a fleet-wide warm ratio.
+func (m *Manager) HitStats() (warm, cold int64) {
+	return m.warmHits.Load(), m.coldStarts.Load()
+}
+
 // StartReaper launches the loop enforcing idle timeouts and the warm cap.
 func (m *Manager) StartReaper(ctx context.Context) {
 	go func() {
@@ -374,7 +388,12 @@ func (m *Manager) EnsureRunning(ctx context.Context, k Key, repoName string) (in
 			m.procs[k] = p
 			// This attempt now owns the key's outcome.
 			delete(m.failures, k)
+			m.coldStarts.Add(1)
 			go m.start(k, p)
+		} else {
+			// A request served by an already-tracked process (ready, or
+			// still starting from a concurrent request) — no new start.
+			m.warmHits.Add(1)
 		}
 		p.lastTouch = time.Now()
 		// SSR frontends call their backend directly over the deploy

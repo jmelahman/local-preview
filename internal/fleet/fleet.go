@@ -234,6 +234,45 @@ func (r *Registry) Capacity() (running, capacity int) {
 	return running, capacity
 }
 
+// FleetStat is the fleet-wide runtime summary the dashboard's statistics view
+// renders: how many workers are fresh, their committed and bounded capacity,
+// and the cumulative warm/cold EnsureRunning counts summed across them.
+type FleetStat struct {
+	Workers    int   `json:"workers"`
+	Running    int   `json:"running"`
+	Capacity   int   `json:"capacity"` // 0 = unbounded (some fresh worker is unlimited)
+	WarmHits   int64 `json:"warm_hits"`
+	ColdStarts int64 `json:"cold_starts"`
+}
+
+// Stat summarizes the fresh workers for the dashboard. Capacity is 0 when any
+// fresh worker is unlimited (max_warm 0), matching Capacity's convention that
+// an unlimited worker contributes no finite bound.
+func (r *Registry) Stat() FleetStat {
+	now := time.Now()
+	var st FleetStat
+	var unbounded bool
+	for _, w := range r.list() {
+		hb, last, reachable := w.snapshot()
+		if !r.fresh(last, reachable, now) {
+			continue
+		}
+		st.Workers++
+		st.Running += hb.Running
+		if hb.MaxWarm > 0 {
+			st.Capacity += hb.MaxWarm
+		} else {
+			unbounded = true
+		}
+		st.WarmHits += hb.WarmHits
+		st.ColdStarts += hb.ColdStarts
+	}
+	if unbounded {
+		st.Capacity = 0
+	}
+	return st
+}
+
 // LoadRatio is committed warm slots ÷ fleet capacity in [0,1] — the target a
 // scale-out policy tracks. Any fresh worker with unlimited capacity (max_warm
 // 0) means the fleet has spare room, so the ratio is 0 (never a scale-out

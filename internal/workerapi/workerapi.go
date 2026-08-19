@@ -137,4 +137,10 @@ type Heartbeat struct {
 	MinWarm            int  `json:"min_warm,omitempty"`
 	IdleTimeoutSeconds int  `json:"idle_timeout_seconds,omitempty"`
 	Draining           bool `json:"draining"`
+	// WarmHits and ColdStarts are the worker's cumulative EnsureRunning
+	// outcome counts since it started — summed across the fleet for the
+	// dashboard's warm-ratio statistic. Cumulative, so they reset when a
+	// worker reboots; the control node treats them as monotonic per worker.
+	WarmHits   int64 `json:"warm_hits"`
+	ColdStarts int64 `json:"cold_starts"`
 }
