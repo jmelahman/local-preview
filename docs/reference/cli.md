@@ -125,6 +125,35 @@ Exits non-zero when the matched deploy isn't ready — still building, failed,
 or evicted — with a hint at the follow-up command (`preview deploy`,
 `preview deploy logs`).
 
+## `preview logs`
+
+Stream a preview's run log — the preview server's own stdout and stderr, init
+output included — addressed by ref instead of a numeric deploy id.
+`preview logs` resolves the ref exactly like `preview open` (HEAD of the
+current repo by default; a branch, tag, or sha otherwise), then tails the
+run log of the deploy it finds. For a deploy's _build_ logs, use
+`preview deploy logs <id>`.
+
+| Flag | Description |
+| --- | --- |
+| `--repo` | Registered repo name; by default the current directory is matched against registered sources |
+| `--side` | Which process: `be` (backend, default) or `fe` (process-mode frontend) |
+| `-f`, `--follow` | Keep polling for new output until interrupted |
+
+## `preview stats`
+
+Show live CPU/memory of a preview's processes (docker-stats-like; samples
+twice a second apart to compute the CPU percentage), addressed by ref. Like
+`preview logs`, it resolves the ref the way `preview open` does.
+
+| Flag | Description |
+| --- | --- |
+| `--repo` | Registered repo name; by default the current directory is matched against registered sources |
+
+Both `preview logs` and `preview stats` exit non-zero when the matched deploy
+has no live process to inspect — still building, failed, or evicted — with a
+hint at the follow-up command.
+
 ## `preview configure`
 
 Store which server the client subcommands talk to, so `preview open`,
