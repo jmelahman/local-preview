@@ -158,6 +158,9 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   also publish on its routable address (derived from `--worker-listen`) or the
   control node's proxy dials a port nothing answers; local health checks still
   poll 127.0.0.1, so the loopback binding must survive alongside it.
+- Never mix inline SG rules with standalone rule resources on one group —
+  Terraform wipes the standalone ones on the next in-place SG update (a retype
+  deleted the deps ingress in production); give each rule owner its own group.
 - A `nofail` data volume must gate the service that bind-mounts it — without
   `RequiresMountsFor=`, a boot that races the volume attach starts the
   orchestrator on an empty dir with a fresh SQLite DB, and a later mount can't
