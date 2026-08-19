@@ -25,6 +25,8 @@ type Supervisor interface {
 	Running() int
 	MaxWarm() int
 	SetMaxWarm(n int)
+	MinWarm() int
+	SetMinWarm(n int)
 	IdleOverride() time.Duration
 	SetIdleOverride(d time.Duration)
 }
@@ -151,6 +153,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, Heartbeat{
 		Running:            s.sup.Running(),
 		MaxWarm:            s.sup.MaxWarm(),
+		MinWarm:            s.sup.MinWarm(),
 		IdleTimeoutSeconds: int(s.sup.IdleOverride() / time.Second),
 		Draining:           s.draining.Load(),
 	})
@@ -163,6 +166,9 @@ func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MaxWarm != nil {
 		s.sup.SetMaxWarm(*req.MaxWarm)
+	}
+	if req.MinWarm != nil {
+		s.sup.SetMinWarm(*req.MinWarm)
 	}
 	if req.IdleTimeoutSeconds != nil {
 		s.sup.SetIdleOverride(time.Duration(*req.IdleTimeoutSeconds) * time.Second)

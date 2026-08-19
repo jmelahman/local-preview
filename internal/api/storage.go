@@ -123,6 +123,14 @@ func (d Deps) handlePutWarm(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "idle_timeout_seconds must be >= 0 (0 = per-manifest values)")
 		return
 	}
+	if p.MinWarm < 0 {
+		httpError(w, http.StatusBadRequest, "min_warm must be >= 0")
+		return
+	}
+	if p.MaxWarm > 0 && p.MinWarm > p.MaxWarm {
+		httpError(w, http.StatusBadRequest, "min_warm must not exceed max_warm (the floor can't sit above the target)")
+		return
+	}
 	if err := d.SetWarmPolicy(p); err != nil {
 		internalError(w, "apply warm policy", err)
 		return

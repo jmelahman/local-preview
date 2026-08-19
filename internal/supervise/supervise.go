@@ -94,7 +94,8 @@ type Manager struct {
 
 	healthInterval time.Duration
 	reapInterval   time.Duration
-	maxWarm        atomic.Int64 // LRU cap on running processes; 0 = unlimited
+	maxWarm        atomic.Int64 // soft target for warm processes; 0 = unlimited
+	minWarm        atomic.Int64 // floor: this many most-recent processes never idle out
 	idleOverride   atomic.Int64 // ns; > 0 overrides every manifest idle_timeout
 
 	mu        sync.Mutex
@@ -227,13 +228,28 @@ func (m *Manager) CrashedKeys() []Key {
 	return keys
 }
 
-// SetMaxWarm caps concurrently running processes: beyond it the
-// least-recently-used are stopped. Non-positive disables the cap. Safe at
-// runtime — the control node pushes the dashboard-configured cap to workers
-// while they serve; the reaper enforces the new value on its next tick.
+// SetMaxWarm sets the warm *target*: beyond it the reaper prunes the
+// least-recently-used processes back down — but only ones that are actually
+// idle (untouched for warmActiveWindow). Actively-used previews are never
+// stopped to satisfy the target, so a burst of simultaneous visitors is
+// served in full and pruned back once it quiets down. Non-positive disables
+// the target. Safe at runtime — the control node pushes the
+// dashboard-configured value to workers while they serve.
 func (m *Manager) SetMaxWarm(n int) {
 	m.maxWarm.Store(int64(max(n, 0)))
 }
+
+// SetMinWarm sets the warm floor: the n most-recently-used processes are
+// exempt from the idle timeout (and from target pruning), so the previews a
+// developer is most likely to revisit stay hot indefinitely. 0 (the default)
+// keeps today's behavior. Safe at runtime, like SetMaxWarm.
+func (m *Manager) SetMinWarm(n int) {
+	m.minWarm.Store(int64(max(n, 0)))
+}
+
+// MinWarm returns the warm floor. Echoed in the worker heartbeat so the
+// control node's reconcile loop can re-push it after a worker reboot.
+func (m *Manager) MinWarm() int { return int(m.minWarm.Load()) }
 
 // MaxWarm returns the warm-process cap (0 = unlimited). Reported in the worker
 // heartbeat so the control node can size fleet-wide capacity.
@@ -906,10 +922,18 @@ func isReady(p *process) bool {
 	}
 }
 
-// reap enforces idle timeouts and the LRU warm cap. Backends inherit their
-// running frontend's recency and are never reaped while that frontend
-// runs: the frontend holds the backend's port in its env, so a backend
-// restart (new port) would strand it.
+// warmActiveWindow is what "actively used" means to the warm target: a
+// process touched within it is never pruned to satisfy the target — a burst
+// of simultaneous visitors is served in full and pruned back once quiet.
+const warmActiveWindow = 2 * time.Minute
+
+// reap enforces the warm policy: a floor (the min-warm most-recent processes
+// never idle out), per-process idle timeouts (or the server-wide override),
+// and a soft warm target (beyond it, the least-recently-used *idle* processes
+// are pruned — never actively-used ones). Backends inherit their running
+// frontend's recency and are never reaped while that frontend runs: the
+// frontend holds the backend's port in its env, so a backend restart (new
+// port) would strand it.
 func (m *Manager) reap() {
 	type cand struct {
 		k     Key
@@ -934,13 +958,24 @@ func (m *Manager) reap() {
 	}
 	m.mu.Unlock()
 
+	// Most-recent first: the head of this order is what the floor protects,
+	// the tail is what pruning takes. A pair's frontend sorts "older" than its
+	// backend on equal touches, so it stops first.
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].touch.Equal(cands[j].touch) {
+			return cands[i].k.Side == SideBackend && cands[j].k.Side == SideFrontend
+		}
+		return cands[i].touch.After(cands[j].touch)
+	})
+	floor := min(m.MinWarm(), len(cands))
+
 	// The server-wide override beats the per-process value stamped at start,
 	// so a dashboard change governs already-running previews too.
 	override := m.IdleOverride()
-	alive := cands[:0]
-	for _, c := range cands {
+	alive := cands[:floor:floor] // the floor is exempt from idle and pruning alike
+	for _, c := range cands[floor:] {
 		if _, paired := pairedTouch[c.k]; paired {
-			alive = append(alive, c) // counted toward the cap, never stopped
+			alive = append(alive, c) // counted toward the target, never stopped
 			continue
 		}
 		idle := c.idle
@@ -953,26 +988,24 @@ func (m *Manager) reap() {
 		}
 		alive = append(alive, c)
 	}
-	maxWarm := m.MaxWarm()
-	if maxWarm <= 0 || len(alive) <= maxWarm {
+
+	target := m.MaxWarm()
+	if target <= 0 || len(alive) <= target {
 		return
 	}
-	sort.Slice(alive, func(i, j int) bool {
-		if alive[i].touch.Equal(alive[j].touch) {
-			// Stop a pair's frontend before its backend.
-			return alive[i].k.Side == SideFrontend && alive[j].k.Side == SideBackend
-		}
-		return alive[i].touch.Before(alive[j].touch)
-	})
-	excess := len(alive) - maxWarm
-	for _, c := range alive {
-		if excess == 0 {
-			return
-		}
+	// Prune oldest-first, but only genuinely idle candidates: an active
+	// process above the target is demand, not waste — and sustained demand
+	// above the target is the autoscaling signal, not something to kill.
+	excess := len(alive) - target
+	for i := len(alive) - 1; i >= floor && excess > 0; i-- {
+		c := alive[i]
 		if _, paired := pairedTouch[c.k]; paired {
 			continue
 		}
-		m.Stop(c.k, fmt.Sprintf("least-recently-used beyond max-warm %d", maxWarm))
+		if now.Sub(c.touch) < warmActiveWindow {
+			continue // actively used; never pruned for the target
+		}
+		m.Stop(c.k, fmt.Sprintf("least-recently-used beyond warm target %d", target))
 		excess--
 	}
 }

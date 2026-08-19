@@ -1304,22 +1304,26 @@ function WarmForm() {
   const queryClient = useQueryClient();
   const policy = useQuery({ queryKey: ["warm"], queryFn: api.getWarm });
   const [maxWarm, setMaxWarm] = useState("0");
+  const [minWarm, setMinWarm] = useState("0");
   const [idleMinutes, setIdleMinutes] = useState("0");
 
   useEffect(() => {
     if (policy.data) {
       setMaxWarm(String(policy.data.max_warm));
+      setMinWarm(String(policy.data.min_warm));
       setIdleMinutes(String(Math.round(policy.data.idle_timeout_seconds / 60)));
     }
   }, [policy.data]);
 
   const parsed = {
     max_warm: Math.max(0, Math.floor(Number(maxWarm) || 0)),
+    min_warm: Math.max(0, Math.floor(Number(minWarm) || 0)),
     idle_timeout_seconds: Math.max(0, Math.floor(Number(idleMinutes) || 0)) * 60,
   };
   const dirty =
     policy.data != null &&
     (parsed.max_warm !== policy.data.max_warm ||
+      parsed.min_warm !== policy.data.min_warm ||
       parsed.idle_timeout_seconds !== policy.data.idle_timeout_seconds);
 
   const save = useMutation({
@@ -1332,12 +1336,21 @@ function WarmForm() {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-end gap-3">
-        <Field label="Warm processes kept per node">
+        <Field label="Warm target per node">
           <input
             type="number"
             min={0}
             value={maxWarm}
             onChange={(e) => setMaxWarm(e.target.value)}
+            className={numberInputClass}
+          />
+        </Field>
+        <Field label="Always keep warm (min)">
+          <input
+            type="number"
+            min={0}
+            value={minWarm}
+            onChange={(e) => setMinWarm(e.target.value)}
             className={numberInputClass}
           />
         </Field>

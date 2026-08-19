@@ -116,7 +116,10 @@ type drainReq struct {
 // pointers so a push only touches what it names; a rebooted worker falls back
 // to its boot flags until the control node's reconcile loop pushes again.
 type WorkerConfig struct {
+	// MaxWarm is the soft warm target; MinWarm the floor of most-recent
+	// processes exempt from idle timeouts.
 	MaxWarm *int `json:"max_warm,omitempty"`
+	MinWarm *int `json:"min_warm,omitempty"`
 	// IdleTimeoutSeconds > 0 overrides every manifest's idle_timeout; 0
 	// restores per-manifest values.
 	IdleTimeoutSeconds *int `json:"idle_timeout_seconds,omitempty"`
@@ -131,6 +134,7 @@ type WorkerConfig struct {
 type Heartbeat struct {
 	Running            int  `json:"running"`
 	MaxWarm            int  `json:"max_warm"`
+	MinWarm            int  `json:"min_warm,omitempty"`
 	IdleTimeoutSeconds int  `json:"idle_timeout_seconds,omitempty"`
 	Draining           bool `json:"draining"`
 }

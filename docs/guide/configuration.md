@@ -162,13 +162,19 @@ footprint:
 
 - **Idle timeout** — each side's `idle_timeout` (default `30m`) stops its
   process after that long without a request through the proxy.
-- **LRU cap** — `--max-warm` bounds how many processes run at once; beyond
-  it the least-recently-used are stopped. The hottest previews stay warm,
-  cold ones restart on their next request (a cold start, not a rebuild).
-  Note it counts *processes*: a deploy with a frontend process occupies two
-  slots.
+- **Warm target** — `--max-warm` is a *soft* target: a burst of
+  simultaneously-used previews above it is served in full, and the reaper
+  prunes back down using only the least-recently-used processes that are
+  genuinely idle (untouched for ~2 minutes) — an actively-used preview is
+  never stopped to satisfy the target. Cold ones restart on their next
+  request (a cold start, not a rebuild). Sustained demand above the target
+  is the fleet's scale-out signal, not something it kills. Note it counts
+  *processes*: a deploy with a frontend process occupies two slots.
+- **Warm floor** — `min_warm` (dashboard/API only) exempts that many
+  most-recently-used processes from the idle timeout, keeping the previews a
+  developer is most likely to revisit hot indefinitely.
 
-Both knobs are also editable at runtime from the dashboard (Storage &
+All three knobs are editable at runtime from the dashboard (Storage &
 retention → Warm previews) or via
 [`PUT /api/warm`](/reference/api#put-api-warm): the cap, and a server-wide
 idle-timeout override that beats every manifest's `idle_timeout` when set

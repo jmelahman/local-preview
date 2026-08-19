@@ -690,12 +690,13 @@ func TestLRUWarmCap(t *testing.T) {
 	if _, err := f.m.EnsureRunning(context.Background(), kOld, "demo"); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(30 * time.Millisecond) // distinct touch times
 	if _, err := f.m.EnsureRunning(context.Background(), kNew, "demo"); err != nil {
 		t.Fatal(err)
 	}
-	// Beyond max-warm 1 the least-recently-used backend stops; the newer
-	// one survives.
+	// The target is soft: both were just used, so both stay despite target 1.
+	// Once the older one goes quiet (past the active window), the reaper
+	// prunes it back to the target; the newer one survives.
+	f.setTouch(t, kOld, time.Now().Add(-2*warmActiveWindow))
 	f.waitStatus(t, kOld, "idle")
 	if got := f.m.Status(kNew); got != "running" {
 		t.Fatalf("newer backend = %q, want running", got)
@@ -811,5 +812,79 @@ func TestIdleOverrideGovernsRunningProcesses(t *testing.T) {
 	f.m.reap()
 	if st := f.m.Status(k); st != StatusRunning {
 		t.Fatalf("status with override cleared = %q, want running (1h manifest timeout)", st)
+	}
+}
+
+// setTouch backdates a process's recency, simulating idleness.
+func (f *fixture) setTouch(t *testing.T, k Key, at time.Time) {
+	t.Helper()
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	p := f.m.procs[k]
+	if p == nil {
+		t.Fatalf("no tracked process for %v", k)
+	}
+	p.lastTouch = at
+}
+
+// TestWarmTargetSparesActive: the warm target is soft — a burst above it is
+// served in full, and only genuinely idle processes are pruned back.
+func TestWarmTargetSparesActive(t *testing.T) {
+	f := newFixture(t)
+	f.provisionIdle(t, "be-active", serverArgv(t), time.Hour)
+	f.provisionIdle(t, "be-stale", serverArgv(t), time.Hour)
+	ctx := context.Background()
+	active := BackendKey(f.repoID, "be-active")
+	stale := BackendKey(f.repoID, "be-stale")
+	for _, k := range []Key{active, stale} {
+		if _, err := f.m.EnsureRunning(ctx, k, "demo"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Both actively used: two over a target of one, and neither is pruned.
+	f.m.SetMaxWarm(1)
+	f.m.reap()
+	if f.m.Status(active) != StatusRunning || f.m.Status(stale) != StatusRunning {
+		t.Fatalf("an actively-used process was pruned for the target: active=%s stale=%s",
+			f.m.Status(active), f.m.Status(stale))
+	}
+
+	// One goes quiet: the next reap prunes exactly it.
+	f.setTouch(t, stale, time.Now().Add(-2*warmActiveWindow))
+	f.m.reap()
+	if got := f.m.Status(stale); got != StatusIdle {
+		t.Fatalf("stale process = %s, want pruned to the target", got)
+	}
+	if got := f.m.Status(active); got != StatusRunning {
+		t.Fatalf("active process = %s, want spared", got)
+	}
+}
+
+// TestMinWarmExemptFromIdle: the floor keeps the most-recent processes warm
+// past their idle timeout; older ones still idle out.
+func TestMinWarmExemptFromIdle(t *testing.T) {
+	f := newFixture(t)
+	f.provisionIdle(t, "be-recent", serverArgv(t), time.Minute)
+	f.provisionIdle(t, "be-old", serverArgv(t), time.Minute)
+	ctx := context.Background()
+	recent := BackendKey(f.repoID, "be-recent")
+	old := BackendKey(f.repoID, "be-old")
+	for _, k := range []Key{old, recent} {
+		if _, err := f.m.EnsureRunning(ctx, k, "demo"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Both idle far beyond their 1m timeout; "recent" less long ago.
+	f.setTouch(t, old, time.Now().Add(-time.Hour))
+	f.setTouch(t, recent, time.Now().Add(-30*time.Minute))
+
+	f.m.SetMinWarm(1)
+	f.m.reap()
+	if got := f.m.Status(recent); got != StatusRunning {
+		t.Fatalf("floor-protected process = %s, want running past its idle timeout", got)
+	}
+	if got := f.m.Status(old); got != StatusIdle {
+		t.Fatalf("unprotected idle process = %s, want stopped", got)
 	}
 }

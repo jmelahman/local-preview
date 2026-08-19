@@ -74,6 +74,7 @@ type Registry struct {
 	// onto every worker (a rebooted worker comes back with its boot flags
 	// until the next poll pushes these). -1 = unset.
 	desiredMaxWarm atomic.Int64
+	desiredMinWarm atomic.Int64
 	desiredIdleSec atomic.Int64
 }
 
@@ -82,6 +83,7 @@ type Registry struct {
 func New(staleAfter time.Duration) *Registry {
 	r := &Registry{workers: map[string]*workerState{}, staleAfter: staleAfter}
 	r.desiredMaxWarm.Store(-1)
+	r.desiredMinWarm.Store(-1)
 	r.desiredIdleSec.Store(-1)
 	return r
 }
@@ -92,6 +94,12 @@ func New(staleAfter time.Duration) *Registry {
 // setting for a fleet.
 func (r *Registry) SetMaxWarm(n int) {
 	r.desiredMaxWarm.Store(int64(max(n, 0)))
+}
+
+// SetMinWarm sets the fleet-wide warm floor, reconciled onto workers like
+// SetMaxWarm.
+func (r *Registry) SetMinWarm(n int) {
+	r.desiredMinWarm.Store(int64(max(n, 0)))
 }
 
 // SetIdleOverride sets the fleet-wide idle-timeout override (0 = restore
@@ -165,11 +173,15 @@ func (r *Registry) StartHeartbeats(ctx context.Context, interval time.Duration) 
 						n := int(want)
 						cfg.MaxWarm = &n
 					}
+					if want := r.desiredMinWarm.Load(); want >= 0 && hb.MinWarm != int(want) {
+						n := int(want)
+						cfg.MinWarm = &n
+					}
 					if want := r.desiredIdleSec.Load(); want >= 0 && hb.IdleTimeoutSeconds != int(want) {
 						n := int(want)
 						cfg.IdleTimeoutSeconds = &n
 					}
-					if cfg.MaxWarm != nil || cfg.IdleTimeoutSeconds != nil {
+					if cfg.MaxWarm != nil || cfg.MinWarm != nil || cfg.IdleTimeoutSeconds != nil {
 						w.be.Configure(hctx, cfg) //nolint:errcheck // next poll retries
 					}
 				}

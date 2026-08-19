@@ -550,13 +550,15 @@ invalid JSON.
 ### `GET /api/warm`
 
 Returns the [warm-process policy](/guide/configuration#warm-previews):
-`max_warm` is the LRU cap on concurrently running preview processes per
-serving node (`0` = unlimited; a process-mode deploy counts as two —
-frontend + backend), and `idle_timeout_seconds` overrides every manifest's
-`idle_timeout` when `> 0` (`0` = per-manifest values, default 30m).
+`max_warm` is the soft warm *target* per serving node — bursts above it are
+served in full; only genuinely idle least-recently-used processes are pruned
+back (`0` = unlimited; a process-mode deploy counts as two — frontend +
+backend). `min_warm` is the floor: that many most-recent processes never
+idle out. `idle_timeout_seconds` overrides every manifest's `idle_timeout`
+when `> 0` (`0` = per-manifest values, default 30m).
 
 ```json
-{ "max_warm": 12, "idle_timeout_seconds": 0 }
+{ "max_warm": 12, "min_warm": 0, "idle_timeout_seconds": 0 }
 ```
 
 ### `PUT /api/warm`
@@ -568,7 +570,8 @@ loop pushes them to every worker (re-pushing after worker reboots). Saved
 values override the `--max-warm` flag and manifest `idle_timeout`s from then
 on.
 
-Response: `200 OK` with the saved policy. `400` for a negative value.
+Response: `200 OK` with the saved policy. `400` for a negative value or a
+`min_warm` above a non-zero `max_warm`.
 
 ### `POST /api/gc`
 

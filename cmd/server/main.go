@@ -177,8 +177,9 @@ func Root() *cobra.Command {
 // dashboard's warm policy lives under; they override the --max-warm flag and
 // every manifest's idle_timeout at boot and at runtime.
 const (
-	warmSettingKey = "warm.max_warm"
-	idleSettingKey = "warm.idle_seconds"
+	warmSettingKey    = "warm.max_warm"
+	minWarmSettingKey = "warm.min_warm"
+	idleSettingKey    = "warm.idle_seconds"
 )
 
 func run(opts serveOptions) error {
@@ -294,6 +295,13 @@ func run(opts serveOptions) error {
 	if warmOverridden {
 		log.Printf("warm cap: %d (dashboard setting; --max-warm %d overridden)", effectiveMaxWarm, opts.maxWarm)
 	}
+	minWarm, minWarmSet := 0, false
+	if v, err := database.GetSetting(minWarmSettingKey); err == nil {
+		if n, perr := strconv.Atoi(v); perr == nil && n >= 0 {
+			minWarm, minWarmSet = n, true
+			super.SetMinWarm(n)
+		}
+	}
 	idleOverrideSec, idleOverridden := 0, false
 	if v, err := database.GetSetting(idleSettingKey); err == nil {
 		if n, perr := strconv.Atoi(v); perr == nil && n >= 0 {
@@ -388,6 +396,9 @@ func run(opts serveOptions) error {
 			if warmOverridden {
 				reg.SetMaxWarm(effectiveMaxWarm)
 			}
+			if minWarmSet {
+				reg.SetMinWarm(minWarm)
+			}
 			if idleOverridden {
 				reg.SetIdleOverride(time.Duration(idleOverrideSec) * time.Second)
 			}
@@ -425,6 +436,7 @@ func run(opts serveOptions) error {
 		WarmPolicy: func() api.WarmPolicy {
 			return api.WarmPolicy{
 				MaxWarm:            super.MaxWarm(),
+				MinWarm:            super.MinWarm(),
 				IdleTimeoutSeconds: int(super.IdleOverride() / time.Second),
 			}
 		},
@@ -432,15 +444,20 @@ func run(opts serveOptions) error {
 			if err := database.SetSetting(warmSettingKey, strconv.Itoa(p.MaxWarm)); err != nil {
 				return err
 			}
+			if err := database.SetSetting(minWarmSettingKey, strconv.Itoa(p.MinWarm)); err != nil {
+				return err
+			}
 			if err := database.SetSetting(idleSettingKey, strconv.Itoa(p.IdleTimeoutSeconds)); err != nil {
 				return err
 			}
 			idle := time.Duration(p.IdleTimeoutSeconds) * time.Second
 			super.SetMaxWarm(p.MaxWarm)
+			super.SetMinWarm(p.MinWarm)
 			super.SetIdleOverride(idle)
 			if reg != nil {
-				// Workers pick both up on the next heartbeat.
+				// Workers pick these up on the next heartbeat.
 				reg.SetMaxWarm(p.MaxWarm)
+				reg.SetMinWarm(p.MinWarm)
 				reg.SetIdleOverride(idle)
 			}
 			return nil

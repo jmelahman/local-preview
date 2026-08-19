@@ -116,12 +116,18 @@ type Deps struct {
 	SetWarmPolicy func(p WarmPolicy) error
 }
 
-// WarmPolicy bounds the warm-process footprint at runtime: the LRU cap on
-// concurrently running preview processes per serving node (0 = unlimited),
-// and an idle-timeout override in seconds that beats every manifest's
-// idle_timeout when > 0 (0 = per-manifest values, default 30m).
+// WarmPolicy shapes the warm-process footprint at runtime, per serving node:
+// MaxWarm is the soft *target* — beyond it the reaper prunes the
+// least-recently-used processes that are actually idle, but never
+// actively-used ones, so bursts are served in full and pruned back once
+// quiet (0 = unlimited). MinWarm is the floor — that many most-recent
+// processes are exempt from idle timeouts, keeping the previews a developer
+// is most likely to revisit hot indefinitely. IdleTimeoutSeconds overrides
+// every manifest's idle_timeout when > 0 (0 = per-manifest values, default
+// 30m).
 type WarmPolicy struct {
 	MaxWarm            int `json:"max_warm"`
+	MinWarm            int `json:"min_warm"`
 	IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
 }
 

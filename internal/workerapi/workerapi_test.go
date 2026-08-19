@@ -49,6 +49,7 @@ type fakeSup struct {
 	runLog       supervise.RunLog
 	running      int
 	maxWarm      int
+	minWarm      int
 	idleOverride time.Duration
 }
 
@@ -82,6 +83,8 @@ func (f *fakeSup) RunLog(repo, side, hash string, attempt int, offset int64) (su
 	return f.runLog, nil
 }
 func (f *fakeSup) SetMaxWarm(n int)                { f.maxWarm = n }
+func (f *fakeSup) MinWarm() int                    { return f.minWarm }
+func (f *fakeSup) SetMinWarm(n int)                { f.minWarm = n }
 func (f *fakeSup) IdleOverride() time.Duration     { return f.idleOverride }
 func (f *fakeSup) SetIdleOverride(d time.Duration) { f.idleOverride = d }
 func (f *fakeSup) Running() int                    { return f.running }
@@ -322,12 +325,12 @@ func TestConfigureRoundTrip(t *testing.T) {
 	sup := &fakeSup{maxWarm: 12}
 	c, done := testServer(t, sup)
 	defer done()
-	five, ninety := 5, 90
-	if err := c.Configure(context.Background(), WorkerConfig{MaxWarm: &five, IdleTimeoutSeconds: &ninety}); err != nil {
+	five, two, ninety := 5, 2, 90
+	if err := c.Configure(context.Background(), WorkerConfig{MaxWarm: &five, MinWarm: &two, IdleTimeoutSeconds: &ninety}); err != nil {
 		t.Fatal(err)
 	}
-	if sup.maxWarm != 5 || sup.idleOverride != 90*time.Second {
-		t.Fatalf("maxWarm = %d idle = %s, want 5 / 90s", sup.maxWarm, sup.idleOverride)
+	if sup.maxWarm != 5 || sup.minWarm != 2 || sup.idleOverride != 90*time.Second {
+		t.Fatalf("maxWarm = %d minWarm = %d idle = %s, want 5 / 2 / 90s", sup.maxWarm, sup.minWarm, sup.idleOverride)
 	}
 
 	// A partial push touches only what it names.
