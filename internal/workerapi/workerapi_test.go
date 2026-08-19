@@ -36,19 +36,20 @@ func TestMain(m *testing.M) {
 
 // fakeSup records calls and returns programmed results.
 type fakeSup struct {
-	mu         sync.Mutex
-	ensureKey  supervise.Key
-	ensureRepo string
-	ensurePort int
-	ensureErr  error
-	offered    map[supervise.Key]supervise.WireSpec
-	stopped    []supervise.Key
-	status     string
-	failDetail string
-	report     []supervise.ProcReport
-	runLog     supervise.RunLog
-	running    int
-	maxWarm    int
+	mu           sync.Mutex
+	ensureKey    supervise.Key
+	ensureRepo   string
+	ensurePort   int
+	ensureErr    error
+	offered      map[supervise.Key]supervise.WireSpec
+	stopped      []supervise.Key
+	status       string
+	failDetail   string
+	report       []supervise.ProcReport
+	runLog       supervise.RunLog
+	running      int
+	maxWarm      int
+	idleOverride time.Duration
 }
 
 func (f *fakeSup) OfferWireSpec(k supervise.Key, s supervise.WireSpec) {
@@ -80,9 +81,11 @@ func (f *fakeSup) Report(context.Context) []supervise.ProcReport { return f.repo
 func (f *fakeSup) RunLog(repo, side, hash string, attempt int, offset int64) (supervise.RunLog, error) {
 	return f.runLog, nil
 }
-func (f *fakeSup) SetMaxWarm(n int) { f.maxWarm = n }
-func (f *fakeSup) Running() int     { return f.running }
-func (f *fakeSup) MaxWarm() int     { return f.maxWarm }
+func (f *fakeSup) SetMaxWarm(n int)                { f.maxWarm = n }
+func (f *fakeSup) IdleOverride() time.Duration     { return f.idleOverride }
+func (f *fakeSup) SetIdleOverride(d time.Duration) { f.idleOverride = d }
+func (f *fakeSup) Running() int                    { return f.running }
+func (f *fakeSup) MaxWarm() int                    { return f.maxWarm }
 
 const secret = "s3cr3t"
 
@@ -319,10 +322,19 @@ func TestConfigureRoundTrip(t *testing.T) {
 	sup := &fakeSup{maxWarm: 12}
 	c, done := testServer(t, sup)
 	defer done()
-	if err := c.Configure(context.Background(), 5); err != nil {
+	five, ninety := 5, 90
+	if err := c.Configure(context.Background(), WorkerConfig{MaxWarm: &five, IdleTimeoutSeconds: &ninety}); err != nil {
 		t.Fatal(err)
 	}
-	if sup.maxWarm != 5 {
-		t.Fatalf("maxWarm = %d, want 5", sup.maxWarm)
+	if sup.maxWarm != 5 || sup.idleOverride != 90*time.Second {
+		t.Fatalf("maxWarm = %d idle = %s, want 5 / 90s", sup.maxWarm, sup.idleOverride)
+	}
+
+	// A partial push touches only what it names.
+	if err := c.Configure(context.Background(), WorkerConfig{MaxWarm: &five}); err != nil {
+		t.Fatal(err)
+	}
+	if sup.idleOverride != 90*time.Second {
+		t.Fatalf("idle changed by a push that didn't name it: %s", sup.idleOverride)
 	}
 }

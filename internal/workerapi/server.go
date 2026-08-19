@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/jmelahman/local-preview/internal/supervise"
 )
@@ -24,6 +25,8 @@ type Supervisor interface {
 	Running() int
 	MaxWarm() int
 	SetMaxWarm(n int)
+	IdleOverride() time.Duration
+	SetIdleOverride(d time.Duration)
 }
 
 // Server exposes a Supervisor over HTTP behind a shared-secret check. Mount
@@ -146,19 +149,23 @@ func (s *Server) handleRunLog(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, Heartbeat{
-		Running:  s.sup.Running(),
-		MaxWarm:  s.sup.MaxWarm(),
-		Draining: s.draining.Load(),
+		Running:            s.sup.Running(),
+		MaxWarm:            s.sup.MaxWarm(),
+		IdleTimeoutSeconds: int(s.sup.IdleOverride() / time.Second),
+		Draining:           s.draining.Load(),
 	})
 }
 
 func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request) {
-	var req configureReq
+	var req WorkerConfig
 	if !decode(w, r, &req) {
 		return
 	}
 	if req.MaxWarm != nil {
 		s.sup.SetMaxWarm(*req.MaxWarm)
+	}
+	if req.IdleTimeoutSeconds != nil {
+		s.sup.SetIdleOverride(time.Duration(*req.IdleTimeoutSeconds) * time.Second)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

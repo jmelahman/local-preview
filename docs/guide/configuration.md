@@ -168,12 +168,16 @@ footprint:
   Note it counts *processes*: a deploy with a frontend process occupies two
   slots.
 
-The cap is also editable at runtime from the dashboard (Storage & retention →
-Warm previews) or via [`PUT /api/warm`](/reference/api#put-api-warm). A saved
-value overrides `--max-warm`, survives restarts, and applies per serving
-node: on a control node the fleet's heartbeat loop pushes it to every worker
-and re-pushes after a worker reboots. With a worker tier, freshly built
-deploys pre-warm on the worker traffic will route to.
+Both knobs are also editable at runtime from the dashboard (Storage &
+retention → Warm previews) or via
+[`PUT /api/warm`](/reference/api#put-api-warm): the cap, and a server-wide
+idle-timeout override that beats every manifest's `idle_timeout` when set
+(and governs already-running previews — shortening it reaps on the next
+tick). Saved values override `--max-warm` and the manifests, survive
+restarts, and apply per serving node: on a control node the fleet's
+heartbeat loop pushes them to every worker and re-pushes after a worker
+reboots. With a worker tier, freshly built deploys pre-warm on the worker
+traffic will route to.
 
 A process-mode frontend holds its backend's address for its lifetime, so a
 paired backend inherits the frontend's recency and is never stopped while

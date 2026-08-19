@@ -363,7 +363,9 @@ func TestParseErrors(t *testing.T) {
 			"backend.run is required",
 		},
 		"bad health path": {
-			func(s string) string { return strings.Replace(s, `health_path = "/api/health"`, `health_path = "api/health"`, 1) },
+			func(s string) string {
+				return strings.Replace(s, `health_path = "/api/health"`, `health_path = "api/health"`, 1)
+			},
 			"health_path",
 		},
 		"empty init step": {

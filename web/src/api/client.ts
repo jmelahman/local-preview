@@ -135,11 +135,13 @@ export type RunLogChunk = {
 };
 
 // Warm-process policy: the LRU cap on concurrently running preview processes
-// per serving node (a process-mode deploy counts as two: frontend + backend).
-// 0 = unlimited. Saved values override the server's --max-warm flag and are
-// pushed to every worker.
+// per serving node (a process-mode deploy counts as two: frontend + backend;
+// 0 = unlimited), and an idle-timeout override in seconds (0 = each
+// manifest's own idle_timeout, default 30m). Saved values override the
+// server's flags/manifests and are pushed to every worker.
 export type WarmPolicy = {
   max_warm: number;
+  idle_timeout_seconds: number;
 };
 
 // Instance-wide artifact retention policy. 0 disables a limit; with both at

@@ -1304,13 +1304,23 @@ function WarmForm() {
   const queryClient = useQueryClient();
   const policy = useQuery({ queryKey: ["warm"], queryFn: api.getWarm });
   const [maxWarm, setMaxWarm] = useState("0");
+  const [idleMinutes, setIdleMinutes] = useState("0");
 
   useEffect(() => {
-    if (policy.data) setMaxWarm(String(policy.data.max_warm));
+    if (policy.data) {
+      setMaxWarm(String(policy.data.max_warm));
+      setIdleMinutes(String(Math.round(policy.data.idle_timeout_seconds / 60)));
+    }
   }, [policy.data]);
 
-  const parsed = { max_warm: Math.max(0, Math.floor(Number(maxWarm) || 0)) };
-  const dirty = policy.data != null && parsed.max_warm !== policy.data.max_warm;
+  const parsed = {
+    max_warm: Math.max(0, Math.floor(Number(maxWarm) || 0)),
+    idle_timeout_seconds: Math.max(0, Math.floor(Number(idleMinutes) || 0)) * 60,
+  };
+  const dirty =
+    policy.data != null &&
+    (parsed.max_warm !== policy.data.max_warm ||
+      parsed.idle_timeout_seconds !== policy.data.idle_timeout_seconds);
 
   const save = useMutation({
     mutationFn: () => api.putWarm(parsed),
@@ -1331,6 +1341,15 @@ function WarmForm() {
             className={numberInputClass}
           />
         </Field>
+        <Field label="Idle timeout (minutes)">
+          <input
+            type="number"
+            min={0}
+            value={idleMinutes}
+            onChange={(e) => setIdleMinutes(e.target.value)}
+            className={numberInputClass}
+          />
+        </Field>
         {dirty && (
           <button
             type="button"
@@ -1343,10 +1362,11 @@ function WarmForm() {
         )}
       </div>
       <p className="text-xs text-fg-muted">
-        0 = unlimited. Beyond the cap the least-recently-used processes stop (they cold-start on
-        their next visit); idle previews stop on their own after the manifest's idle timeout. A
-        deployment with a frontend process counts as two. Overrides the server's --max-warm flag and
-        applies to every worker without a restart.
+        0 = unlimited / per-manifest. Beyond the cap the least-recently-used processes stop (they
+        cold-start on their next visit); a deployment with a frontend process counts as two. The
+        idle timeout stops a preview that long after its last request — a value here overrides every
+        manifest's idle_timeout (default 30m) and governs already-running previews. Both apply to
+        every worker without a restart.
       </p>
       {save.error != null && (
         <p className="text-xs text-danger" title={String(save.error)}>

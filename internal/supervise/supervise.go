@@ -95,6 +95,7 @@ type Manager struct {
 	healthInterval time.Duration
 	reapInterval   time.Duration
 	maxWarm        atomic.Int64 // LRU cap on running processes; 0 = unlimited
+	idleOverride   atomic.Int64 // ns; > 0 overrides every manifest idle_timeout
 
 	mu        sync.Mutex
 	procs     map[Key]*process
@@ -237,6 +238,19 @@ func (m *Manager) SetMaxWarm(n int) {
 // MaxWarm returns the warm-process cap (0 = unlimited). Reported in the worker
 // heartbeat so the control node can size fleet-wide capacity.
 func (m *Manager) MaxWarm() int { return int(m.maxWarm.Load()) }
+
+// SetIdleOverride overrides every manifest's idle_timeout with d (0 restores
+// per-manifest values). Applied at reap time rather than start time, so a
+// dashboard change affects processes that are already running — shortening it
+// reaps sooner on the next tick, lengthening it keeps warm previews warm.
+func (m *Manager) SetIdleOverride(d time.Duration) {
+	m.idleOverride.Store(int64(max(d, 0)))
+}
+
+// IdleOverride returns the server-wide idle-timeout override (0 = none).
+// Reported in the worker heartbeat so the control node's reconcile loop can
+// detect a worker that missed the push (fresh boot).
+func (m *Manager) IdleOverride() time.Duration { return time.Duration(m.idleOverride.Load()) }
 
 // SetPublishIP additionally publishes containered processes' ports on the
 // given host address. A worker must set it to the address the control node
@@ -920,13 +934,20 @@ func (m *Manager) reap() {
 	}
 	m.mu.Unlock()
 
+	// The server-wide override beats the per-process value stamped at start,
+	// so a dashboard change governs already-running previews too.
+	override := m.IdleOverride()
 	alive := cands[:0]
 	for _, c := range cands {
 		if _, paired := pairedTouch[c.k]; paired {
 			alive = append(alive, c) // counted toward the cap, never stopped
 			continue
 		}
-		if c.idle > 0 && now.Sub(c.touch) > c.idle {
+		idle := c.idle
+		if override > 0 {
+			idle = override
+		}
+		if idle > 0 && now.Sub(c.touch) > idle {
 			m.Stop(c.k, fmt.Sprintf("idle %s", now.Sub(c.touch).Round(time.Second)))
 			continue
 		}

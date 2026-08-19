@@ -41,10 +41,10 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, rt runtimeEnv,
 	networkID := ""
 	alias := ""
 	labels := map[string]string{
-		dockerapi.ManagedLabel:  "1",
-		"local-preview.repo":    p.repoName,
-		"local-preview.side":    string(k.Side),
-		"local-preview.hash":    k.Hash,
+		dockerapi.ManagedLabel: "1",
+		"local-preview.repo":   p.repoName,
+		"local-preview.side":   string(k.Side),
+		"local-preview.hash":   k.Hash,
 	}
 	deployNet := ""
 	switch {

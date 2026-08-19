@@ -782,3 +782,34 @@ func TestForkOrInitStateDir(t *testing.T) {
 		t.Fatal("fresh state dir should be empty")
 	}
 }
+
+// TestIdleOverrideGovernsRunningProcesses: the dashboard's idle override
+// applies at reap time, so shortening it stops previews that started under a
+// longer (manifest) timeout.
+func TestIdleOverrideGovernsRunningProcesses(t *testing.T) {
+	f := newFixture(t)
+	f.provisionIdle(t, "be-idle-override", serverArgv(t), time.Hour)
+	k := BackendKey(f.repoID, "be-idle-override")
+	if _, err := f.m.EnsureRunning(context.Background(), k, "demo"); err != nil {
+		t.Fatal(err)
+	}
+
+	// An hour-long manifest timeout would never reap this; the override does.
+	f.m.SetIdleOverride(time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
+	f.m.reap()
+	if st := f.m.Status(k); st != StatusIdle {
+		t.Fatalf("status after override reap = %q, want idle", st)
+	}
+
+	// Clearing the override restores the manifest value.
+	f.m.SetIdleOverride(0)
+	if _, err := f.m.EnsureRunning(context.Background(), k, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	f.m.reap()
+	if st := f.m.Status(k); st != StatusRunning {
+		t.Fatalf("status with override cleared = %q, want running (1h manifest timeout)", st)
+	}
+}

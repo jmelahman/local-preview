@@ -36,8 +36,10 @@ func (f *fakeBackend) Stop(_ context.Context, k supervise.Key, _ string) error {
 	f.stopped = append(f.stopped, k)
 	return nil
 }
-func (f *fakeBackend) Configure(_ context.Context, maxWarm int) error {
-	f.configured = append(f.configured, maxWarm)
+func (f *fakeBackend) Configure(_ context.Context, cfg workerapi.WorkerConfig) error {
+	if cfg.MaxWarm != nil {
+		f.configured = append(f.configured, *cfg.MaxWarm)
+	}
 	return nil
 }
 

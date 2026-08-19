@@ -173,9 +173,13 @@ func Root() *cobra.Command {
 	return cmd
 }
 
-// warmSettingKey is the settings-table row a dashboard-saved warm cap lives
-// under; it overrides the --max-warm flag at boot and at runtime.
-const warmSettingKey = "warm.max_warm"
+// warmSettingKey and idleSettingKey are the settings-table rows the
+// dashboard's warm policy lives under; they override the --max-warm flag and
+// every manifest's idle_timeout at boot and at runtime.
+const (
+	warmSettingKey = "warm.max_warm"
+	idleSettingKey = "warm.idle_seconds"
+)
 
 func run(opts serveOptions) error {
 	if opts.githubSecret == "" {
@@ -290,6 +294,16 @@ func run(opts serveOptions) error {
 	if warmOverridden {
 		log.Printf("warm cap: %d (dashboard setting; --max-warm %d overridden)", effectiveMaxWarm, opts.maxWarm)
 	}
+	idleOverrideSec, idleOverridden := 0, false
+	if v, err := database.GetSetting(idleSettingKey); err == nil {
+		if n, perr := strconv.Atoi(v); perr == nil && n >= 0 {
+			idleOverrideSec, idleOverridden = n, true
+			super.SetIdleOverride(time.Duration(n) * time.Second)
+			if n > 0 {
+				log.Printf("idle timeout: %ds (dashboard setting; manifest idle_timeout overridden)", n)
+			}
+		}
+	}
 	super.StartReaper(workCtx)
 	queue := build.NewQueue(database, gitMgr, files, super, cfg.LogsDir(), nil)
 	queue.SetManifestRefs([]build.ManifestRef{
@@ -374,6 +388,9 @@ func run(opts serveOptions) error {
 			if warmOverridden {
 				reg.SetMaxWarm(effectiveMaxWarm)
 			}
+			if idleOverridden {
+				reg.SetIdleOverride(time.Duration(idleOverrideSec) * time.Second)
+			}
 			reg.StartHeartbeats(workCtx, fleetHeartbeatInterval)
 			startFleetSignal(workCtx, reg)
 			backends = reg
@@ -405,14 +422,26 @@ func run(opts serveOptions) error {
 		SSO:                 sso,
 		DashboardOrigin:     dashboardOrigin,
 		CookiesSecure:       cookiesSecure,
-		MaxWarm:             super.MaxWarm,
-		SetMaxWarm: func(n int) error {
-			if err := database.SetSetting(warmSettingKey, strconv.Itoa(n)); err != nil {
+		WarmPolicy: func() api.WarmPolicy {
+			return api.WarmPolicy{
+				MaxWarm:            super.MaxWarm(),
+				IdleTimeoutSeconds: int(super.IdleOverride() / time.Second),
+			}
+		},
+		SetWarmPolicy: func(p api.WarmPolicy) error {
+			if err := database.SetSetting(warmSettingKey, strconv.Itoa(p.MaxWarm)); err != nil {
 				return err
 			}
-			super.SetMaxWarm(n)
+			if err := database.SetSetting(idleSettingKey, strconv.Itoa(p.IdleTimeoutSeconds)); err != nil {
+				return err
+			}
+			idle := time.Duration(p.IdleTimeoutSeconds) * time.Second
+			super.SetMaxWarm(p.MaxWarm)
+			super.SetIdleOverride(idle)
 			if reg != nil {
-				reg.SetMaxWarm(n) // workers pick it up on the next heartbeat
+				// Workers pick both up on the next heartbeat.
+				reg.SetMaxWarm(p.MaxWarm)
+				reg.SetIdleOverride(idle)
 			}
 			return nil
 		},

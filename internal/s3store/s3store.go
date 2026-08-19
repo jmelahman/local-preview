@@ -49,10 +49,10 @@ var ErrSourceGone = errors.New("artifact source directory disappeared during upl
 // Config configures the object-store connection. Endpoint and Bucket are
 // required; everything else is optional.
 type Config struct {
-	Endpoint  string // host:port, e.g. s3.amazonaws.com or minio:9000
-	Bucket    string
-	Prefix    string // optional key prefix within the bucket
-	Region    string
+	Endpoint string // host:port, e.g. s3.amazonaws.com or minio:9000
+	Bucket   string
+	Prefix   string // optional key prefix within the bucket
+	Region   string
 	// AccessKey and SecretKey are an explicit static keypair — MinIO, or any
 	// endpoint with no ambient identity. Leave both empty to resolve
 	// credentials from the environment instead; see credsFor.

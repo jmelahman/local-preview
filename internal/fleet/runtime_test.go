@@ -87,21 +87,28 @@ func TestRuntimeViewPrefersLiveOverStale(t *testing.T) {
 // reconcile can be awaited without racing the poller goroutine.
 type confBackend struct {
 	fakeBackend
-	got chan int
+	got     chan int
+	gotIdle chan int
 }
 
-func (c *confBackend) Configure(_ context.Context, n int) error {
-	c.got <- n
+func (c *confBackend) Configure(_ context.Context, cfg workerapi.WorkerConfig) error {
+	if cfg.MaxWarm != nil {
+		c.got <- *cfg.MaxWarm
+	}
+	if cfg.IdleTimeoutSeconds != nil {
+		c.gotIdle <- *cfg.IdleTimeoutSeconds
+	}
 	return nil
 }
 
-// The heartbeat loop reconciles the dashboard-configured warm cap onto any
-// worker whose reported cap drifts — how the setting survives worker reboots.
+// The heartbeat loop reconciles the dashboard-configured settings onto any
+// worker whose reported values drift — how they survive worker reboots.
 func TestHeartbeatReconcilesMaxWarm(t *testing.T) {
 	r := New(time.Minute)
-	be := &confBackend{got: make(chan int, 1)}
-	r.Add("w", be) // Heartbeat reports MaxWarm 0 — the "boot flag" value
+	be := &confBackend{got: make(chan int, 1), gotIdle: make(chan int, 1)}
+	r.Add("w", be) // Heartbeat reports zero values — the "boot flag" state
 	r.SetMaxWarm(5)
+	r.SetIdleOverride(90 * time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -114,5 +121,13 @@ func TestHeartbeatReconcilesMaxWarm(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("heartbeat loop never pushed the warm cap")
+	}
+	select {
+	case n := <-be.gotIdle:
+		if n != 90 {
+			t.Fatalf("configured idle %ds, want 90s", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("heartbeat loop never pushed the idle override")
 	}
 }

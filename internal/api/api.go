@@ -108,12 +108,21 @@ type Deps struct {
 	// callback URL: true for https and for localhost (a secure context even
 	// over plain http).
 	CookiesSecure bool
-	// MaxWarm reads the effective warm-process cap and SetMaxWarm persists a
+	// WarmPolicy reads the effective warm policy and SetWarmPolicy persists a
 	// new one and applies it everywhere processes run (the local manager, and
 	// every worker via the fleet's reconcile loop). Both nil disables the
 	// endpoints (tests that don't care).
-	MaxWarm    func() int
-	SetMaxWarm func(n int) error
+	WarmPolicy    func() WarmPolicy
+	SetWarmPolicy func(p WarmPolicy) error
+}
+
+// WarmPolicy bounds the warm-process footprint at runtime: the LRU cap on
+// concurrently running preview processes per serving node (0 = unlimited),
+// and an idle-timeout override in seconds that beats every manifest's
+// idle_timeout when > 0 (0 = per-manifest values, default 30m).
+type WarmPolicy struct {
+	MaxWarm            int `json:"max_warm"`
+	IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
 }
 
 // SSOProvider runs the GitHub OAuth web flow and resolves a token (an OAuth

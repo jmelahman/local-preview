@@ -40,7 +40,7 @@ type Backend interface {
 	Report(ctx context.Context) ([]supervise.ProcReport, error)
 	RunLog(ctx context.Context, repo, side, hash string, attempt int, offset int64) (supervise.RunLog, error)
 	Stop(ctx context.Context, k supervise.Key, reason string) error
-	Configure(ctx context.Context, maxWarm int) error
+	Configure(ctx context.Context, cfg workerapi.WorkerConfig) error
 }
 
 type workerState struct {
@@ -70,10 +70,11 @@ type Registry struct {
 	reportAt    time.Time
 	reportCache map[supervise.Key]procEntry
 
-	// desiredMaxWarm, when set, is the dashboard-configured warm cap the
-	// heartbeat loop reconciles onto every worker (a rebooted worker comes
-	// back with its boot flag until the next poll pushes this).
-	desiredMaxWarm atomic.Int64 // -1 = unset
+	// The dashboard-configured runtime settings the heartbeat loop reconciles
+	// onto every worker (a rebooted worker comes back with its boot flags
+	// until the next poll pushes these). -1 = unset.
+	desiredMaxWarm atomic.Int64
+	desiredIdleSec atomic.Int64
 }
 
 // New returns an empty registry. A worker whose last heartbeat is older than
@@ -81,6 +82,7 @@ type Registry struct {
 func New(staleAfter time.Duration) *Registry {
 	r := &Registry{workers: map[string]*workerState{}, staleAfter: staleAfter}
 	r.desiredMaxWarm.Store(-1)
+	r.desiredIdleSec.Store(-1)
 	return r
 }
 
@@ -90,6 +92,12 @@ func New(staleAfter time.Duration) *Registry {
 // setting for a fleet.
 func (r *Registry) SetMaxWarm(n int) {
 	r.desiredMaxWarm.Store(int64(max(n, 0)))
+}
+
+// SetIdleOverride sets the fleet-wide idle-timeout override (0 = restore
+// per-manifest values), reconciled onto workers like SetMaxWarm.
+func (r *Registry) SetIdleOverride(d time.Duration) {
+	r.desiredIdleSec.Store(int64(max(d, 0) / time.Second))
 }
 
 // Add registers (or replaces) a worker by id.
@@ -147,12 +155,23 @@ func (r *Registry) StartHeartbeats(ctx context.Context, interval time.Duration) 
 				defer cancel()
 				hb, err := w.be.Heartbeat(hctx)
 				r.recordHeartbeat(w.id, hb, time.Now(), err == nil)
-				// Reconcile the dashboard-configured warm cap: a worker
-				// reporting a different cap (fresh boot, missed push) gets it
-				// re-applied here, so the setting survives the whole fleet's
-				// churn without any worker-side persistence.
-				if want := r.desiredMaxWarm.Load(); err == nil && want >= 0 && hb.MaxWarm != int(want) {
-					w.be.Configure(hctx, int(want)) //nolint:errcheck // next poll retries
+				// Reconcile the dashboard-configured settings: a worker
+				// reporting different values (fresh boot, missed push) gets
+				// them re-applied here, so the settings survive the whole
+				// fleet's churn without any worker-side persistence.
+				if err == nil {
+					var cfg workerapi.WorkerConfig
+					if want := r.desiredMaxWarm.Load(); want >= 0 && hb.MaxWarm != int(want) {
+						n := int(want)
+						cfg.MaxWarm = &n
+					}
+					if want := r.desiredIdleSec.Load(); want >= 0 && hb.IdleTimeoutSeconds != int(want) {
+						n := int(want)
+						cfg.IdleTimeoutSeconds = &n
+					}
+					if cfg.MaxWarm != nil || cfg.IdleTimeoutSeconds != nil {
+						w.be.Configure(hctx, cfg) //nolint:errcheck // next poll retries
+					}
 				}
 			}(w)
 		}

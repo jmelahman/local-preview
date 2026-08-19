@@ -112,18 +112,25 @@ type drainReq struct {
 	Draining bool `json:"draining"`
 }
 
-// configure: control-pushed runtime settings. Fields are pointers so a
-// request only touches what it names; a rebooted worker falls back to its
-// boot flags until the control node's reconcile loop pushes again.
-type configureReq struct {
+// WorkerConfig is the control-pushed runtime settings bundle. Fields are
+// pointers so a push only touches what it names; a rebooted worker falls back
+// to its boot flags until the control node's reconcile loop pushes again.
+type WorkerConfig struct {
 	MaxWarm *int `json:"max_warm,omitempty"`
+	// IdleTimeoutSeconds > 0 overrides every manifest's idle_timeout; 0
+	// restores per-manifest values.
+	IdleTimeoutSeconds *int `json:"idle_timeout_seconds,omitempty"`
 }
 
 // Heartbeat is the worker's capacity report, the input to fleet placement and
 // scale-out. Draining marks a worker an ASG lifecycle hook is winding down: the
-// control node routes new work elsewhere but keeps serving what is already warm.
+// control node routes new work elsewhere but keeps serving what is already
+// warm. The runtime-config fields echo what the worker currently applies, so
+// the control node's reconcile loop can spot (and re-push onto) a worker that
+// rebooted back to its boot flags.
 type Heartbeat struct {
-	Running  int  `json:"running"`
-	MaxWarm  int  `json:"max_warm"`
-	Draining bool `json:"draining"`
+	Running            int  `json:"running"`
+	MaxWarm            int  `json:"max_warm"`
+	IdleTimeoutSeconds int  `json:"idle_timeout_seconds,omitempty"`
+	Draining           bool `json:"draining"`
 }

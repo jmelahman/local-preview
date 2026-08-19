@@ -549,20 +549,24 @@ invalid JSON.
 
 ### `GET /api/warm`
 
-Returns the [warm-process policy](/guide/configuration#warm-previews): the
-LRU cap on concurrently running preview processes per serving node
-(`0` = unlimited). A process-mode deploy counts as two (frontend + backend).
+Returns the [warm-process policy](/guide/configuration#warm-previews):
+`max_warm` is the LRU cap on concurrently running preview processes per
+serving node (`0` = unlimited; a process-mode deploy counts as two —
+frontend + backend), and `idle_timeout_seconds` overrides every manifest's
+`idle_timeout` when `> 0` (`0` = per-manifest values, default 30m).
 
 ```json
-{ "max_warm": 12 }
+{ "max_warm": 12, "idle_timeout_seconds": 0 }
 ```
 
 ### `PUT /api/warm`
 
-Replaces the warm cap. Applies without a restart: the local reaper enforces
-it on its next tick, and on a control node the fleet's heartbeat loop pushes
-it to every worker (re-pushing after worker reboots). The saved value
-overrides the `--max-warm` flag from then on.
+Replaces the warm policy. Applies without a restart: the local reaper
+enforces both values on its next tick — the idle override governs
+already-running processes too — and on a control node the fleet's heartbeat
+loop pushes them to every worker (re-pushing after worker reboots). Saved
+values override the `--max-warm` flag and manifest `idle_timeout`s from then
+on.
 
 Response: `200 OK` with the saved policy. `400` for a negative value.
 

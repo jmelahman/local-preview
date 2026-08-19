@@ -93,31 +93,25 @@ func (d Deps) handleRunGC(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// warmJSON is the warm-process policy: the LRU cap on concurrently running
-// preview processes per serving node. 0 = unlimited. A deploy in process mode
-// counts as two (frontend + backend).
-type warmJSON struct {
-	MaxWarm int `json:"max_warm"`
-}
-
 func (d Deps) handleGetWarm(w http.ResponseWriter, r *http.Request) {
-	if d.MaxWarm == nil {
+	if d.WarmPolicy == nil {
 		httpError(w, http.StatusNotFound, "warm policy not configurable on this server")
 		return
 	}
-	writeJSON(w, http.StatusOK, warmJSON{MaxWarm: d.MaxWarm()})
+	writeJSON(w, http.StatusOK, d.WarmPolicy())
 }
 
-// handlePutWarm persists and applies a new warm cap. Takes effect without a
-// restart: the local reaper enforces it on its next tick, and the fleet's
-// heartbeat loop pushes it to every worker (re-pushing after worker reboots,
-// so the dashboard's value outlives the flags it overrides).
+// handlePutWarm persists and applies a new warm policy. Takes effect without
+// a restart: the local reaper enforces both values on its next tick (the idle
+// override governs already-running processes too), and the fleet's heartbeat
+// loop pushes them to every worker (re-pushing after worker reboots, so the
+// dashboard's values outlive the flags they override).
 func (d Deps) handlePutWarm(w http.ResponseWriter, r *http.Request) {
-	if d.SetMaxWarm == nil {
+	if d.SetWarmPolicy == nil {
 		httpError(w, http.StatusNotFound, "warm policy not configurable on this server")
 		return
 	}
-	var p warmJSON
+	var p WarmPolicy
 	if !decodeJSON(w, r, &p) {
 		return
 	}
@@ -125,7 +119,11 @@ func (d Deps) handlePutWarm(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "max_warm must be >= 0 (0 = unlimited)")
 		return
 	}
-	if err := d.SetMaxWarm(p.MaxWarm); err != nil {
+	if p.IdleTimeoutSeconds < 0 {
+		httpError(w, http.StatusBadRequest, "idle_timeout_seconds must be >= 0 (0 = per-manifest values)")
+		return
+	}
+	if err := d.SetWarmPolicy(p); err != nil {
 		internalError(w, "apply warm policy", err)
 		return
 	}

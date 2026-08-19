@@ -98,10 +98,10 @@ type Frontend struct {
 	Dist  string     `toml:"dist" json:"dist,omitempty"`
 	Image string     `toml:"image" json:"image,omitempty"`
 
-	Run          []string          `toml:"run" json:"run,omitempty"`
-	HealthPath   string            `toml:"health_path" json:"health_path,omitempty"`
-	StartTimeout Duration          `toml:"start_timeout" json:"start_timeout,omitempty"`
-	IdleTimeout  Duration          `toml:"idle_timeout" json:"idle_timeout,omitempty"`
+	Run          []string `toml:"run" json:"run,omitempty"`
+	HealthPath   string   `toml:"health_path" json:"health_path,omitempty"`
+	StartTimeout Duration `toml:"start_timeout" json:"start_timeout,omitempty"`
+	IdleTimeout  Duration `toml:"idle_timeout" json:"idle_timeout,omitempty"`
 	// RunImage, when set, runs the server process inside that container
 	// image (artifact bind-mounted) instead of on the host.
 	RunImage string            `toml:"run_image" json:"run_image,omitempty"`
