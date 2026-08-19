@@ -245,7 +245,7 @@ resource "aws_instance" "server" {
   private_ip                  = var.private_ip
   key_name                    = var.key_pair_name
   iam_instance_profile        = aws_iam_instance_profile.instance.name
-  vpc_security_group_ids      = [aws_security_group.server.id]
+  vpc_security_group_ids      = concat([aws_security_group.server.id], aws_security_group.stack_ingress[*].id)
   associate_public_ip_address = true
 
   # Gzipped, which cloud-init unpacks itself: EC2 caps user data at 16 KiB and
@@ -588,19 +588,36 @@ resource "aws_security_group" "worker" {
 }
 
 # How workers reach the shared dependency stack: the stack publishes its
-# ports on the server's (static) private IP, and these rules are the only
-# ingress to them. Separate rule resources so the base SG needn't change.
-resource "aws_vpc_security_group_ingress_rule" "stack_from_workers" {
-  for_each = var.workers == null ? toset([]) : toset([for p in var.workers.stack_ingress_ports : tostring(p)])
+# ports on the server's (static) private IP, and this group is the only
+# ingress to them.
+#
+# A separate security group attached to the same instance, NOT rules added to
+# aws_security_group.server — that SG defines its rules inline, and Terraform
+# treats an inline-rule SG as owning every rule on the group: standalone
+# aws_vpc_security_group_ingress_rule resources attached to it get silently
+# deleted the next time anything updates the SG in place (this happened in
+# production — an instance retype wiped the deps ingress). One group per
+# owner, never a mix.
+resource "aws_security_group" "stack_ingress" {
+  count = var.workers == null ? 0 : 1
 
-  security_group_id            = aws_security_group.server.id
-  description                  = "Shared dependency stack port, from the worker tier"
-  from_port                    = tonumber(each.value)
-  to_port                      = tonumber(each.value)
-  ip_protocol                  = "tcp"
-  referenced_security_group_id = aws_security_group.worker[0].id
+  name        = "${var.name}-stack-ingress"
+  description = "Shared dependency stack ports on ${var.name}, from the worker tier"
+  vpc_id      = data.aws_subnet.instance.vpc_id
 
-  tags = local.tags
+  dynamic "ingress" {
+    for_each = toset([for p in var.workers.stack_ingress_ports : tostring(p)])
+
+    content {
+      description     = "Dependency stack port, from workers only"
+      from_port       = tonumber(ingress.value)
+      to_port         = tonumber(ingress.value)
+      protocol        = "tcp"
+      security_groups = [aws_security_group.worker[0].id]
+    }
+  }
+
+  tags = merge(local.tags, { Name = "${var.name}-stack-ingress" })
 }
 
 resource "aws_iam_role" "worker" {
@@ -658,6 +675,25 @@ resource "aws_instance" "worker" {
   # Public IP for egress only (image pulls, S3 hydration): the default VPC has
   # no NAT, and the security group admits nothing inbound but the control node.
   associate_public_ip_address = true
+
+  # Spot, when asked: persistent + stop is the combination that keeps the
+  # rest of the design intact — only persistent-request spot instances accept
+  # user-initiated stops (the business-hours schedule), an interruption stops
+  # rather than terminates (the pinned private IP and instance id survive,
+  # and AWS restarts it when capacity returns), and Terraform keeps managing
+  # the same instance throughout.
+  dynamic "instance_market_options" {
+    for_each = var.workers.spot ? [1] : []
+
+    content {
+      market_type = "spot"
+
+      spot_options {
+        spot_instance_type             = "persistent"
+        instance_interruption_behavior = "stop"
+      }
+    }
+  }
 
   user_data_base64 = base64gzip(templatefile("${path.module}/worker-data.sh.tftpl", {
     aws_region  = data.aws_region.current.name

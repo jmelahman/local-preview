@@ -533,3 +533,18 @@ enqueues a persist after each upload publish (fe/be/dl), same as a build.
 The rule: reconcile exists to close crash windows and pre-tier history, not
 to be any publish path's primary route to the tier — anything that lands an
 artifact locally must enqueue its persist in the same breath.
+
+## Never mix inline SG rules with standalone rule resources on one group
+
+`aws_security_group.server` defines its rules inline, and the worker tier
+attached its deps-stack ingress as standalone
+`aws_vpc_security_group_ingress_rule` resources on the same group. Terraform
+treats an inline-rule SG as owning *every* rule on the group, so the next
+in-place SG update — an unrelated instance retype — silently deleted the
+standalone rules in production: workers could no longer open new connections
+to postgres/opensearch/redis/minio, invisible until warm connections cycled.
+The fix is one-owner-per-group: the stack ingress lives on its own
+`aws_security_group.stack_ingress`, attached to the server instance alongside
+the base SG. Any future rule added from outside the module must follow the
+same pattern — a new group, never a rule resource pointed at an
+inline-managed group.
