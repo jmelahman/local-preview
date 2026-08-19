@@ -605,12 +605,14 @@ Instance-wide statistics for the dashboard's **Statistics** view.
   derived from the `start_attempt`→`healthy` process-event trail (each
   successful start is one sample). Percentile fields are omitted when `count`
   is `0`.
-- **`hits`** — cumulative warm-vs-cold outcomes since the serving process
-  started (per-worker counters, summed across the fleet on a control node). A
-  warm hit is a preview request served by an already-running process; a cold
-  start is one that had to launch a process. `warm_ratio` is
-  `warm / (warm + cold)`, omitted until there has been at least one request.
-  These counters reset when a worker restarts.
+- **`hits`** — cumulative warm-vs-cold outcomes (per-worker counters, summed
+  across the fleet on a control node). A warm hit is a preview request served
+  by an already-*healthy* process; a request that launches a process — or
+  joins an in-flight start and waits it out — counts cold, so a page load
+  firing many asset requests during one cold start doesn't inflate the ratio.
+  `warm_ratio` is `warm / (warm + cold)`, omitted until there has been at
+  least one request. Worker restarts don't reset fleet totals (the control
+  node banks each worker's history), but a control-node restart does.
 - **`runtime`** — the live serving footprint: `workers` fresh serving nodes
   (`1` on a single node), `running` warm processes right now, and `capacity`
   the total bounded warm-process capacity (`0` = unlimited).

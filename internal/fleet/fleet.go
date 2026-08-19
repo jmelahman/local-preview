@@ -51,12 +51,25 @@ type workerState struct {
 	hb        workerapi.Heartbeat
 	lastBeat  time.Time
 	reachable bool
+	// warmBase/coldBase bank the hit counters a worker reported before it
+	// restarted (its counters are since-boot, and reboots are routine on a
+	// spot tier) — added to the live heartbeat values so fleet totals stay
+	// monotonic for as long as the control node runs.
+	warmBase, coldBase int64
 }
 
 func (w *workerState) snapshot() (hb workerapi.Heartbeat, lastBeat time.Time, reachable bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.hb, w.lastBeat, w.reachable
+}
+
+// hitTotals returns the worker's lifetime hit counters: the banked history of
+// previous boots plus its current since-boot values.
+func (w *workerState) hitTotals() (warm, cold int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.warmBase + w.hb.WarmHits, w.coldBase + w.hb.ColdStarts
 }
 
 // Registry tracks workers and places keys onto them.
@@ -143,6 +156,13 @@ func (r *Registry) recordHeartbeat(id string, hb workerapi.Heartbeat, at time.Ti
 	}
 	w.mu.Lock()
 	if reachable {
+		// A counter running backwards means the worker restarted (since-boot
+		// counters); bank what the previous boot accumulated so fleet totals
+		// stay monotonic across the restart.
+		if hb.WarmHits < w.hb.WarmHits || hb.ColdStarts < w.hb.ColdStarts {
+			w.warmBase += w.hb.WarmHits
+			w.coldBase += w.hb.ColdStarts
+		}
 		w.hb = hb
 	}
 	w.lastBeat = at
@@ -264,8 +284,9 @@ func (r *Registry) Stat() FleetStat {
 		} else {
 			unbounded = true
 		}
-		st.WarmHits += hb.WarmHits
-		st.ColdStarts += hb.ColdStarts
+		warm, cold := w.hitTotals()
+		st.WarmHits += warm
+		st.ColdStarts += cold
 	}
 	if unbounded {
 		st.Capacity = 0

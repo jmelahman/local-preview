@@ -1526,7 +1526,7 @@ function StatisticsDialog({ onClose }: { onClose: () => void }) {
     <Modal title="Statistics" onClose={onClose} wide>
       <div className="flex flex-col gap-5 p-4 text-sm">
         {stats.isError && (
-          <p className="text-fg-danger">Failed to load statistics: {String(stats.error)}</p>
+          <p className="text-xs text-danger">Failed to load statistics: {String(stats.error)}</p>
         )}
         {!s && !stats.isError && <p className="text-xs text-fg-muted">measuring…</p>}
         {s && (

@@ -719,10 +719,6 @@ func workerEndpoints(opts serveOptions) []string {
 	return out
 }
 
-// startFleetSignal periodically logs the fleet-wide load ratio (committed warm
-// slots ÷ capacity) — the signal a scale-out policy (e.g. a CloudWatch
-// target-tracking alarm scraping this line, or a sidecar publishing it as a
-// custom metric) drives autoscaling from. Returns immediately.
 // fleetStatsFn adapts a fleet registry to the api.Deps.FleetStats accessor,
 // or returns nil when there is no fleet (single node), so the stats handler
 // falls back to the local Manager.
@@ -742,6 +738,10 @@ func fleetStatsFn(reg *fleet.Registry) func() api.FleetSummary {
 	}
 }
 
+// startFleetSignal periodically logs the fleet's load ratio (committed warm
+// slots ÷ capacity) — the signal a scale-out policy (e.g. a CloudWatch
+// target-tracking alarm scraping this line, or a sidecar publishing it as a
+// custom metric) drives autoscaling from. Returns immediately.
 func startFleetSignal(ctx context.Context, reg *fleet.Registry) {
 	go func() {
 		t := time.NewTicker(fleetSignalInterval)

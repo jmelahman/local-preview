@@ -888,3 +888,29 @@ func TestMinWarmExemptFromIdle(t *testing.T) {
 		t.Fatalf("unprotected idle process = %s, want stopped", got)
 	}
 }
+
+// TestHitStatsCountJoinedStartsCold: requests that join an in-flight cold
+// start wait it out like the initiator, so they count cold — a page load
+// firing many asset requests during one cold start must not record a pile of
+// warm hits.
+func TestHitStatsCountJoinedStartsCold(t *testing.T) {
+	f := newFixture(t)
+	f.provisionCfg(t, "be-hits", manifest.Backend{
+		Init:         [][]string{{testExe(t), "--helper-init", "{state_dir}", "sleep"}},
+		InitTimeout:  manifest.Duration(2 * time.Second),
+		Run:          serverArgv(t),
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	})
+	k := BackendKey(f.repoID, "be-hits")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	// Initiator plus two joiners, all while init sleeps: three cold, no warm.
+	for range 3 {
+		f.m.EnsureRunning(ctx, k, "demo") //nolint:errcheck // ctx expiry expected
+	}
+	if warm, cold := f.m.HitStats(); warm != 0 || cold != 3 {
+		t.Fatalf("hits during in-flight start = warm %d cold %d, want 0/3", warm, cold)
+	}
+	f.m.Stop(k, "test")
+}

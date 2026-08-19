@@ -139,8 +139,10 @@ type Heartbeat struct {
 	Draining           bool `json:"draining"`
 	// WarmHits and ColdStarts are the worker's cumulative EnsureRunning
 	// outcome counts since it started — summed across the fleet for the
-	// dashboard's warm-ratio statistic. Cumulative, so they reset when a
-	// worker reboots; the control node treats them as monotonic per worker.
+	// dashboard's warm-ratio statistic. They reset when a worker reboots
+	// (routine on a spot tier), so the control node's registry detects the
+	// regression and banks the previous values, keeping fleet totals
+	// monotonic for as long as the control node runs.
 	WarmHits   int64 `json:"warm_hits"`
 	ColdStarts int64 `json:"cold_starts"`
 }

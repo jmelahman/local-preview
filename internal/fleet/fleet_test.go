@@ -208,3 +208,18 @@ func TestEnsureRoutesToPlacedWorker(t *testing.T) {
 		t.Fatalf("placed worker %s was not asked to ensure", placed.id)
 	}
 }
+
+// TestStatSurvivesWorkerRestart: a worker's since-boot counters running
+// backwards means it restarted (routine on spot); the registry banks the
+// previous boot's totals so the fleet-wide sums stay monotonic.
+func TestStatSurvivesWorkerRestart(t *testing.T) {
+	r, _ := regFresh(t, map[string]workerapi.Heartbeat{
+		"w": {MaxWarm: 10, WarmHits: 40, ColdStarts: 5},
+	})
+	// The worker reboots and reports fresh, smaller counters.
+	r.recordHeartbeat("w", workerapi.Heartbeat{MaxWarm: 10, WarmHits: 2, ColdStarts: 1}, time.Now(), true)
+	st := r.Stat()
+	if st.WarmHits != 42 || st.ColdStarts != 6 {
+		t.Fatalf("hits after restart = %d/%d, want 42/6 (banked 40/5 + fresh 2/1)", st.WarmHits, st.ColdStarts)
+	}
+}

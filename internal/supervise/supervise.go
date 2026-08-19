@@ -390,10 +390,16 @@ func (m *Manager) EnsureRunning(ctx context.Context, k Key, repoName string) (in
 			delete(m.failures, k)
 			m.coldStarts.Add(1)
 			go m.start(k, p)
-		} else {
-			// A request served by an already-tracked process (ready, or
-			// still starting from a concurrent request) — no new start.
+		} else if isReady(p) {
+			// Served by an already-healthy process — the warm experience the
+			// hit ratio measures.
 			m.warmHits.Add(1)
+		} else {
+			// Joined an in-flight cold start: no new process launches, but
+			// this caller still waits out the start, so it counts cold — a
+			// page load firing dozens of asset requests during one cold start
+			// must not record dozens of "warm hits".
+			m.coldStarts.Add(1)
 		}
 		p.lastTouch = time.Now()
 		// SSR frontends call their backend directly over the deploy
