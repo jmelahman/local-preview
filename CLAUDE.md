@@ -151,6 +151,9 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   never replicate; the ensure request carries the control-resolved `WireSpec`
   (state dir as identity, sticky per-node `InitDone`), and the regression test
   must drive a real `supervise.Manager` over an empty DB, never just `fakeSup`.
+- Every publish path must persist to the durable tier in the same breath —
+  reconcile is a repair pass, not a route; uploads that skipped `enqueuePersist`
+  502'd on workers ("not present in durable tier") until the next tick.
 - Containered preview ports publish on loopback by default — a worker must
   also publish on its routable address (derived from `--worker-listen`) or the
   control node's proxy dials a port nothing answers; local health checks still
