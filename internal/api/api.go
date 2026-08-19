@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"maps"
 	"net/http"
@@ -39,6 +38,22 @@ type BuildInfo struct {
 	Version string `json:"version"`
 }
 
+// RuntimeView is where the dashboard's live process state comes from: status,
+// crash detail, resource samples, run logs, and stop. On a single node it is
+// the local *supervise.Manager; on a control node whose previews run on
+// workers it is the fleet registry, which merges the workers' reports — the
+// local Manager tracks nothing there, so reading it would render every
+// preview "idle" with no stats and empty run logs.
+type RuntimeView interface {
+	Status(k supervise.Key) string
+	LastFailure(k supervise.Key) (supervise.Failure, bool)
+	CrashedKeys() []supervise.Key
+	Stats(ctx context.Context, k supervise.Key) *supervise.ProcessStats
+	RunLog(repoName, side, hash string, attempt int, offset int64) (supervise.RunLog, error)
+	Stop(k supervise.Key, reason string)
+	StopRepo(repoID int64, reason string)
+}
+
 // Deps carries the dependencies handlers need.
 type Deps struct {
 	Store  *db.Store
@@ -47,6 +62,11 @@ type Deps struct {
 	Git    *gitrepo.Manager
 	Queue  *build.Queue
 	Super  *supervise.Manager
+	// Runtime is the live-process view handlers render from; nil falls back
+	// to Super (single-node). Super stays alongside it for control-node-local
+	// lifecycle work (artifact GC, container purges) that never moves to
+	// workers.
+	Runtime RuntimeView
 	// Cloner runs registrations' mirror clones in the background and holds
 	// their live progress.
 	Cloner *clone.Cloner
@@ -306,7 +326,7 @@ func (d Deps) handleDeleteRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.Cloner.Cancel(repo.ID)
-	d.Super.StopRepo(repo.ID, "repo deleted")
+	d.runtime().StopRepo(repo.ID, "repo deleted")
 	d.Super.PurgeRepoContainers(repo.Name)
 	if err := d.Store.DeleteRepo(repo.ID); err != nil {
 		internalError(w, "delete repo", err)
@@ -395,14 +415,23 @@ func (d Deps) deployJSON(row db.DeployRow) deployJSON {
 	return out
 }
 
+// runtime returns the live-process view, defaulting to the local manager.
+func (d Deps) runtime() RuntimeView {
+	if d.Runtime != nil {
+		return d.Runtime
+	}
+	return d.Super
+}
+
 // processState reports one side's live state plus, when that state is
 // "crashed", the failure detail behind it.
 func (d Deps) processState(k supervise.Key) (state, detail string) {
-	state = d.Super.Status(k)
+	rt := d.runtime()
+	state = rt.Status(k)
 	if state != supervise.StatusCrashed {
 		return state, ""
 	}
-	f, _ := d.Super.LastFailure(k)
+	f, _ := rt.LastFailure(k)
 	return state, f.Detail
 }
 
@@ -410,7 +439,7 @@ func (d Deps) processState(k supervise.Key) (state, detail string) {
 // columns that identify them, so a listing can filter on runtime state
 // without the DB knowing anything about processes.
 func (d Deps) crashedProcs() []db.ProcKey {
-	keys := d.Super.CrashedKeys()
+	keys := d.runtime().CrashedKeys()
 	procs := make([]db.ProcKey, 0, len(keys))
 	for _, k := range keys {
 		if k.Side == supervise.SideFrontend {
@@ -572,7 +601,7 @@ func (d Deps) handleStopDeploy(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	d.Super.StopDeploy(row, "stopped via API")
+	d.stopDeploy(row, "stopped via API")
 	writeJSON(w, http.StatusOK, d.deployJSON(row))
 }
 
@@ -667,14 +696,6 @@ func (d Deps) handleDeployLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// runLogTailBytes caps how much history a fresh run-log view loads; the
-// client keeps the returned offset and receives only appended bytes after.
-const runLogTailBytes = 256 * 1024
-
-// runLogChunkBytes caps one response; a lagging client catches up across
-// polls.
-const runLogChunkBytes = 1 << 20
-
 // runLogChunk is one incremental slice of a process run log.
 type runLogChunk struct {
 	Side    string `json:"side"`
@@ -728,57 +749,37 @@ func (d Deps) handleDeployRunLog(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, runLogChunk{Side: side})
 		return
 	}
-	chunk := runLogChunk{Side: side, Process: d.Super.Status(key)}
-
-	// Run logs are per artifact (shared by every deploy with the same
-	// hash), one numbered file per start attempt.
-	dir := filepath.Join(d.Config.LogsDir(), row.RepoName, "run", side+"-"+hash)
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if base, found := strings.CutSuffix(e.Name(), ".log"); found {
-			if n, err := strconv.Atoi(base); err == nil && n > chunk.Attempt {
-				chunk.Attempt = n
-			}
-		}
-	}
-	if chunk.Attempt == 0 {
-		writeJSON(w, http.StatusOK, chunk)
-		return
-	}
-
-	f, err := os.Open(filepath.Join(dir, strconv.Itoa(chunk.Attempt)+".log"))
-	if err != nil {
-		internalError(w, "open run log", err)
-		return
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		internalError(w, "stat run log", err)
-		return
-	}
-	size := info.Size()
-
 	q := r.URL.Query()
-	start := int64(0)
-	if att, err := strconv.Atoi(q.Get("attempt")); err == nil && att == chunk.Attempt {
-		if off, err := strconv.ParseInt(q.Get("offset"), 10, 64); err == nil && off >= 0 && off <= size {
-			start = off
-		}
-	} else if size > runLogTailBytes {
-		start = size - runLogTailBytes
-		chunk.Truncated = true
-	}
-
-	buf := make([]byte, min(size-start, runLogChunkBytes))
-	n, err := f.ReadAt(buf, start)
-	if err != nil && err != io.EOF {
+	attempt, _ := strconv.Atoi(q.Get("attempt"))
+	offset, _ := strconv.ParseInt(q.Get("offset"), 10, 64)
+	// The log lives wherever the process runs (or last ran): this node's disk
+	// on a single node, a worker's via the fleet view on a control node.
+	rl, err := d.runtime().RunLog(row.RepoName, side, hash, attempt, offset)
+	if err != nil {
 		internalError(w, "read run log", err)
 		return
 	}
-	chunk.Content = string(buf[:n])
-	chunk.Offset = start + int64(n)
-	writeJSON(w, http.StatusOK, chunk)
+	writeJSON(w, http.StatusOK, runLogChunk{
+		Side:      side,
+		Process:   d.runtime().Status(key),
+		Attempt:   rl.Attempt,
+		Offset:    rl.Offset,
+		Content:   rl.Content,
+		Truncated: rl.Truncated,
+	})
+}
+
+// stopDeploy stops the deploy's supervised processes through the runtime
+// view, so a preview served by a worker actually stops rather than only the
+// (empty) local table being consulted.
+func (d Deps) stopDeploy(row db.DeployRow, reason string) {
+	rt := d.runtime()
+	if row.BeHash != "" {
+		rt.Stop(supervise.BackendKey(row.RepoID, row.BeHash), reason)
+	}
+	if row.FeHash != "" && row.HasFeProcess {
+		rt.Stop(supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash), reason)
+	}
 }
 
 // sideStats is one side's slice of a deploy stats response. Sampled fields
@@ -806,7 +807,7 @@ func (d Deps) handleDeployStats(w http.ResponseWriter, r *http.Request) {
 	sample := func(k supervise.Key) *sideStats {
 		state, detail := d.processState(k)
 		s := &sideStats{State: state, Error: detail}
-		if ps := d.Super.Stats(r.Context(), k); ps != nil {
+		if ps := d.runtime().Stats(r.Context(), k); ps != nil {
 			s.Runtime = ps.Runtime
 			s.CPUPercent = ps.CPUPercent
 			s.MemoryBytes = &ps.MemoryBytes

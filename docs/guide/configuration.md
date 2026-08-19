@@ -286,6 +286,9 @@ upload. How it works:
 
 ## Split control / worker plane (experimental)
 
+See [Worker-tier architecture](/guide/worker-tier) for the full picture; this
+section is the flag-level reference.
+
 By default (`--role=all`) one process does everything: API, dashboard, proxy,
 and local process supervision. For elastic scaling the plane can be split into a
 small always-on **control** node and a **worker** tier that supervises preview

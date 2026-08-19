@@ -13,15 +13,16 @@ import (
 	"time"
 )
 
-// ProcessStats is one resource sample of a running supervised process.
+// ProcessStats is one resource sample of a running supervised process. JSON
+// tags because it crosses the worker wire verbatim (workerapi report).
 type ProcessStats struct {
-	Runtime     string // "host" or "container"
-	StartedAt   time.Time
-	CPUPercent  *float64 // % of one core, docker-stats convention; nil until a second sample exists
-	MemoryBytes uint64
+	Runtime     string    `json:"runtime,omitempty"` // "host" or "container"
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	CPUPercent  *float64  `json:"cpu_percent,omitempty"` // % of one core, docker-stats convention; nil until a second sample exists
+	MemoryBytes uint64    `json:"memory_bytes,omitempty"`
 	// MemoryLimitBytes is the cgroup limit for containers (host total when
 	// unlimited) and total system memory for host processes.
-	MemoryLimitBytes uint64
+	MemoryLimitBytes uint64 `json:"memory_limit_bytes,omitempty"`
 }
 
 // cpuSample is the prior observation a CPU percentage is computed against.

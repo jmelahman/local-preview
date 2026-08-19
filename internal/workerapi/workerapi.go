@@ -28,6 +28,8 @@ const (
 	pathStatus    = "/internal/worker/v1/status"
 	pathHeartbeat = "/internal/worker/v1/heartbeat"
 	pathDrain     = "/internal/worker/v1/drain"
+	pathReport    = "/internal/worker/v1/report"
+	pathRunLog    = "/internal/worker/v1/runlog"
 )
 
 // WireKey is the JSON form of a supervise.Key crossing the boundary.
@@ -76,6 +78,33 @@ type statusReq struct {
 }
 type statusResp struct {
 	Status string `json:"status"`
+	// Error carries the failure detail behind a "crashed" status.
+	Error string `json:"error,omitempty"`
+}
+
+// report: the worker's full live-state dump — every non-idle key's status,
+// failure detail, and resource sample — so the control node renders the
+// dashboard from one round trip per worker instead of one per field per row.
+type reportResp struct {
+	Procs []wireProc `json:"procs"`
+}
+type wireProc struct {
+	Key    WireKey                 `json:"key"`
+	Repo   string                  `json:"repo,omitempty"`
+	Status string                  `json:"status"`
+	Error  string                  `json:"error,omitempty"`
+	Stats  *supervise.ProcessStats `json:"stats,omitempty"`
+}
+
+// runlog: an incremental slice of a run log on the worker's disk. Logs are
+// addressed by (repo, side, hash) — the artifact identity — not by key,
+// because they outlive the process that wrote them.
+type runLogReq struct {
+	Repo    string `json:"repo"`
+	Side    string `json:"side"`
+	Hash    string `json:"hash"`
+	Attempt int    `json:"attempt"`
+	Offset  int64  `json:"offset"`
 }
 
 type drainReq struct {

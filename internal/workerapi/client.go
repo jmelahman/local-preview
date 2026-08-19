@@ -73,13 +73,37 @@ func (c *Client) Stop(ctx context.Context, k supervise.Key, reason string) error
 	return c.post(ctx, pathStop, stopReq{Key: fromKey(k), Reason: reason}, nil)
 }
 
-// Status reads the keyed process's status from the worker.
-func (c *Client) Status(ctx context.Context, k supervise.Key) (string, error) {
+// Status reads the keyed process's status from the worker, with the failure
+// detail when it is "crashed".
+func (c *Client) Status(ctx context.Context, k supervise.Key) (status, detail string, err error) {
 	var resp statusResp
 	if err := c.post(ctx, pathStatus, statusReq{Key: fromKey(k)}, &resp); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return resp.Status, nil
+	return resp.Status, resp.Error, nil
+}
+
+// Report fetches the worker's full live-state dump: every non-idle key's
+// status, failure detail, and resource sample.
+func (c *Client) Report(ctx context.Context) ([]supervise.ProcReport, error) {
+	var resp reportResp
+	if err := c.post(ctx, pathReport, struct{}{}, &resp); err != nil {
+		return nil, err
+	}
+	out := make([]supervise.ProcReport, 0, len(resp.Procs))
+	for _, p := range resp.Procs {
+		out = append(out, supervise.ProcReport{
+			Key: p.Key.toKey(), Repo: p.Repo, Status: p.Status, Error: p.Error, Stats: p.Stats,
+		})
+	}
+	return out, nil
+}
+
+// RunLog fetches an incremental run-log slice from the worker's disk.
+func (c *Client) RunLog(ctx context.Context, repo, side, hash string, attempt int, offset int64) (supervise.RunLog, error) {
+	var chunk supervise.RunLog
+	err := c.post(ctx, pathRunLog, runLogReq{Repo: repo, Side: side, Hash: hash, Attempt: attempt, Offset: offset}, &chunk)
+	return chunk, err
 }
 
 // Drain marks the worker draining (or clears it) — used by a control-node

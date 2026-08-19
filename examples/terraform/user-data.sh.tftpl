@@ -3,10 +3,10 @@
 # Rendered by Terraform: $${...} is shell, $${} escapes template interpolation.
 set -euxo pipefail
 
-dnf install -y docker
-systemctl enable --now docker
-
 # --- data volume -----------------------------------------------------------
+# Mounted before docker is installed: docker's data-root lives on this volume
+# (below), so the mount must exist first.
+#
 # Nitro instances remap device names, so address the volume by its stable
 # by-id symlink (the volume id with the dash stripped) rather than /dev/sdf.
 DEVICE="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${replace(data_volume_id, "-", "")}"
@@ -27,6 +27,20 @@ if ! grep -q "$UUID" /etc/fstab; then
   echo "UUID=$UUID ${data_dir} xfs defaults,nofail 0 2" >>/etc/fstab
 fi
 mount -a
+mountpoint -q "${data_dir}" # refuse to proceed onto the root volume
+
+# --- docker ----------------------------------------------------------------
+# Image storage on the data volume, not the (discarded-on-rebuild) root
+# volume: the target repos' devcontainer images and the dependency stack's
+# images run to many GB, and re-pulling all of them was most of every
+# rebuild's cold-start tax. Set before docker ever starts, so the default
+# /var/lib/docker is never populated.
+dnf install -y docker
+mkdir -p /etc/docker "${data_dir}/docker"
+cat >/etc/docker/daemon.json <<EOF
+{"data-root": "${data_dir}/docker"}
+EOF
+systemctl enable --now docker
 
 # --- secrets ---------------------------------------------------------------
 # The webhook secret and the SSO client secret, pulled at boot instead of

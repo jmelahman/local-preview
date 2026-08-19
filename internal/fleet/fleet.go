@@ -36,6 +36,9 @@ var ErrNoWorker = errors.New("no worker available")
 type Backend interface {
 	EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (string, error)
 	Heartbeat(ctx context.Context) (workerapi.Heartbeat, error)
+	Report(ctx context.Context) ([]supervise.ProcReport, error)
+	RunLog(ctx context.Context, repo, side, hash string, attempt int, offset int64) (supervise.RunLog, error)
+	Stop(ctx context.Context, k supervise.Key, reason string) error
 }
 
 type workerState struct {
@@ -59,6 +62,11 @@ type Registry struct {
 	mu         sync.RWMutex
 	workers    map[string]*workerState
 	staleAfter time.Duration
+
+	// Merged fleet report cache — see runtime.go.
+	reportMu    sync.Mutex
+	reportAt    time.Time
+	reportCache map[supervise.Key]procEntry
 }
 
 // New returns an empty registry. A worker whose last heartbeat is older than

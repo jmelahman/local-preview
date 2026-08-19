@@ -13,6 +13,9 @@ import (
 type fakeBackend struct {
 	id      string
 	ensured []supervise.Key
+	report  []supervise.ProcReport
+	logs    map[string]supervise.RunLog // keyed side+"-"+hash
+	stopped []supervise.Key
 }
 
 func (f *fakeBackend) EnsureRunning(_ context.Context, k supervise.Key, _ string) (string, error) {
@@ -21,6 +24,16 @@ func (f *fakeBackend) EnsureRunning(_ context.Context, k supervise.Key, _ string
 }
 func (f *fakeBackend) Heartbeat(context.Context) (workerapi.Heartbeat, error) {
 	return workerapi.Heartbeat{}, nil
+}
+func (f *fakeBackend) Report(context.Context) ([]supervise.ProcReport, error) {
+	return f.report, nil
+}
+func (f *fakeBackend) RunLog(_ context.Context, _, side, hash string, _ int, _ int64) (supervise.RunLog, error) {
+	return f.logs[side+"-"+hash], nil
+}
+func (f *fakeBackend) Stop(_ context.Context, k supervise.Key, _ string) error {
+	f.stopped = append(f.stopped, k)
+	return nil
 }
 
 // regFresh registers workers with the given heartbeats, all beating "now".

@@ -329,32 +329,14 @@ func run(opts serveOptions) error {
 		startReconciler(workCtx, reconcile.New(database, files, artifactTier))
 	}
 
-	deps := api.Deps{
-		Store:               database,
-		Build:               api.BuildInfo(Build()),
-		Config:              cfg,
-		Git:                 gitMgr,
-		Queue:               queue,
-		Super:               super,
-		Cloner:              cloner,
-		Watcher:             watcher,
-		Files:               files,
-		Sweeper:             sweeper,
-		DBPath:              dbPath,
-		GitHubWebhookSecret: opts.githubSecret,
-		UploadAuth:          uploadAuth,
-		MaxUploadBytes:      opts.maxUploadBytes,
-		SSO:                 sso,
-		DashboardOrigin:     dashboardOrigin,
-		CookiesSecure:       cookiesSecure,
-	}
-	apex := api.AuthMiddleware(deps, api.NewMux(deps))
-
 	// Serving transport: the proxy is address-based and transport-agnostic. By
 	// default (and for a worker serving its own processes) it drives the local
 	// Manager over loopback; a control node with a worker endpoint drives the
 	// remote worker over the internal API instead. Both satisfy proxy.Backends.
+	// The fleet registry is built before the API deps because it is also the
+	// dashboard's runtime view (status/stats/run logs live on the workers).
 	var backends proxy.Backends = supervise.LocalBackends{M: super}
+	var runtime api.RuntimeView = super
 	if opts.role == "control" {
 		if endpoints := workerEndpoints(opts); len(endpoints) > 0 {
 			reg := fleet.New(fleetStaleAfter)
@@ -373,10 +355,33 @@ func run(opts serveOptions) error {
 			reg.StartHeartbeats(workCtx, fleetHeartbeatInterval)
 			startFleetSignal(workCtx, reg)
 			backends = reg
+			runtime = reg
 		} else {
 			log.Printf("role=control with no --worker-endpoint(s): previews will serve locally")
 		}
 	}
+
+	deps := api.Deps{
+		Store:               database,
+		Build:               api.BuildInfo(Build()),
+		Config:              cfg,
+		Git:                 gitMgr,
+		Queue:               queue,
+		Super:               super,
+		Runtime:             runtime,
+		Cloner:              cloner,
+		Watcher:             watcher,
+		Files:               files,
+		Sweeper:             sweeper,
+		DBPath:              dbPath,
+		GitHubWebhookSecret: opts.githubSecret,
+		UploadAuth:          uploadAuth,
+		MaxUploadBytes:      opts.maxUploadBytes,
+		SSO:                 sso,
+		DashboardOrigin:     dashboardOrigin,
+		CookiesSecure:       cookiesSecure,
+	}
+	apex := api.AuthMiddleware(deps, api.NewMux(deps))
 	router := proxy.New(database, files, backends, cfg.Preview.Domain, apex)
 	if sso != nil {
 		router.SetPreviewAuth(true, dashboardOrigin, cookiesSecure)

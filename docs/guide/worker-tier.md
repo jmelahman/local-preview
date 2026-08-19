@@ -1,0 +1,123 @@
+# Worker-tier architecture
+
+How a split control/worker deployment fits together: one small always-warm
+**control node** that owns all state and decisions, and an elastic tier of
+disposable **workers** that serve preview processes on its behalf. Flag-level
+reference lives in [Configuration →
+Split control / worker plane](/guide/configuration#split-control-worker-plane);
+this page is the architecture.
+
+```
+                        ┌──────────────────────────────┐
+ users ── ALB (TLS) ──▶ │ control node                  │
+                        │  dashboard · /api/ · proxy    │
+                        │  git watch · builds · SQLite  │
+                        │  shared deps stack (compose)  │──┐ deps ports,
+                        └──────┬───────────┬────────────┘  │ private IP only
+                               │           │               │
+                    worker API │           │ S3 artifact   │
+              (private, shared │           │ tier          │
+                       secret) ▼           ▼               │
+                        ┌──────────────┐  ┌─────────────┐  │
+                        │ worker(s)    │  │ S3 bucket   │  │
+                        │ preview      │◀─│ artifacts   │  │
+                        │ processes    │  │ (hydrate)   │  │
+                        └──────┬───────┘  └─────────────┘  │
+                               └───────────────────────────┘
+```
+
+## One orchestrator, two transports
+
+There is a single orchestrator implementation (`supervise.Manager`); what
+varies is the transport the proxy reaches it through. The proxy routes to a
+`Backends` interface returning `host:port`: on a single node
+(`--role=all`) that is the local manager over loopback, and on a control node
+it is the **fleet registry**, which places each key on a worker and calls that
+worker's API. A worker is the same binary with `--role=worker` — its own
+manager, driven remotely.
+
+## What travels to a worker, and how
+
+A worker is deliberately stateless — that is what makes it disposable enough
+to autoscale. Everything a process needs arrives through two channels:
+
+- **Artifact files** hydrate from the S3 artifact tier on demand. Local disk
+  on every node is only a cache of the tier; the extractor verifies the
+  content-byte count recorded at upload time before publishing.
+- **The run contract** (argv, run image, env, health path, timeouts, init
+  steps) travels *on the wire*: the control node resolves it from its own
+  database and ships it inside every ensure request (`supervise.WireSpec`).
+  Workers never replicate the control database and never call back to it.
+
+Two details of the wire spec are load-bearing:
+
+- **State dirs travel as identity, not paths.** Each node recomputes the path
+  against its own store root — and a worker's state dir starts fresh (see
+  [limitations](#limitations)).
+- **`init_done` is sticky per node.** The control node has no record of an
+  init that ran on a worker, so it re-sends `false` forever; the worker's
+  spec cache keeps a completed init from re-running on its own later cold
+  starts.
+
+## Placement
+
+The registry places keys by rendezvous (highest-random-weight) hashing on
+(repo, artifact hash): the same artifact consistently lands on the same
+worker, reusing its warm process and local cache, and workers joining or
+leaving move a minimal set of keys. A process-mode frontend hashes on its
+*backend's* hash — the pair shares a per-deploy docker network that exists on
+exactly one node. Draining or full workers are skipped, falling back to the
+least-loaded one.
+
+## Reaching a worker's processes
+
+Preview processes on a worker publish their ports on the worker's routable
+address (derived from `--worker-listen`) in addition to loopback, and the
+control node's proxy dials `worker_ip:port` directly. The worker API itself —
+an intentional remote-code-execution surface, since it starts arbitrary
+preview processes — listens on the worker's private IP behind a shared
+secret, admitted only from the control node's security group, and must never
+sit behind the public load balancer.
+
+## The dashboard's view
+
+Live process state (status, crash detail, resource samples, run logs) is
+node-local truth on whichever worker runs the process. The control node's API
+renders from a **fleet report**: each worker exposes a bulk dump of every
+non-idle key, and the registry merges them into a briefly-cached view — one
+round trip per worker per cache window, however many deploys the dashboard
+lists. Run logs are fetched from the worker that reported the key (or by
+asking the fleet, since logs outlive processes). Stops fan out to every
+worker.
+
+## Shared dependencies
+
+Per-commit processes move to workers; the services every preview shares (a
+repo's database, search, cache) stay on the control host as a compose stack,
+publishing their ports **only on the control host's static private IP** — the
+address a manifest reaches them at from any node. Credentials live in SSM,
+land in each node's boot-time env file, and reach preview processes through
+the manifest's [`{secret:NAME}`
+placeholder](/reference/preview-toml#env-placeholders) — never in the
+manifest, the database, or Terraform state. Per-commit isolation inside those
+shared services keys on `{hash}` (e.g. `POSTGRES_DB = "preview_{hash}"`).
+
+## Builds and uploads
+
+Builds and CI uploads happen only on the control node, which is the sole
+writer to the artifact tier; workers get read-only tier access, so a
+compromised worker (it runs arbitrary preview code by design) cannot poison
+the content-addressed artifacts every node trusts.
+
+## Limitations
+
+- **`{state_dir}` does not follow previews across nodes.** Worker state dirs
+  start fresh — lineage forking is a build-time, control-node mechanism. A
+  repo served by workers should keep per-commit state in shared services
+  keyed by `{hash}` instead.
+- **The fleet is static**: workers come from `--worker-endpoints`; discovery,
+  scale-in draining, and autoscaling signals are infrastructure concerns (the
+  load ratio is logged as `fleet: load=…` for a policy to target-track).
+- **Retention runs on the control node.** Worker disks are caches — idle
+  processes reap themselves and artifacts re-hydrate — but a worker's state
+  dirs are only reclaimed by instance replacement.

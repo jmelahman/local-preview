@@ -44,6 +44,9 @@ type fakeSup struct {
 	offered    map[supervise.Key]supervise.WireSpec
 	stopped    []supervise.Key
 	status     string
+	failDetail string
+	report     []supervise.ProcReport
+	runLog     supervise.RunLog
 	running    int
 	maxWarm    int
 }
@@ -70,8 +73,15 @@ func (f *fakeSup) Stop(k supervise.Key, _ string) {
 	f.stopped = append(f.stopped, k)
 }
 func (f *fakeSup) Status(k supervise.Key) string { return f.status }
-func (f *fakeSup) Running() int                  { return f.running }
-func (f *fakeSup) MaxWarm() int                  { return f.maxWarm }
+func (f *fakeSup) LastFailure(k supervise.Key) (supervise.Failure, bool) {
+	return supervise.Failure{Detail: f.failDetail}, f.failDetail != ""
+}
+func (f *fakeSup) Report(context.Context) []supervise.ProcReport { return f.report }
+func (f *fakeSup) RunLog(repo, side, hash string, attempt int, offset int64) (supervise.RunLog, error) {
+	return f.runLog, nil
+}
+func (f *fakeSup) Running() int { return f.running }
+func (f *fakeSup) MaxWarm() int { return f.maxWarm }
 
 const secret = "s3cr3t"
 
@@ -122,9 +132,54 @@ func TestStopAndStatus(t *testing.T) {
 	if len(sup.stopped) != 1 || sup.stopped[0] != k {
 		t.Fatalf("stopped = %v, want [%v]", sup.stopped, k)
 	}
-	st, err := c.Status(context.Background(), k)
+	st, _, err := c.Status(context.Background(), k)
 	if err != nil || st != supervise.StatusRunning {
 		t.Fatalf("status = %q, %v", st, err)
+	}
+}
+
+// TestStatusCarriesFailureDetail: a crashed status travels with its cause.
+func TestStatusCarriesFailureDetail(t *testing.T) {
+	sup := &fakeSup{status: supervise.StatusCrashed, failDetail: "exit status 3"}
+	c, done := testServer(t, sup)
+	defer done()
+	st, detail, err := c.Status(context.Background(), supervise.BackendKey(1, "h"))
+	if err != nil || st != supervise.StatusCrashed || detail != "exit status 3" {
+		t.Fatalf("status = %q detail = %q, %v", st, detail, err)
+	}
+}
+
+// TestReportAndRunLogRoundTrip: the bulk report and run-log slices cross the
+// wire intact — keys, stats, and chunk fields alike.
+func TestReportAndRunLogRoundTrip(t *testing.T) {
+	cpu := 12.5
+	k := supervise.FrontendKey(7, "feHASH", "beHASH")
+	sup := &fakeSup{
+		report: []supervise.ProcReport{{
+			Key: k, Repo: "demo", Status: supervise.StatusRunning,
+			Stats: &supervise.ProcessStats{Runtime: "container", CPUPercent: &cpu, MemoryBytes: 42, MemoryLimitBytes: 100},
+		}, {
+			Key: supervise.BackendKey(7, "beHASH"), Status: supervise.StatusCrashed, Error: "boom",
+		}},
+		runLog: supervise.RunLog{Attempt: 3, Offset: 17, Content: "hello", Truncated: true},
+	}
+	c, done := testServer(t, sup)
+	defer done()
+
+	procs, err := c.Report(context.Background())
+	if err != nil || len(procs) != 2 {
+		t.Fatalf("report = %+v, %v", procs, err)
+	}
+	if procs[0].Key != k || procs[0].Repo != "demo" || procs[0].Stats == nil || *procs[0].Stats.CPUPercent != cpu {
+		t.Fatalf("proc[0] = %+v", procs[0])
+	}
+	if procs[1].Status != supervise.StatusCrashed || procs[1].Error != "boom" {
+		t.Fatalf("proc[1] = %+v", procs[1])
+	}
+
+	chunk, err := c.RunLog(context.Background(), "demo", "fe", "feHASH", 0, 0)
+	if err != nil || chunk != sup.runLog {
+		t.Fatalf("runlog = %+v, %v", chunk, err)
 	}
 }
 

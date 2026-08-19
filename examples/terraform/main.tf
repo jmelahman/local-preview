@@ -669,6 +669,7 @@ resource "aws_instance" "worker" {
     server_args = join(" ", var.workers.extra_server_args)
     worker_ssm  = var.workers.secret_ssm_parameter
     secret_env  = var.secret_env_ssm_parameters
+    warm_images = var.workers.warm_images
   }))
   user_data_replace_on_change = true
 

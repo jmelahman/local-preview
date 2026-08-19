@@ -18,6 +18,9 @@ type Supervisor interface {
 	OfferWireSpec(k supervise.Key, s supervise.WireSpec)
 	Stop(k supervise.Key, reason string)
 	Status(k supervise.Key) string
+	LastFailure(k supervise.Key) (supervise.Failure, bool)
+	Report(ctx context.Context) []supervise.ProcReport
+	RunLog(repoName, side, hash string, attempt int, offset int64) (supervise.RunLog, error)
 	Running() int
 	MaxWarm() int
 }
@@ -49,6 +52,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(pathStatus, s.handleStatus)
 	mux.HandleFunc(pathHeartbeat, s.handleHeartbeat)
 	mux.HandleFunc(pathDrain, s.handleDrain)
+	mux.HandleFunc(pathReport, s.handleReport)
+	mux.HandleFunc(pathRunLog, s.handleRunLog)
 	return s.authed(mux)
 }
 
@@ -103,7 +108,38 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	writeJSON(w, statusResp{Status: s.sup.Status(req.Key.toKey())})
+	k := req.Key.toKey()
+	resp := statusResp{Status: s.sup.Status(k)}
+	if resp.Status == supervise.StatusCrashed {
+		if f, ok := s.sup.LastFailure(k); ok {
+			resp.Error = f.Detail
+		}
+	}
+	writeJSON(w, resp)
+}
+
+func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
+	procs := s.sup.Report(r.Context())
+	resp := reportResp{Procs: make([]wireProc, 0, len(procs))}
+	for _, p := range procs {
+		resp.Procs = append(resp.Procs, wireProc{
+			Key: fromKey(p.Key), Repo: p.Repo, Status: p.Status, Error: p.Error, Stats: p.Stats,
+		})
+	}
+	writeJSON(w, resp)
+}
+
+func (s *Server) handleRunLog(w http.ResponseWriter, r *http.Request) {
+	var req runLogReq
+	if !decode(w, r, &req) {
+		return
+	}
+	chunk, err := s.sup.RunLog(req.Repo, req.Side, req.Hash, req.Attempt, req.Offset)
+	if err != nil && chunk.Attempt == 0 {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, chunk)
 }
 
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {

@@ -65,3 +65,12 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now local-preview-worker.service
+
+%{ if length(warm_images) > 0 ~}
+# --- warm images -------------------------------------------------------------
+# Pre-pull the images previews run in, so the first cold start on a fresh
+# worker doesn't pay a multi-GB pull. Backgrounded (boot needn't wait) and
+# best-effort: a digest-pinned manifest still pulls exactly what it names —
+# a tag pulled here only warms shared layers.
+nohup sh -c '%{ for img in warm_images }docker pull "${img}" || true; %{ endfor }' >/var/log/local-preview-warm-pull.log 2>&1 &
+%{ endif ~}

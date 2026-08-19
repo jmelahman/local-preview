@@ -367,6 +367,11 @@ variable "workers" {
     root_volume_size_gb  = optional(number, 60)
     extra_server_args    = optional(list(string), [])
     stack_ingress_ports  = optional(list(number), [])
+    # Images pre-pulled (best-effort, in the background) at worker boot, so
+    # the first preview on a fresh worker doesn't pay the multi-GB
+    # devcontainer pull. Digest-pinned manifests still pull what they name;
+    # a tag listed here warms the shared layers.
+    warm_images = optional(list(string), [])
   })
   default = null
 
