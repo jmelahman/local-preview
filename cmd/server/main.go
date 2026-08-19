@@ -387,6 +387,19 @@ func run(opts serveOptions) error {
 	// remote-code-execution surface — private listener, shared-secret only,
 	// never ALB-reachable.
 	var workerSrv *http.Server
+	if opts.role == "worker" {
+		// Container ports publish loopback-only by default, which the control
+		// node's proxy can never dial. Publish them additionally on the address
+		// the worker API listens on — the address control reaches this node at.
+		// A host-less listen (":9100") publishes on all interfaces; either way
+		// the security group / firewall owns who can actually connect.
+		publishIP := "0.0.0.0"
+		if host, _, err := net.SplitHostPort(opts.workerListen); err == nil && host != "" && host != "127.0.0.1" && host != "localhost" {
+			publishIP = host
+		}
+		super.SetPublishIP(publishIP)
+		log.Printf("role=worker: containered preview ports publish on %s", publishIP)
+	}
 	if opts.workerListen != "" && (opts.role == "worker" || opts.role == "all") {
 		if isPublicBind(opts.workerListen) {
 			log.Printf("WARNING: --worker-listen %q binds all interfaces — the worker API starts arbitrary processes and must be firewalled to the control node only (private subnet / security group)",

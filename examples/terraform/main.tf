@@ -84,14 +84,33 @@ locals {
     "--preview-base-url", local.base_url,
   ]
 
-  server_args = concat(local.base_url_args, local.sso_args, local.oidc_upload_args, var.extra_server_args)
+  # With a worker tier, the server becomes the control node: builds stay here,
+  # serving is routed to the workers. Endpoints are rendered from the literal
+  # private_ips so user_data stays known at plan time.
+  worker_endpoints = var.workers == null ? [] : [
+    for ip in var.workers.private_ips : "http://${ip}:${var.workers.api_port}"
+  ]
+  worker_args = var.workers == null ? [] : [
+    "--role", "control",
+    "--worker-endpoints", join(",", local.worker_endpoints),
+  ]
 
-  # Both are SecureString parameters the instance reads at boot; neither is a
-  # Terraform value, so neither reaches state.
-  secret_ssm_parameters = compact([
+  server_args = concat(local.base_url_args, local.sso_args, local.oidc_upload_args, local.worker_args, var.extra_server_args)
+
+  # All SecureString parameters the instances read at boot; none is a
+  # Terraform value, so none reaches state.
+  secret_ssm_parameters = distinct(concat(compact([
     var.github_webhook_secret_ssm_parameter,
     var.sso == null ? null : var.sso.client_secret_ssm_parameter,
-  ])
+    var.workers == null ? null : var.workers.secret_ssm_parameter,
+  ]), values(var.secret_env_ssm_parameters)))
+
+  # What the *worker* boot script reads: the shared secret plus the secret env
+  # (a worker resolves manifest {secret:...} placeholders itself).
+  worker_secret_ssm_parameters = var.workers == null ? [] : distinct(concat(
+    [var.workers.secret_ssm_parameter],
+    values(var.secret_env_ssm_parameters),
+  ))
 }
 
 # The data volume is AZ-bound, so it has to land in the instance's AZ.
@@ -223,6 +242,7 @@ resource "aws_instance" "server" {
   ami                         = local.ami_id
   instance_type               = var.instance_type
   subnet_id                   = local.subnet_id
+  private_ip                  = var.private_ip
   key_name                    = var.key_pair_name
   iam_instance_profile        = aws_iam_instance_profile.instance.name
   vpc_security_group_ids      = [aws_security_group.server.id]
@@ -245,6 +265,8 @@ resource "aws_instance" "server" {
     server_args     = join(" ", local.server_args)
     webhook_ssm     = var.github_webhook_secret_ssm_parameter == null ? "" : var.github_webhook_secret_ssm_parameter
     sso_secret_ssm  = var.sso == null ? "" : var.sso.client_secret_ssm_parameter
+    worker_ssm      = var.workers == null ? "" : var.workers.secret_ssm_parameter
+    secret_env      = var.secret_env_ssm_parameters
   }))
 
   # The image is baked into the unit file that user_data writes, so an image
@@ -520,4 +542,147 @@ resource "aws_route53_record" "server" {
       evaluate_target_health = false
     }
   }
+}
+
+# ---------------------------------------------------------------------------
+# Worker tier. Same image, --role=worker: the control node above routes
+# preview serving here over the internal worker API. Workers are disposable —
+# no EBS data volume, no builds, no manifests; artifact files hydrate from
+# the S3 tier and run specs arrive on the wire. The worker API is remote code
+# execution by design: it listens on the worker's private IP and admits only
+# the server's security group. Never attach it to a load balancer.
+# ---------------------------------------------------------------------------
+
+resource "aws_security_group" "worker" {
+  count = var.workers == null ? 0 : 1
+
+  name        = "${var.name}-worker"
+  description = "Worker tier for ${var.name}: control-node-only ingress"
+  vpc_id      = data.aws_subnet.instance.vpc_id
+
+  ingress {
+    description     = "Worker API, from the control node only (RCE surface)"
+    from_port       = var.workers.api_port
+    to_port         = var.workers.api_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.server.id]
+  }
+
+  ingress {
+    description     = "Proxied preview processes (OS-assigned ports), from the control node only"
+    from_port       = 1024
+    to_port         = 65535
+    protocol        = "tcp"
+    security_groups = [aws_security_group.server.id]
+  }
+
+  egress {
+    description = "All egress: image pulls and artifact hydration"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.tags, { Name = "${var.name}-worker" })
+}
+
+# How workers reach the shared dependency stack: the stack publishes its
+# ports on the server's (static) private IP, and these rules are the only
+# ingress to them. Separate rule resources so the base SG needn't change.
+resource "aws_vpc_security_group_ingress_rule" "stack_from_workers" {
+  for_each = var.workers == null ? toset([]) : toset([for p in var.workers.stack_ingress_ports : tostring(p)])
+
+  security_group_id            = aws_security_group.server.id
+  description                  = "Shared dependency stack port, from the worker tier"
+  from_port                    = tonumber(each.value)
+  to_port                      = tonumber(each.value)
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = aws_security_group.worker[0].id
+
+  tags = local.tags
+}
+
+resource "aws_iam_role" "worker" {
+  count = var.workers == null ? 0 : 1
+
+  name               = "${var.name}-worker"
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
+  tags               = local.tags
+}
+
+resource "aws_iam_role_policy_attachment" "worker_ssm_core" {
+  count = var.workers == null ? 0 : 1
+
+  role       = aws_iam_role.worker[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+data "aws_iam_policy_document" "worker_secrets" {
+  count = var.workers == null ? 0 : 1
+
+  statement {
+    actions = ["ssm:GetParameter"]
+    resources = [
+      for name in local.worker_secret_ssm_parameters :
+      "arn:aws:ssm:${data.aws_region.current.name}:*:parameter/${trimprefix(name, "/")}"
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "worker_secrets" {
+  count = var.workers == null ? 0 : 1
+
+  name   = "${var.name}-worker-secrets"
+  role   = aws_iam_role.worker[0].id
+  policy = data.aws_iam_policy_document.worker_secrets[0].json
+}
+
+resource "aws_iam_instance_profile" "worker" {
+  count = var.workers == null ? 0 : 1
+
+  name = "${var.name}-worker"
+  role = aws_iam_role.worker[0].name
+  tags = local.tags
+}
+
+resource "aws_instance" "worker" {
+  count = var.workers == null ? 0 : length(var.workers.private_ips)
+
+  ami                    = local.ami_id
+  instance_type          = var.workers.instance_type
+  subnet_id              = local.subnet_id
+  private_ip             = var.workers.private_ips[count.index]
+  iam_instance_profile   = aws_iam_instance_profile.worker[0].name
+  vpc_security_group_ids = [aws_security_group.worker[0].id]
+  # Public IP for egress only (image pulls, S3 hydration): the default VPC has
+  # no NAT, and the security group admits nothing inbound but the control node.
+  associate_public_ip_address = true
+
+  user_data_base64 = base64gzip(templatefile("${path.module}/worker-data.sh.tftpl", {
+    aws_region  = data.aws_region.current.name
+    image       = var.image
+    data_dir    = var.data_dir
+    private_ip  = var.workers.private_ips[count.index]
+    api_port    = var.workers.api_port
+    max_warm    = var.workers.max_warm
+    server_args = join(" ", var.workers.extra_server_args)
+    worker_ssm  = var.workers.secret_ssm_parameter
+    secret_env  = var.secret_env_ssm_parameters
+  }))
+  user_data_replace_on_change = true
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
+  root_block_device {
+    volume_size           = var.workers.root_volume_size_gb
+    volume_type           = "gp3"
+    encrypted             = true
+    delete_on_termination = true
+  }
+
+  tags = merge(local.tags, { Name = "${var.name}-worker-${count.index}" })
 }

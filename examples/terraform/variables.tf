@@ -308,6 +308,74 @@ variable "extra_server_args" {
   default     = []
 }
 
+variable "private_ip" {
+  description = <<-EOT
+    Static private IP for the server, inside subnet_id's CIDR. Pin it when
+    anything else addresses this host by private IP — a worker tier reaching
+    the shared dependency stack, most notably — so an instance rebuild does
+    not re-roll the address every manifest and worker points at. Requires
+    subnet_id to be pinned too: the address must belong to that subnet.
+  EOT
+  type        = string
+  default     = null
+}
+
+variable "secret_env_ssm_parameters" {
+  description = <<-EOT
+    Environment variables read from SecureString SSM parameters at boot, keyed
+    by variable name: { PREVIEW_SECRET_FOO = "/path/to/parameter" }. Written to
+    the server's env file and to every compose stack's .env (for $${VAR}
+    interpolation in stack definitions), and to each worker's env file — so a
+    manifest `{secret:FOO}` placeholder resolves identically on every serving
+    node. Values never pass through Terraform, so they stay out of state and
+    of the cloud-init log.
+
+    Only variables named PREVIEW_SECRET_* are reachable from manifest env; the
+    prefix is the server's authorization boundary (manifests are
+    repo-controlled). Other names are still written — useful for stack-only
+    interpolation values.
+  EOT
+  type        = map(string)
+  default     = {}
+}
+
+variable "workers" {
+  description = <<-EOT
+    Elastic worker tier: instances running the same image with --role=worker,
+    serving preview processes the control node routes to. Setting this flips
+    the server to --role=control with static --worker-endpoints derived from
+    private_ips (one instance per entry — literals, so user_data stays known
+    at plan time and instance replacement still triggers).
+
+    The worker API starts arbitrary preview processes — remote code execution
+    by design. The module binds it to the worker's private IP and admits only
+    the server's security group; never route it through a load balancer.
+
+    stack_ingress_ports opens the listed server ports to the worker security
+    group — how workers reach a shared dependency stack (compose_stacks) that
+    publishes ports on the server's private IP.
+
+    secret_ssm_parameter names a SecureString holding the shared secret that
+    authenticates both directions of the worker API.
+  EOT
+  type = object({
+    private_ips          = list(string)
+    secret_ssm_parameter = string
+    instance_type        = optional(string, "r7i.large")
+    api_port             = optional(number, 9100)
+    max_warm             = optional(number, 12)
+    root_volume_size_gb  = optional(number, 60)
+    extra_server_args    = optional(list(string), [])
+    stack_ingress_ports  = optional(list(number), [])
+  })
+  default = null
+
+  validation {
+    condition     = var.workers == null || try(length(var.workers.private_ips) > 0, false)
+    error_message = "workers.private_ips must name at least one address — a control node with an empty fleet serves nothing."
+  }
+}
+
 variable "tags" {
   description = "Tags merged into every resource."
   type        = map(string)

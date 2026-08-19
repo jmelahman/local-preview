@@ -51,6 +51,20 @@ set +x
 printf 'PREVIEW_SSO_GITHUB_CLIENT_SECRET=%s\n' "$SSO_SECRET" >>/etc/local-preview.env
 set -x
 %{ endif ~}
+%{ if worker_ssm != "" ~}
+WORKER_SECRET=$(aws ssm get-parameter --region ${aws_region} \
+  --name '${worker_ssm}' --with-decryption --query Parameter.Value --output text)
+set +x
+printf 'PREVIEW_WORKER_SECRET=%s\n' "$WORKER_SECRET" >>/etc/local-preview.env
+set -x
+%{ endif ~}
+%{ for env_name, param in secret_env ~}
+VAL=$(aws ssm get-parameter --region ${aws_region} \
+  --name '${param}' --with-decryption --query Parameter.Value --output text)
+set +x
+printf '${env_name}=%s\n' "$VAL" >>/etc/local-preview.env
+set -x
+%{ endfor ~}
 
 # --- out-of-repo manifests -------------------------------------------------
 # Fallback manifests for repos whose commits carry no preview.toml. Terraform
@@ -101,6 +115,13 @@ ExecStop=/usr/bin/docker compose -p %i down
 WantedBy=multi-user.target
 EOF
 
+# Each stack also gets a .env beside its compose file — compose interpolates
+# $${VAR} references from it. It carries the secret_env values (rotated
+# credentials referenced as e.g. $${PREVIEW_SECRET_FOO}) plus HOST_PRIVATE_IP,
+# so a stack can publish ports bound to the instance's private address only.
+TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+HOST_PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+
 %{ for name, content in compose_stacks ~}
 mkdir -p '${data_dir}/stacks/${name}'
 set +x
@@ -108,6 +129,13 @@ base64 -d >'${data_dir}/stacks/${name}/compose.yaml' <<'COMPOSE_B64'
 ${base64encode(content)}
 COMPOSE_B64
 set -x
+install -m 600 /dev/null '${data_dir}/stacks/${name}/.env'
+echo "HOST_PRIVATE_IP=$HOST_PRIVATE_IP" >>'${data_dir}/stacks/${name}/.env'
+%{ for env_name, param in secret_env ~}
+set +x
+grep '^${env_name}=' /etc/local-preview.env >>'${data_dir}/stacks/${name}/.env'
+set -x
+%{ endfor ~}
 %{ endfor ~}
 
 systemctl daemon-reload

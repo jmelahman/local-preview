@@ -133,6 +133,7 @@ for lookup order and caching semantics.
 | `PREVIEW_WORKER_SECRET` | `preview serve` | Shared secret for the internal worker API (an explicit `--worker-secret` flag wins) |
 | `PREVIEW_WORKER_ENDPOINT` | `preview serve --role=control` | A worker's private worker-API base URL (an explicit `--worker-endpoint` flag wins) |
 | `PREVIEW_WORKER_ENDPOINTS` | `preview serve --role=control` | Comma-separated worker-API base URLs forming the fleet (an explicit `--worker-endpoints` flag wins) |
+| `PREVIEW_SECRET_*` | `preview serve` | Values a manifest's `{secret:NAME}` env placeholder may reference (`NAME` maps to `PREVIEW_SECRET_NAME`); set identically on every serving node. See [env placeholders](/reference/preview-toml#env-placeholders) |
 | `PREVIEW_URL` | CLI subcommands | Server base URL (an explicit `--server` flag wins; this in turn beats the config file) |
 | `PREVIEW_TOKEN` | CLI subcommands | Bearer token (a GitHub PAT) sent to an [SSO-protected](/guide/sso) server (wins over the config file's `token`) |
 | `PREVIEW_BACKEND` | `web/` dev server | Backend `host:port` the Vite proxy targets |
@@ -323,10 +324,22 @@ and **must live on a private listener that is never reachable from the ALB or
 the internet** — a private subnet with a security-group rule that admits only
 the control node.
 
-This is early scaffolding: the worker registry is static (endpoints from flags,
-not an ASG-driven registry), scale-out/in and warm pools are left to the
-infrastructure layer, and a worker still needs read access to the deploy
-database to resolve run configs.
+A worker needs no database of its own: every ensure request carries the
+control-node-resolved run spec (and the co-placed backend's, for a
+process-mode frontend), and artifact *files* hydrate from the S3 tier — so a
+worker also needs the `--s3-*` flags. Manifest `{secret:NAME}` placeholders
+resolve on the serving node, so each worker's environment must carry the same
+`PREVIEW_SECRET_*` variables as the control node. State dirs are node-local
+and start fresh on a worker — see the
+[`{state_dir}` limitation](/reference/preview-toml#env-placeholders).
+Containered preview ports, loopback-only on a single node, additionally
+publish on the address `--worker-listen` binds (or all interfaces for a
+host-less `:9100`), so the control node's proxy can reach them; the security
+group must admit the control node on those OS-assigned ports.
+
+This is early scaffolding: the worker registry is static (endpoints from
+flags, not an ASG-driven registry), and scale-out/in and warm pools are left
+to the infrastructure layer.
 
 ## The preview domain
 

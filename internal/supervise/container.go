@@ -92,6 +92,7 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, rt runtimeEnv,
 		Labels:       labels,
 		Name:         name,
 		Port:         port,
+		PublishIP:    m.publishIP,
 		NetworkID:    networkID,
 		NetworkAlias: alias,
 	})

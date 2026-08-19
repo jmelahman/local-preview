@@ -102,12 +102,23 @@ literal string is what's hashed):
 | `{repo}` | The registered repo name | both |
 | `{hash}` | The side's own 12-char artifact hash | both |
 | `{backend_url}` | Base URL the frontend uses to reach this deploy's backend | frontend |
+| `{secret:NAME}` | The value of `PREVIEW_SECRET_NAME` from the serving node's environment | both |
 
 `{hash}` is per-artifact, not per-commit: processes are shared across
 deploys with the same hash (the same reason state dirs fork per artifact),
 so `POSTGRES_DB = "preview_{hash}"` gives isolation that follows artifact
 identity. `{backend_url}` requires `frontend.run` and both sides on the
 same runtime (both `run_image` or neither).
+
+`{secret:NAME}` keeps credentials out of the manifest itself: the value is
+read at process start from the orchestrator's own environment, namespaced as
+`PREVIEW_SECRET_NAME` — put the real value in that variable on every serving
+node (control and workers), typically via the boot-time env file. The prefix
+is deliberate: manifests are repo-controlled, so unrestricted pass-through
+would let a manifest read control-plane env like the SSO client secret. A
+referenced secret that is unset fails the start loudly rather than exporting
+an empty credential. The stored run config keeps the placeholder, so the
+secret value never lands in the database or crosses the worker wire.
 
 ::: warning `{state_dir}` and worker tiers
 State directories are node-local. On a single node (`--role=all`) they fork

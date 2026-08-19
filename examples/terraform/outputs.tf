@@ -55,3 +55,13 @@ output "instance_role_name" {
   EOT
   value       = aws_iam_role.instance.name
 }
+
+output "worker_role_name" {
+  description = "IAM role name of the worker tier, or null without one. Attach the artifact bucket's read policy here — workers hydrate artifacts but never build, so read-only suffices."
+  value       = var.workers == null ? null : aws_iam_role.worker[0].name
+}
+
+output "worker_instance_ids" {
+  description = "EC2 instance ids of the worker tier — include them in any start/stop schedule that covers the server, or the control node routes to stopped workers."
+  value       = var.workers == null ? [] : aws_instance.worker[*].id
+}

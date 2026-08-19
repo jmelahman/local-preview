@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,7 +102,8 @@ type Manager struct {
 	wireSpecs map[Key]WireSpec // control-supplied run specs (worker serving)
 	stopping  bool             // set by StopAll; refuses new starts during shutdown
 
-	stateDirWarned bool // one {state_dir}-over-workers warning per process
+	stateDirWarned bool   // one {state_dir}-over-workers warning per process
+	publishIP      string // extra host address container ports publish on
 
 	dockerMu     sync.Mutex
 	dockerProbed bool
@@ -233,6 +235,13 @@ func (m *Manager) SetMaxWarm(n int) {
 // MaxWarm returns the warm-process cap (0 = unlimited). Reported in the worker
 // heartbeat so the control node can size fleet-wide capacity.
 func (m *Manager) MaxWarm() int { return m.maxWarm }
+
+// SetPublishIP additionally publishes containered processes' ports on the
+// given host address. A worker must set it to the address the control node
+// dials (its private IP): container ports default to loopback-only, which a
+// remote proxy can never reach. Host processes are unaffected — they follow
+// the manifest's bind address. Call before serving.
+func (m *Manager) SetPublishIP(ip string) { m.publishIP = ip }
 
 // Running returns the number of tracked processes (starting or running) — the
 // worker's committed warm slots, reported in the heartbeat.
@@ -531,11 +540,15 @@ func (m *Manager) loadRunSpec(k Key, repoName string) (runSpec, error) {
 		if err := json.Unmarshal([]byte(ws.RunConfig), &cfg); err != nil {
 			return runSpec{}, fmt.Errorf("parse run config: %w", err)
 		}
+		env, err := resolveSecretEnv(cfg.Env)
+		if err != nil {
+			return runSpec{}, err
+		}
 		return runSpec{
 			argv:         cfg.Run,
 			runImage:     cfg.RunImage,
 			devc:         derefDevc(cfg.Devcontainer),
-			env:          cfg.Env,
+			env:          env,
 			healthPath:   cfg.HealthPath,
 			startTimeout: time.Duration(cfg.StartTimeout),
 			idleTimeout:  idleOrDefault(time.Duration(cfg.IdleTimeout)),
@@ -567,11 +580,15 @@ func (m *Manager) loadRunSpec(k Key, repoName string) (runSpec, error) {
 	if err := json.Unmarshal([]byte(ws.RunConfig), &cfg); err != nil {
 		return runSpec{}, fmt.Errorf("parse run config: %w", err)
 	}
+	env, err := resolveSecretEnv(cfg.Env)
+	if err != nil {
+		return runSpec{}, err
+	}
 	return runSpec{
 		argv:         cfg.Run,
 		runImage:     cfg.RunImage,
 		devc:         derefDevc(cfg.Devcontainer),
-		env:          cfg.Env,
+		env:          env,
 		healthPath:   cfg.HealthPath,
 		startTimeout: time.Duration(cfg.StartTimeout),
 		idleTimeout:  idleOrDefault(time.Duration(cfg.IdleTimeout)),
@@ -591,6 +608,50 @@ func shortHash(h string) string {
 		return h[:12]
 	}
 	return h
+}
+
+// secretRe matches the {secret:NAME} env placeholder.
+var secretRe = regexp.MustCompile(`\{secret:([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// SecretEnvPrefix namespaces the orchestrator environment variables that
+// manifest env values may reference via {secret:NAME}. The prefix is the
+// authorization: manifests are repo-controlled, so an unrestricted
+// pass-through would let any registered repo's preview.toml exfiltrate
+// control-plane env (the SSO client secret, worker shared secret, ...).
+// Only variables deliberately published under this prefix are reachable.
+const SecretEnvPrefix = "PREVIEW_SECRET_"
+
+// resolveSecretEnv expands {secret:NAME} in env values from the serving
+// node's own environment (PREVIEW_SECRET_<NAME>). Expansion is start-time
+// and node-local on purpose: the stored run config and the worker wire spec
+// carry only the placeholder, so credentials never land in the DB, in
+// Terraform-rendered files, or in state — each node reads its own copy from
+// its boot-time env file. A referenced secret that is unset fails the start
+// loudly rather than exporting an empty credential.
+func resolveSecretEnv(env map[string]string) (map[string]string, error) {
+	touched := false
+	out := make(map[string]string, len(env))
+	var missing []string
+	for k, v := range env {
+		expanded := secretRe.ReplaceAllStringFunc(v, func(m string) string {
+			touched = true
+			name := SecretEnvPrefix + secretRe.FindStringSubmatch(m)[1]
+			val, ok := os.LookupEnv(name)
+			if !ok {
+				missing = append(missing, name)
+			}
+			return val
+		})
+		out[k] = expanded
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return nil, fmt.Errorf("env references undefined secrets: set %s on this node", strings.Join(missing, ", "))
+	}
+	if !touched {
+		return env, nil
+	}
+	return out, nil
 }
 
 // idleOrDefault covers run configs stored before idle enforcement existed.

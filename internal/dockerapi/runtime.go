@@ -31,6 +31,11 @@ type ContainerSpec struct {
 	Labels  map[string]string
 	Name    string
 	Port    int
+	// PublishIP, when set, additionally publishes Port on that host address —
+	// how a worker exposes its processes to the control node's proxy. The
+	// loopback binding always exists (local health checks poll it); firewalls
+	// own who can reach the extra one.
+	PublishIP string
 	// NetworkID, when set, attaches the container at create time with
 	// NetworkAlias as its DNS name on that network.
 	NetworkID    string
@@ -40,6 +45,16 @@ type ContainerSpec struct {
 // CreateContainer creates (but does not start) a container.
 func (c *Client) CreateContainer(ctx context.Context, spec ContainerSpec) (string, error) {
 	portKey := fmt.Sprintf("%d/tcp", spec.Port)
+	bindings := []map[string]string{{"HostIp": "127.0.0.1", "HostPort": strconv.Itoa(spec.Port)}}
+	switch spec.PublishIP {
+	case "", "127.0.0.1":
+		// Loopback only — the single-node default.
+	case "0.0.0.0":
+		// All interfaces subsumes loopback; listing both would collide.
+		bindings = []map[string]string{{"HostIp": "0.0.0.0", "HostPort": strconv.Itoa(spec.Port)}}
+	default:
+		bindings = append(bindings, map[string]string{"HostIp": spec.PublishIP, "HostPort": strconv.Itoa(spec.Port)})
+	}
 	body := map[string]any{
 		"Image":        spec.Image,
 		"Env":          spec.Env,
@@ -50,7 +65,7 @@ func (c *Client) CreateContainer(ctx context.Context, spec ContainerSpec) (strin
 		"HostConfig": map[string]any{
 			"Binds": spec.Binds,
 			"PortBindings": map[string]any{
-				portKey: []map[string]string{{"HostIp": "127.0.0.1", "HostPort": strconv.Itoa(spec.Port)}},
+				portKey: bindings,
 			},
 		},
 	}

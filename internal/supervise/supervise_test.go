@@ -536,6 +536,44 @@ func TestWireSpecDBWins(t *testing.T) {
 	}
 }
 
+func TestResolveSecretEnv(t *testing.T) {
+	t.Setenv("PREVIEW_SECRET_PG_PASSWORD", "hunter2")
+	env, err := resolveSecretEnv(map[string]string{
+		"POSTGRES_PASSWORD": "{secret:PG_PASSWORD}",
+		"COMPOSITE":         "prefix-{secret:PG_PASSWORD}-suffix",
+		"PLAIN":             "left alone",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env["POSTGRES_PASSWORD"] != "hunter2" || env["COMPOSITE"] != "prefix-hunter2-suffix" || env["PLAIN"] != "left alone" {
+		t.Fatalf("env = %+v", env)
+	}
+}
+
+func TestResolveSecretEnvMissingFailsLoudly(t *testing.T) {
+	_, err := resolveSecretEnv(map[string]string{"X": "{secret:DEFINITELY_UNSET_1}"})
+	if err == nil || !strings.Contains(err.Error(), "PREVIEW_SECRET_DEFINITELY_UNSET_1") {
+		t.Fatalf("err = %v, want the namespaced variable named", err)
+	}
+}
+
+// TestSecretEnvMissingFailsStart: a start referencing an unset secret must
+// fail the attempt (surfacing as "crashed"), never export an empty credential.
+func TestSecretEnvMissingFailsStart(t *testing.T) {
+	f := newFixture(t)
+	f.provisionCfg(t, "be-secret", manifest.Backend{
+		Run:          serverArgv(t),
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+		Env:          map[string]string{"TOKEN": "{secret:UNSET_FOR_TEST}"},
+	})
+	_, err := f.m.EnsureRunning(context.Background(), BackendKey(f.repoID, "be-secret"), "demo")
+	if err == nil || !strings.Contains(err.Error(), "PREVIEW_SECRET_UNSET_FOR_TEST") {
+		t.Fatalf("err = %v, want undefined-secret failure", err)
+	}
+}
+
 func TestInitFailureRetriesNextStart(t *testing.T) {
 	f := newFixture(t)
 	f.provisionCfg(t, "be-init-retry", manifest.Backend{
