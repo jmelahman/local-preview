@@ -53,9 +53,9 @@ func clientAcceptsGzip(r *http.Request) bool {
 type writeMode int
 
 const (
-	modeUndecided  writeMode = iota // buffering, no headers committed
-	modePassthrough                 // never compress (SSE, downloads, hijack, …)
-	modeGzip                        // compressing
+	modeUndecided   writeMode = iota // buffering, no headers committed
+	modePassthrough                  // never compress (SSE, downloads, hijack, …)
+	modeGzip                         // compressing
 )
 
 // gzipWriter defers the gzip/Content-Encoding decision until either the

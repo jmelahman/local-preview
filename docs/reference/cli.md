@@ -64,7 +64,7 @@ Flags on `preview deploy`:
 
 | Flag | Description |
 | --- | --- |
-| `--repo` | Registered repo name; by default the current directory is matched against registered sources |
+| `--repo` | Registered repo name; by default the current directory is matched against registered repos: a source path equal to the worktree root, an origin URL naming the same remote as the source (ssh/https/`.git` spellings all match), or a worktree root directory named like a registered repo |
 | `--rebuild` | Rebuild artifacts even if cached (a live backend keeps its old binary until restarted) |
 | `--no-wait` | Return immediately instead of waiting for the build |
 | `--json` | Print the deploy as JSON |
@@ -91,7 +91,7 @@ Flags (shared by every subcommand):
 
 | Flag | Description |
 | --- | --- |
-| `--repo` | Registered repo name; by default the current directory is matched against registered sources |
+| `--repo` | Registered repo name; by default the current directory is matched against registered repos: a source path equal to the worktree root, an origin URL naming the same remote as the source (ssh/https/`.git` spellings all match), or a worktree root directory named like a registered repo |
 | `--overwrite` | Replace the artifact if it is already present (an upload of an already-present hash is otherwise a no-op) |
 | `--deploy` | Deploy the commit after uploading and wait for its preview URL — the one-command CI flow |
 | `--oidc` | Authenticate with a [GitHub Actions OIDC](/guide/uploads#authenticating-with-github-actions-oidc) token minted from the runner (needs `permissions: id-token: write`) |
@@ -118,7 +118,7 @@ command composes with scripts even when no browser is around.
 
 | Flag | Description |
 | --- | --- |
-| `--repo` | Registered repo name; by default the current directory is matched against registered sources |
+| `--repo` | Registered repo name; by default the current directory is matched against registered repos: a source path equal to the worktree root, an origin URL naming the same remote as the source (ssh/https/`.git` spellings all match), or a worktree root directory named like a registered repo |
 | `--print` | Print the preview URL only, without opening a browser |
 
 Exits non-zero when the matched deploy isn't ready — still building, failed,
@@ -136,7 +136,7 @@ run log of the deploy it finds. For a deploy's _build_ logs, use
 
 | Flag | Description |
 | --- | --- |
-| `--repo` | Registered repo name; by default the current directory is matched against registered sources |
+| `--repo` | Registered repo name; by default the current directory is matched against registered repos: a source path equal to the worktree root, an origin URL naming the same remote as the source (ssh/https/`.git` spellings all match), or a worktree root directory named like a registered repo |
 | `--side` | Which process: `be` (backend, default) or `fe` (process-mode frontend) |
 | `-f`, `--follow` | Keep polling for new output until interrupted |
 
@@ -148,7 +148,7 @@ twice a second apart to compute the CPU percentage), addressed by ref. Like
 
 | Flag | Description |
 | --- | --- |
-| `--repo` | Registered repo name; by default the current directory is matched against registered sources |
+| `--repo` | Registered repo name; by default the current directory is matched against registered repos: a source path equal to the worktree root, an origin URL naming the same remote as the source (ssh/https/`.git` spellings all match), or a worktree root directory named like a registered repo |
 
 Both `preview logs` and `preview stats` exit non-zero when the matched deploy
 has no live process to inspect — still building, failed, or evicted — with a

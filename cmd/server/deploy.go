@@ -378,21 +378,79 @@ func detectRepo(ctx context.Context, c *client.Client) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if top, err := findWorktreeRoot("."); err == nil {
-		for _, r := range repos {
-			if absSource, err := filepath.Abs(r.Source); err == nil && absSource == top {
-				return r.Name, nil
-			}
-		}
-	}
-	if origin := localOriginURL("."); origin != "" {
-		for _, r := range repos {
-			if r.Source == origin {
-				return r.Name, nil
-			}
-		}
+	top, _ := findWorktreeRoot(".")
+	if name, ok := matchRepo(repos, top, localOriginURL(".")); ok {
+		return name, nil
 	}
 	return "", fmt.Errorf("could not match the current directory to a registered repo; pass --repo (registered: %s)", repoNames(repos))
+}
+
+// matchRepo resolves a local checkout (its worktree root and origin URL) to a
+// registered repo, most-specific rule first:
+//
+//  1. the registered source is this exact local path;
+//  2. the origin URL names the same remote as the registered source — by
+//     normalized identity, so git@github.com:org/x, https://github.com/org/x,
+//     and either with a .git suffix all match;
+//  3. the worktree root's directory name equals a registered repo's name —
+//     the ~/code/onyx convention, a heuristic, so it is deliberately last.
+func matchRepo(repos []client.Repo, top, origin string) (string, bool) {
+	if top != "" {
+		for _, r := range repos {
+			if absSource, err := filepath.Abs(r.Source); err == nil && absSource == top {
+				return r.Name, true
+			}
+		}
+	}
+	if id := normalizeGitURL(origin); id != "" {
+		for _, r := range repos {
+			if normalizeGitURL(r.Source) == id {
+				return r.Name, true
+			}
+		}
+	}
+	if top != "" {
+		base := strings.ToLower(filepath.Base(top))
+		for _, r := range repos {
+			if r.Name == base {
+				return r.Name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// normalizeGitURL reduces a git remote URL to a comparable "host/path"
+// identity: scheme (https, ssh, git) and the scp-like git@host:path form all
+// collapse to the same string, a trailing .git or / is dropped, and the
+// result is lowercased (GitHub treats owner/repo case-insensitively). A local
+// path (no host) returns "" — paths are matched by the caller's absolute-path
+// rule, not here.
+func normalizeGitURL(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if scheme, rest, ok := strings.Cut(s, "://"); ok {
+		_ = scheme // https, ssh, git — all collapse to host/path
+		s = rest
+	} else {
+		// scp-like: [user@]host:path — but a string with no colon (or a
+		// slash before it) is a local path, matched elsewhere.
+		host, path, ok := strings.Cut(s, ":")
+		if !ok || strings.Contains(host, "/") {
+			return ""
+		}
+		s = host + "/" + strings.TrimPrefix(path, "/")
+	}
+	// Drop any user@ ahead of the host (ssh://git@github.com/…, git@…).
+	if slash := strings.IndexByte(s, '/'); slash > 0 {
+		if at := strings.LastIndex(s[:slash], "@"); at >= 0 {
+			s = s[at+1:]
+		}
+	}
+	s = strings.TrimSuffix(strings.TrimSuffix(s, "/"), ".git")
+	return strings.ToLower(s)
 }
 
 func repoNames(repos []client.Repo) string {

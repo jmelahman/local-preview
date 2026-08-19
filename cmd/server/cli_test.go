@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/jmelahman/local-preview/internal/client"
 )
 
 // isolateConfig points the config-dir lookup at a fresh temp dir, so tests
@@ -176,5 +178,38 @@ func TestEffectiveTokenNoGH(t *testing.T) {
 	t.Setenv("PREVIEW_TOKEN", "")
 	if tok, err := effectiveToken(); err != nil || tok != "" {
 		t.Fatalf("token = %q, %v; want empty", tok, err)
+	}
+}
+
+// TestMatchRepo covers cwd→repo inference: local-path sources, remote-URL
+// identity across ssh/https/.git spellings, and the directory-name fallback
+// (~/code/onyx → repo "onyx"), in that priority order.
+func TestMatchRepo(t *testing.T) {
+	repos := []client.Repo{
+		{Name: "onyx", Source: "https://github.com/onyx-dot-app/onyx"},
+		{Name: "local", Source: "/srv/checkouts/local"},
+	}
+	cases := []struct {
+		name, top, origin, want string
+		ok                      bool
+	}{
+		{"path match", "/srv/checkouts/local", "", "local", true},
+		{"ssh origin vs https source", "/home/me/code/work", "git@github.com:onyx-dot-app/onyx", "onyx", true},
+		{"ssh with .git", "/x", "git@github.com:Onyx-Dot-App/onyx.git", "onyx", true},
+		{"ssh:// scheme", "/x", "ssh://git@github.com/onyx-dot-app/onyx.git", "onyx", true},
+		{"https with .git", "/x", "https://github.com/onyx-dot-app/onyx.git", "onyx", true},
+		{"dirname fallback", "/home/me/code/onyx", "git@github.com:me/my-fork", "onyx", true},
+		{"no match", "/home/me/code/other", "git@github.com:me/other", "", false},
+		{"different repo same host", "/x", "https://github.com/onyx-dot-app/else", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := matchRepo(repos, tc.top, tc.origin)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("%s: matchRepo = %q,%v; want %q,%v", tc.name, got, ok, tc.want, tc.ok)
+		}
+	}
+	// A local-path origin string must never collide with a URL identity.
+	if id := normalizeGitURL("/srv/checkouts/local"); id != "" {
+		t.Errorf("local path normalized to %q, want empty", id)
 	}
 }

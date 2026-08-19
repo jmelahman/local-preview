@@ -3,12 +3,33 @@ package server
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 )
+
+// gitOut runs the real git binary in dir and returns its trimmed stdout.
+// Preferred over go-git for reading local checkout state: go-git refuses
+// repositories using config it doesn't implement (repositoryformatversion 1
+// with extensions like worktreeConfig — routine wherever `git worktree` or
+// sparse checkouts are in play), while git itself reads them fine. go-git
+// remains the fallback so the CLI still works on a machine without git.
+func gitOut(dir string, args ...string) (string, bool) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		return "", false
+	}
+	cmd := exec.Command(gitBin, args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
 
 // findWorktreeRoot walks up from dir to the first directory containing a
 // .git entry — the equivalent of `git rev-parse --show-toplevel`.
@@ -62,6 +83,9 @@ func openLocalRepo(dir string) (*git.Repository, error) {
 // localHeadSHA returns the commit sha of HEAD for the working tree
 // containing dir — the equivalent of `git rev-parse HEAD`.
 func localHeadSHA(dir string) (string, error) {
+	if sha, ok := gitOut(dir, "rev-parse", "HEAD"); ok {
+		return sha, nil
+	}
 	repo, err := openLocalRepo(dir)
 	if err != nil {
 		return "", err
@@ -77,6 +101,9 @@ func localHeadSHA(dir string) (string, error) {
 // full commit sha in the working tree containing dir — the equivalent of
 // `git rev-parse <rev>`.
 func localResolveRevision(dir, rev string) (string, error) {
+	if sha, ok := gitOut(dir, "rev-parse", "--verify", rev+"^{commit}"); ok {
+		return sha, nil
+	}
 	repo, err := openLocalRepo(dir)
 	if err != nil {
 		return "", err
@@ -91,6 +118,12 @@ func localResolveRevision(dir, rev string) (string, error) {
 // localHeadBranch returns the branch HEAD is on for the working tree
 // containing dir, or "" when detached or not a git repo.
 func localHeadBranch(dir string) string {
+	if branch, ok := gitOut(dir, "rev-parse", "--abbrev-ref", "HEAD"); ok {
+		if branch == "HEAD" {
+			return "" // detached
+		}
+		return branch
+	}
 	repo, err := openLocalRepo(dir)
 	if err != nil {
 		return ""
@@ -105,6 +138,9 @@ func localHeadBranch(dir string) string {
 // localOriginURL returns the origin remote's URL for the working tree
 // containing dir, or "" if there is no origin remote.
 func localOriginURL(dir string) string {
+	if url, ok := gitOut(dir, "remote", "get-url", "origin"); ok {
+		return url
+	}
 	repo, err := openLocalRepo(dir)
 	if err != nil {
 		return ""
