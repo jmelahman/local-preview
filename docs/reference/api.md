@@ -547,6 +547,25 @@ never evicts by itself.
 Response: `200 OK` with the saved policy. `400` for a negative limit or
 invalid JSON.
 
+### `GET /api/warm`
+
+Returns the [warm-process policy](/guide/configuration#warm-previews): the
+LRU cap on concurrently running preview processes per serving node
+(`0` = unlimited). A process-mode deploy counts as two (frontend + backend).
+
+```json
+{ "max_warm": 12 }
+```
+
+### `PUT /api/warm`
+
+Replaces the warm cap. Applies without a restart: the local reaper enforces
+it on its next tick, and on a control node the fleet's heartbeat loop pushes
+it to every worker (re-pushing after worker reboots). The saved value
+overrides the `--max-warm` flag from then on.
+
+Response: `200 OK` with the saved policy. `400` for a negative value.
+
 ### `POST /api/gc`
 
 Runs one retention sweep immediately and reports what it evicted. Evicting

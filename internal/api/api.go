@@ -108,6 +108,12 @@ type Deps struct {
 	// callback URL: true for https and for localhost (a secure context even
 	// over plain http).
 	CookiesSecure bool
+	// MaxWarm reads the effective warm-process cap and SetMaxWarm persists a
+	// new one and applies it everywhere processes run (the local manager, and
+	// every worker via the fleet's reconcile loop). Both nil disables the
+	// endpoints (tests that don't care).
+	MaxWarm    func() int
+	SetMaxWarm func(n int) error
 }
 
 // SSOProvider runs the GitHub OAuth web flow and resolves a token (an OAuth
@@ -157,6 +163,8 @@ func NewMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("GET /api/storage", d.handleStorage)
 	mux.HandleFunc("GET /api/retention", d.handleGetRetention)
 	mux.HandleFunc("PUT /api/retention", d.handlePutRetention)
+	mux.HandleFunc("GET /api/warm", d.handleGetWarm)
+	mux.HandleFunc("PUT /api/warm", d.handlePutWarm)
 	mux.HandleFunc("POST /api/gc", d.handleRunGC)
 	mux.Handle("/", web.Handler())
 	return mux

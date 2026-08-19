@@ -80,8 +80,9 @@ func (f *fakeSup) Report(context.Context) []supervise.ProcReport { return f.repo
 func (f *fakeSup) RunLog(repo, side, hash string, attempt int, offset int64) (supervise.RunLog, error) {
 	return f.runLog, nil
 }
-func (f *fakeSup) Running() int { return f.running }
-func (f *fakeSup) MaxWarm() int { return f.maxWarm }
+func (f *fakeSup) SetMaxWarm(n int) { f.maxWarm = n }
+func (f *fakeSup) Running() int     { return f.running }
+func (f *fakeSup) MaxWarm() int     { return f.maxWarm }
 
 const secret = "s3cr3t"
 
@@ -310,5 +311,18 @@ func TestAuthRequired(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("no-auth status = %d, want 401", res.StatusCode)
+	}
+}
+
+// TestConfigureRoundTrip: the control node pushes a runtime warm cap.
+func TestConfigureRoundTrip(t *testing.T) {
+	sup := &fakeSup{maxWarm: 12}
+	c, done := testServer(t, sup)
+	defer done()
+	if err := c.Configure(context.Background(), 5); err != nil {
+		t.Fatal(err)
+	}
+	if sup.maxWarm != 5 {
+		t.Fatalf("maxWarm = %d, want 5", sup.maxWarm)
 	}
 }

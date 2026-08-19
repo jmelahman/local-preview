@@ -82,3 +82,37 @@ func TestRuntimeViewPrefersLiveOverStale(t *testing.T) {
 	}
 	_ = time.Now
 }
+
+// confBackend delivers Configure calls on a channel so the heartbeat-loop
+// reconcile can be awaited without racing the poller goroutine.
+type confBackend struct {
+	fakeBackend
+	got chan int
+}
+
+func (c *confBackend) Configure(_ context.Context, n int) error {
+	c.got <- n
+	return nil
+}
+
+// The heartbeat loop reconciles the dashboard-configured warm cap onto any
+// worker whose reported cap drifts — how the setting survives worker reboots.
+func TestHeartbeatReconcilesMaxWarm(t *testing.T) {
+	r := New(time.Minute)
+	be := &confBackend{got: make(chan int, 1)}
+	r.Add("w", be) // Heartbeat reports MaxWarm 0 — the "boot flag" value
+	r.SetMaxWarm(5)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.StartHeartbeats(ctx, 50*time.Millisecond)
+
+	select {
+	case n := <-be.got:
+		if n != 5 {
+			t.Fatalf("configured %d, want 5", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("heartbeat loop never pushed the warm cap")
+	}
+}

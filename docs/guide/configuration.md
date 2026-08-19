@@ -165,6 +165,15 @@ footprint:
 - **LRU cap** — `--max-warm` bounds how many processes run at once; beyond
   it the least-recently-used are stopped. The hottest previews stay warm,
   cold ones restart on their next request (a cold start, not a rebuild).
+  Note it counts *processes*: a deploy with a frontend process occupies two
+  slots.
+
+The cap is also editable at runtime from the dashboard (Storage & retention →
+Warm previews) or via [`PUT /api/warm`](/reference/api#put-api-warm). A saved
+value overrides `--max-warm`, survives restarts, and applies per serving
+node: on a control node the fleet's heartbeat loop pushes it to every worker
+and re-pushes after a worker reboots. With a worker tier, freshly built
+deploys pre-warm on the worker traffic will route to.
 
 A process-mode frontend holds its backend's address for its lifetime, so a
 paired backend inherits the frontend's recency and is never stopped while

@@ -9,9 +9,11 @@ package fleet
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/supervise"
 )
 
@@ -154,6 +156,25 @@ func (r *Registry) RunLog(repoName, side, hash string, attempt int, offset int64
 		}
 	}
 	return best, nil
+}
+
+// StartDeploy warm-starts a deploy's processes on the fleet — the same
+// pre-warm a single node does after a build, routed through placement so the
+// process lands where user traffic will find it (a control node's own
+// Manager supervises nothing, so warming there would burn control-node
+// memory on a process the proxy never routes to).
+func (r *Registry) StartDeploy(ctx context.Context, row db.DeployRow) error {
+	if row.BeHash != "" {
+		if _, err := r.EnsureRunning(ctx, supervise.BackendKey(row.RepoID, row.BeHash), row.RepoName); err != nil {
+			return fmt.Errorf("start backend: %w", err)
+		}
+	}
+	if row.FeHash != "" && row.HasFeProcess {
+		if _, err := r.EnsureRunning(ctx, supervise.FrontendKey(row.RepoID, row.FeHash, row.BeHash), row.RepoName); err != nil {
+			return fmt.Errorf("start frontend: %w", err)
+		}
+	}
+	return nil
 }
 
 // Stop fans a stop out to every fresh worker: cheap, and placement fallbacks

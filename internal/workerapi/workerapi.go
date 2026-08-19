@@ -30,6 +30,7 @@ const (
 	pathDrain     = "/internal/worker/v1/drain"
 	pathReport    = "/internal/worker/v1/report"
 	pathRunLog    = "/internal/worker/v1/runlog"
+	pathConfigure = "/internal/worker/v1/configure"
 )
 
 // WireKey is the JSON form of a supervise.Key crossing the boundary.
@@ -109,6 +110,13 @@ type runLogReq struct {
 
 type drainReq struct {
 	Draining bool `json:"draining"`
+}
+
+// configure: control-pushed runtime settings. Fields are pointers so a
+// request only touches what it names; a rebooted worker falls back to its
+// boot flags until the control node's reconcile loop pushes again.
+type configureReq struct {
+	MaxWarm *int `json:"max_warm,omitempty"`
 }
 
 // Heartbeat is the worker's capacity report, the input to fleet placement and

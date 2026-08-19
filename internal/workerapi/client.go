@@ -112,6 +112,13 @@ func (c *Client) Drain(ctx context.Context, draining bool) error {
 	return c.post(ctx, pathDrain, drainReq{Draining: draining}, nil)
 }
 
+// Configure pushes runtime settings to the worker — currently the
+// warm-process cap the dashboard edits. The control node's heartbeat loop
+// re-pushes after a worker reboot, so the setting survives the fleet.
+func (c *Client) Configure(ctx context.Context, maxWarm int) error {
+	return c.post(ctx, pathConfigure, configureReq{MaxWarm: &maxWarm}, nil)
+}
+
 // Heartbeat reads the worker's current capacity.
 func (c *Client) Heartbeat(ctx context.Context) (Heartbeat, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+pathHeartbeat, nil)

@@ -21,6 +21,7 @@ import (
 	"hash/fnv"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/supervise"
@@ -39,6 +40,7 @@ type Backend interface {
 	Report(ctx context.Context) ([]supervise.ProcReport, error)
 	RunLog(ctx context.Context, repo, side, hash string, attempt int, offset int64) (supervise.RunLog, error)
 	Stop(ctx context.Context, k supervise.Key, reason string) error
+	Configure(ctx context.Context, maxWarm int) error
 }
 
 type workerState struct {
@@ -67,12 +69,27 @@ type Registry struct {
 	reportMu    sync.Mutex
 	reportAt    time.Time
 	reportCache map[supervise.Key]procEntry
+
+	// desiredMaxWarm, when set, is the dashboard-configured warm cap the
+	// heartbeat loop reconciles onto every worker (a rebooted worker comes
+	// back with its boot flag until the next poll pushes this).
+	desiredMaxWarm atomic.Int64 // -1 = unset
 }
 
 // New returns an empty registry. A worker whose last heartbeat is older than
 // staleAfter is treated as gone for placement.
 func New(staleAfter time.Duration) *Registry {
-	return &Registry{workers: map[string]*workerState{}, staleAfter: staleAfter}
+	r := &Registry{workers: map[string]*workerState{}, staleAfter: staleAfter}
+	r.desiredMaxWarm.Store(-1)
+	return r
+}
+
+// SetMaxWarm sets the fleet-wide per-worker warm cap: applied to every worker
+// on the next heartbeat poll and re-applied whenever a worker's reported cap
+// drifts (a reboot restores its boot flag). Implements the dashboard's warm
+// setting for a fleet.
+func (r *Registry) SetMaxWarm(n int) {
+	r.desiredMaxWarm.Store(int64(max(n, 0)))
 }
 
 // Add registers (or replaces) a worker by id.
@@ -130,6 +147,13 @@ func (r *Registry) StartHeartbeats(ctx context.Context, interval time.Duration) 
 				defer cancel()
 				hb, err := w.be.Heartbeat(hctx)
 				r.recordHeartbeat(w.id, hb, time.Now(), err == nil)
+				// Reconcile the dashboard-configured warm cap: a worker
+				// reporting a different cap (fresh boot, missed push) gets it
+				// re-applied here, so the setting survives the whole fleet's
+				// churn without any worker-side persistence.
+				if want := r.desiredMaxWarm.Load(); err == nil && want >= 0 && hb.MaxWarm != int(want) {
+					w.be.Configure(hctx, int(want)) //nolint:errcheck // next poll retries
+				}
 			}(w)
 		}
 		wg.Wait()

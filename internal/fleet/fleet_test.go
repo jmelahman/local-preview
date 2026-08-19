@@ -11,11 +11,12 @@ import (
 )
 
 type fakeBackend struct {
-	id      string
-	ensured []supervise.Key
-	report  []supervise.ProcReport
-	logs    map[string]supervise.RunLog // keyed side+"-"+hash
-	stopped []supervise.Key
+	id         string
+	ensured    []supervise.Key
+	report     []supervise.ProcReport
+	logs       map[string]supervise.RunLog // keyed side+"-"+hash
+	stopped    []supervise.Key
+	configured []int
 }
 
 func (f *fakeBackend) EnsureRunning(_ context.Context, k supervise.Key, _ string) (string, error) {
@@ -33,6 +34,10 @@ func (f *fakeBackend) RunLog(_ context.Context, _, side, hash string, _ int, _ i
 }
 func (f *fakeBackend) Stop(_ context.Context, k supervise.Key, _ string) error {
 	f.stopped = append(f.stopped, k)
+	return nil
+}
+func (f *fakeBackend) Configure(_ context.Context, maxWarm int) error {
+	f.configured = append(f.configured, maxWarm)
 	return nil
 }
 

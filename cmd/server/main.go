@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -172,6 +173,10 @@ func Root() *cobra.Command {
 	return cmd
 }
 
+// warmSettingKey is the settings-table row a dashboard-saved warm cap lives
+// under; it overrides the --max-warm flag at boot and at runtime.
+const warmSettingKey = "warm.max_warm"
+
 func run(opts serveOptions) error {
 	if opts.githubSecret == "" {
 		opts.githubSecret = os.Getenv("PREVIEW_GITHUB_WEBHOOK_SECRET")
@@ -271,7 +276,20 @@ func run(opts serveOptions) error {
 	gitMgr := gitrepo.NewManager(cfg.ReposDir())
 	super := supervise.New(database, files, cfg.LogsDir())
 	super.ReclaimOrphans()
-	super.SetMaxWarm(opts.maxWarm)
+	// The warm cap: the --max-warm flag is the boot default, overridden by the
+	// dashboard-saved setting when one exists (the setting survives restarts
+	// and, via the fleet's reconcile loop, worker reboots).
+	effectiveMaxWarm := opts.maxWarm
+	warmOverridden := false
+	if v, err := database.GetSetting(warmSettingKey); err == nil {
+		if n, perr := strconv.Atoi(v); perr == nil && n >= 0 {
+			effectiveMaxWarm, warmOverridden = n, true
+		}
+	}
+	super.SetMaxWarm(effectiveMaxWarm)
+	if warmOverridden {
+		log.Printf("warm cap: %d (dashboard setting; --max-warm %d overridden)", effectiveMaxWarm, opts.maxWarm)
+	}
 	super.StartReaper(workCtx)
 	queue := build.NewQueue(database, gitMgr, files, super, cfg.LogsDir(), nil)
 	queue.SetManifestRefs([]build.ManifestRef{
@@ -337,9 +355,10 @@ func run(opts serveOptions) error {
 	// dashboard's runtime view (status/stats/run logs live on the workers).
 	var backends proxy.Backends = supervise.LocalBackends{M: super}
 	var runtime api.RuntimeView = super
+	var reg *fleet.Registry
 	if opts.role == "control" {
 		if endpoints := workerEndpoints(opts); len(endpoints) > 0 {
-			reg := fleet.New(fleetStaleAfter)
+			reg = fleet.New(fleetStaleAfter)
 			for _, ep := range endpoints {
 				host := opts.workerHost
 				if host == "" || len(endpoints) > 1 {
@@ -352,10 +371,16 @@ func run(opts serveOptions) error {
 				reg.Add(ep, wc)
 				log.Printf("role=control: registered worker %s (processes at %s)", ep, host)
 			}
+			if warmOverridden {
+				reg.SetMaxWarm(effectiveMaxWarm)
+			}
 			reg.StartHeartbeats(workCtx, fleetHeartbeatInterval)
 			startFleetSignal(workCtx, reg)
 			backends = reg
 			runtime = reg
+			// Freshly built deploys pre-warm on the worker traffic routes to,
+			// not on this node's (otherwise idle) local manager.
+			queue.SetStarter(reg)
 		} else {
 			log.Printf("role=control with no --worker-endpoint(s): previews will serve locally")
 		}
@@ -380,6 +405,17 @@ func run(opts serveOptions) error {
 		SSO:                 sso,
 		DashboardOrigin:     dashboardOrigin,
 		CookiesSecure:       cookiesSecure,
+		MaxWarm:             super.MaxWarm,
+		SetMaxWarm: func(n int) error {
+			if err := database.SetSetting(warmSettingKey, strconv.Itoa(n)); err != nil {
+				return err
+			}
+			super.SetMaxWarm(n)
+			if reg != nil {
+				reg.SetMaxWarm(n) // workers pick it up on the next heartbeat
+			}
+			return nil
+		},
 	}
 	apex := api.AuthMiddleware(deps, api.NewMux(deps))
 	router := proxy.New(database, files, backends, cfg.Preview.Domain, apex)

@@ -1296,6 +1296,67 @@ function UsageCell({ bytes }: { bytes: number }) {
   );
 }
 
+// WarmForm edits the warm-process cap: how many preview processes stay
+// running per serving node before the least-recently-used are stopped.
+// Applies without a restart — locally on the next reaper tick, and to every
+// worker via the control node's heartbeat loop.
+function WarmForm() {
+  const queryClient = useQueryClient();
+  const policy = useQuery({ queryKey: ["warm"], queryFn: api.getWarm });
+  const [maxWarm, setMaxWarm] = useState("0");
+
+  useEffect(() => {
+    if (policy.data) setMaxWarm(String(policy.data.max_warm));
+  }, [policy.data]);
+
+  const parsed = { max_warm: Math.max(0, Math.floor(Number(maxWarm) || 0)) };
+  const dirty = policy.data != null && parsed.max_warm !== policy.data.max_warm;
+
+  const save = useMutation({
+    mutationFn: () => api.putWarm(parsed),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["warm"] }),
+  });
+
+  const numberInputClass =
+    "w-28 rounded bg-surface px-2 py-1 text-sm text-fg placeholder:text-fg-muted/60";
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-end gap-3">
+        <Field label="Warm processes kept per node">
+          <input
+            type="number"
+            min={0}
+            value={maxWarm}
+            onChange={(e) => setMaxWarm(e.target.value)}
+            className={numberInputClass}
+          />
+        </Field>
+        {dirty && (
+          <button
+            type="button"
+            onClick={() => save.mutate()}
+            disabled={save.isPending}
+            className={`${neutralButtonClass} px-3 py-1 text-sm`}
+          >
+            Save
+          </button>
+        )}
+      </div>
+      <p className="text-xs text-fg-muted">
+        0 = unlimited. Beyond the cap the least-recently-used processes stop (they cold-start on
+        their next visit); idle previews stop on their own after the manifest's idle timeout. A
+        deployment with a frontend process counts as two. Overrides the server's --max-warm flag and
+        applies to every worker without a restart.
+      </p>
+      {save.error != null && (
+        <p className="text-xs text-danger" title={String(save.error)}>
+          {String(save.error)}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // RetentionForm edits the instance's retention policy: per-repo deploy cap
 // and max age, 0 = unlimited. Saving never evicts by itself — limits apply
 // on the next sweep (hourly, or via "Run GC now").
@@ -1477,6 +1538,13 @@ function StorageDialog({ onClose }: { onClose: () => void }) {
               </table>
             </div>
           )}
+        </section>
+
+        <section className="flex flex-col gap-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-fg-muted">
+            Warm previews
+          </h3>
+          <WarmForm />
         </section>
 
         <section className="flex flex-col gap-2">

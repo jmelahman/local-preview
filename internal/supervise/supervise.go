@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/db"
@@ -93,7 +94,7 @@ type Manager struct {
 
 	healthInterval time.Duration
 	reapInterval   time.Duration
-	maxWarm        int // LRU cap on running processes; 0 = unlimited
+	maxWarm        atomic.Int64 // LRU cap on running processes; 0 = unlimited
 
 	mu        sync.Mutex
 	procs     map[Key]*process
@@ -226,15 +227,16 @@ func (m *Manager) CrashedKeys() []Key {
 }
 
 // SetMaxWarm caps concurrently running processes: beyond it the
-// least-recently-used are stopped. Non-positive disables the cap. Call
-// before StartReaper.
+// least-recently-used are stopped. Non-positive disables the cap. Safe at
+// runtime — the control node pushes the dashboard-configured cap to workers
+// while they serve; the reaper enforces the new value on its next tick.
 func (m *Manager) SetMaxWarm(n int) {
-	m.maxWarm = max(n, 0)
+	m.maxWarm.Store(int64(max(n, 0)))
 }
 
 // MaxWarm returns the warm-process cap (0 = unlimited). Reported in the worker
 // heartbeat so the control node can size fleet-wide capacity.
-func (m *Manager) MaxWarm() int { return m.maxWarm }
+func (m *Manager) MaxWarm() int { return int(m.maxWarm.Load()) }
 
 // SetPublishIP additionally publishes containered processes' ports on the
 // given host address. A worker must set it to the address the control node
@@ -874,7 +876,7 @@ func (m *Manager) start(k Key, p *process) {
 	}
 	m.db.AddProcessEvent(k.RepoID, k.Hash, "healthy", fmt.Sprintf("port %d", port))
 	close(p.ready)
-	if m.maxWarm > 0 {
+	if m.MaxWarm() > 0 {
 		// Enforce the warm cap promptly rather than waiting a reap tick.
 		go m.reap()
 	}
@@ -930,7 +932,8 @@ func (m *Manager) reap() {
 		}
 		alive = append(alive, c)
 	}
-	if m.maxWarm <= 0 || len(alive) <= m.maxWarm {
+	maxWarm := m.MaxWarm()
+	if maxWarm <= 0 || len(alive) <= maxWarm {
 		return
 	}
 	sort.Slice(alive, func(i, j int) bool {
@@ -940,7 +943,7 @@ func (m *Manager) reap() {
 		}
 		return alive[i].touch.Before(alive[j].touch)
 	})
-	excess := len(alive) - m.maxWarm
+	excess := len(alive) - maxWarm
 	for _, c := range alive {
 		if excess == 0 {
 			return
@@ -948,7 +951,7 @@ func (m *Manager) reap() {
 		if _, paired := pairedTouch[c.k]; paired {
 			continue
 		}
-		m.Stop(c.k, fmt.Sprintf("least-recently-used beyond max-warm %d", m.maxWarm))
+		m.Stop(c.k, fmt.Sprintf("least-recently-used beyond max-warm %d", maxWarm))
 		excess--
 	}
 }

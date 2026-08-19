@@ -23,6 +23,7 @@ type Supervisor interface {
 	RunLog(repoName, side, hash string, attempt int, offset int64) (supervise.RunLog, error)
 	Running() int
 	MaxWarm() int
+	SetMaxWarm(n int)
 }
 
 // Server exposes a Supervisor over HTTP behind a shared-secret check. Mount
@@ -54,6 +55,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(pathDrain, s.handleDrain)
 	mux.HandleFunc(pathReport, s.handleReport)
 	mux.HandleFunc(pathRunLog, s.handleRunLog)
+	mux.HandleFunc(pathConfigure, s.handleConfigure)
 	return s.authed(mux)
 }
 
@@ -148,6 +150,17 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		MaxWarm:  s.sup.MaxWarm(),
 		Draining: s.draining.Load(),
 	})
+}
+
+func (s *Server) handleConfigure(w http.ResponseWriter, r *http.Request) {
+	var req configureReq
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.MaxWarm != nil {
+		s.sup.SetMaxWarm(*req.MaxWarm)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {

@@ -80,6 +80,7 @@ type Queue struct {
 	manifestRefs     []ManifestRef
 	localManifestDir string
 	autoStart        bool
+	starter          DeployStarter
 	buildTimeout     time.Duration
 	sf               singleflight.Group
 	work             chan int64
@@ -142,6 +143,29 @@ func (q *Queue) SetLocalManifestDir(dir string) {
 // request. Call before Start.
 func (q *Queue) SetAutoStart(v bool) {
 	q.autoStart = v
+}
+
+// DeployStarter warm-starts a freshly built deploy's processes. On a single
+// node it is the local *supervise.Manager; on a control node it is the fleet
+// registry, so the pre-warm lands on the worker user traffic will route to —
+// warming the control node's own Manager there would burn its memory on a
+// process the proxy never dials.
+type DeployStarter interface {
+	StartDeploy(ctx context.Context, row db.DeployRow) error
+}
+
+// SetStarter overrides where auto-started deploys warm up (default: the
+// local supervise.Manager). Call before Start.
+func (q *Queue) SetStarter(s DeployStarter) {
+	q.starter = s
+}
+
+// deployStarter returns the warm-start target, defaulting to the local manager.
+func (q *Queue) deployStarter() DeployStarter {
+	if q.starter != nil {
+		return q.starter
+	}
+	return q.super
 }
 
 // Start launches n build workers and re-enqueues deploys interrupted by a
@@ -371,7 +395,7 @@ func (q *Queue) autoStartDeploy(ctx context.Context, id int64) {
 		return
 	}
 	go func() {
-		if err := q.super.StartDeploy(ctx, row); err != nil && ctx.Err() == nil {
+		if err := q.deployStarter().StartDeploy(ctx, row); err != nil && ctx.Err() == nil {
 			log.Printf("build: auto-start deploy %d (%s@%s): %v", id, row.RepoName, row.ShortSHA, err)
 		}
 	}()

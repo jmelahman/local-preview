@@ -134,6 +134,14 @@ export type RunLogChunk = {
   process?: ProcessState;
 };
 
+// Warm-process policy: the LRU cap on concurrently running preview processes
+// per serving node (a process-mode deploy counts as two: frontend + backend).
+// 0 = unlimited. Saved values override the server's --max-warm flag and are
+// pushed to every worker.
+export type WarmPolicy = {
+  max_warm: number;
+};
+
 // Instance-wide artifact retention policy. 0 disables a limit; with both at
 // 0 the hourly sweep evicts nothing.
 export type RetentionPolicy = {
@@ -291,6 +299,9 @@ export const api = {
   getRetention: () => request<RetentionPolicy>("/api/retention"),
   putRetention: (policy: RetentionPolicy) =>
     request<RetentionPolicy>("/api/retention", { method: "PUT", body: JSON.stringify(policy) }),
+  getWarm: () => request<WarmPolicy>("/api/warm"),
+  putWarm: (policy: WarmPolicy) =>
+    request<WarmPolicy>("/api/warm", { method: "PUT", body: JSON.stringify(policy) }),
   runGC: () => request<GCResult>("/api/gc", { method: "POST" }),
   getBuildLogs: async (id: number): Promise<string> => {
     const res = await fetch(`/api/deploys/${id}/logs`);

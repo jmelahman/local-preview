@@ -92,3 +92,42 @@ func (d Deps) handleRunGC(w http.ResponseWriter, r *http.Request) {
 		FreedBytes: max(0, before-usage.Reclaimable(dirs)),
 	})
 }
+
+// warmJSON is the warm-process policy: the LRU cap on concurrently running
+// preview processes per serving node. 0 = unlimited. A deploy in process mode
+// counts as two (frontend + backend).
+type warmJSON struct {
+	MaxWarm int `json:"max_warm"`
+}
+
+func (d Deps) handleGetWarm(w http.ResponseWriter, r *http.Request) {
+	if d.MaxWarm == nil {
+		httpError(w, http.StatusNotFound, "warm policy not configurable on this server")
+		return
+	}
+	writeJSON(w, http.StatusOK, warmJSON{MaxWarm: d.MaxWarm()})
+}
+
+// handlePutWarm persists and applies a new warm cap. Takes effect without a
+// restart: the local reaper enforces it on its next tick, and the fleet's
+// heartbeat loop pushes it to every worker (re-pushing after worker reboots,
+// so the dashboard's value outlives the flags it overrides).
+func (d Deps) handlePutWarm(w http.ResponseWriter, r *http.Request) {
+	if d.SetMaxWarm == nil {
+		httpError(w, http.StatusNotFound, "warm policy not configurable on this server")
+		return
+	}
+	var p warmJSON
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if p.MaxWarm < 0 {
+		httpError(w, http.StatusBadRequest, "max_warm must be >= 0 (0 = unlimited)")
+		return
+	}
+	if err := d.SetMaxWarm(p.MaxWarm); err != nil {
+		internalError(w, "apply warm policy", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
