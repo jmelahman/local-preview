@@ -87,6 +87,14 @@ type Router struct {
 	// process's run log while it boots. See SetRunLogs.
 	runLogs RunLogs
 
+	// reserved maps a preview-domain label (the part before ".<domain>") to a
+	// fixed upstream "host:port". A matching host is reverse-proxied wholesale
+	// to that upstream — behind the same SSO gate as previews, but outside the
+	// deploy/build machinery. It exists for always-on companion services (e.g. a
+	// canonical app instance) that must live under the preview domain to inherit
+	// the wildcard cert and the login gate, yet aren't per-commit previews.
+	reserved map[string]string
+
 	mu    sync.Mutex
 	cache map[string]cacheEntry
 }
@@ -129,6 +137,22 @@ func (rt *Router) SetPreviewAuth(enabled bool, baseURL string, secure bool) {
 	rt.authSecure = secure
 }
 
+// SetReservedUpstreams registers fixed <label> → "host:port" upstreams served
+// under the preview domain. Labels are the single DNS label below the domain
+// (e.g. "app" for app.<domain>); each is reverse-proxied wholesale to its
+// upstream behind the SSO gate, shadowing any per-commit preview of the same
+// label. A nil or empty map (the default) leaves routing unchanged.
+func (rt *Router) SetReservedUpstreams(m map[string]string) {
+	if len(m) == 0 {
+		rt.reserved = nil
+		return
+	}
+	rt.reserved = make(map[string]string, len(m))
+	for label, addr := range m {
+		rt.reserved[strings.ToLower(label)] = addr
+	}
+}
+
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sub, ok := rt.parseHost(r.Host)
 	if !ok {
@@ -138,6 +162,12 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Gate preview traffic before any DB lookup, so an unauthenticated caller
 	// can't even probe which previews exist.
 	if rt.authEnabled && !rt.previewAuthorized(w, r) {
+		return
+	}
+	// A reserved label is an always-on companion service, not a deploy: route it
+	// straight to its upstream (still behind the gate above), skipping resolve.
+	if addr, ok := rt.reserved[sub]; ok {
+		rt.serveReserved(w, r, addr)
 		return
 	}
 	entry := rt.resolve(sub)
@@ -480,6 +510,28 @@ func (rt *Router) ensureAndProxy(w http.ResponseWriter, r *http.Request, e cache
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			rt.errorPage(w, r, http.StatusBadGateway, "Preview error", err.Error())
+		},
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+// serveReserved reverse-proxies a request wholesale to a reserved upstream. It
+// mirrors ensureAndProxy's transport handling — Host rewritten to the upstream,
+// original host in X-Forwarded-Host, and the domain-wide preview-access cookie
+// stripped so the companion app never receives the control-plane credential —
+// but has no cold-start, deploy state, or /api-prefix logic: every path passes
+// through unchanged. The upstream owns its own routing and (for the canonical
+// onyx) its own auth.
+func (rt *Router) serveReserved(w http.ResponseWriter, r *http.Request, addr string) {
+	target := &url.URL{Scheme: "http", Host: addr}
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			pr.SetXForwarded()
+			stripCookie(pr.Out, previewGrantCookieName)
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			rt.errorPage(w, r, http.StatusBadGateway, "Service unavailable", err.Error())
 		},
 	}
 	proxy.ServeHTTP(w, r)

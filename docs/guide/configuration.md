@@ -130,6 +130,7 @@ for lookup order and caching semantics.
 | `PREVIEW_S3_PREFIX` / `PREVIEW_S3_REGION` | `preview serve` | Key prefix and region (the matching flag wins) |
 | `PREVIEW_S3_ACCESS_KEY` / `PREVIEW_S3_SECRET_KEY` | `preview serve` | Static artifact-tier keypair (the matching flag wins). Unset both to resolve credentials from the AWS environment or instance role instead |
 | `PREVIEW_CACHE_MAX_ARTIFACT_BYTES` | `preview serve` | Soft cap on resident (local-disk) artifact bytes; the coldest are swept to the durable tier above it (an explicit `--cache-max-artifact-bytes` flag wins). Requires the artifact tier; `0` (default) keeps every artifact resident |
+| `PREVIEW_RESERVED_UPSTREAMS` | `preview serve` | Comma-separated `<label>=host:port` reserved upstreams (repeated `--reserved-upstream` flags win). Each serves `<label>.<preview-domain>` by reverse-proxying wholesale to the upstream, behind the SSO gate but outside the deploy machinery — for an always-on companion service under the preview domain |
 | `PREVIEW_WORKER_SECRET` | `preview serve` | Shared secret for the internal worker API (an explicit `--worker-secret` flag wins) |
 | `PREVIEW_WORKER_ENDPOINT` | `preview serve --role=control` | A worker's private worker-API base URL (an explicit `--worker-endpoint` flag wins) |
 | `PREVIEW_WORKER_ENDPOINTS` | `preview serve --role=control` | Comma-separated worker-API base URLs forming the fleet (an explicit `--worker-endpoints` flag wins) |

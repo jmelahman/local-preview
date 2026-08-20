@@ -109,6 +109,8 @@ type serveOptions struct {
 	cacheMaxArtifactBytes int64
 	maxUploadBytes        int64
 
+	reservedUpstreams []string
+
 	role            string
 	workerSecret    string
 	workerListen    string
@@ -160,6 +162,7 @@ func Root() *cobra.Command {
 	serve.Flags().BoolVar(&opts.s3UseSSL, "s3-use-ssl", true, "Use TLS for the artifact-tier endpoint (set false for local MinIO over http)")
 	serve.Flags().Int64Var(&opts.cacheMaxArtifactBytes, "cache-max-artifact-bytes", 0, "Soft cap on resident (local-disk) artifact bytes; the coldest artifacts are swept back to the durable tier above it. Requires the artifact tier; 0 disables cache eviction and keeps every artifact resident (default: $PREVIEW_CACHE_MAX_ARTIFACT_BYTES)")
 	serve.Flags().Int64Var(&opts.maxUploadBytes, "max-upload-bytes", defaultMaxUploadBytes, "Maximum bytes a CI upload may stream: the compressed request body is rejected with 413 above it, and extraction aborts if the decompressed tar exceeds it (guards against a gzip bomb filling the disk). Raise it for larger legitimate artifacts; 0 disables both caps (default: $PREVIEW_MAX_UPLOAD_BYTES)")
+	serve.Flags().StringArrayVar(&opts.reservedUpstreams, "reserved-upstream", nil, "Route a fixed host under the preview domain to an upstream, as <label>=host:port (e.g. app=127.0.0.1:3100) — served behind the SSO gate but outside the deploy machinery, for always-on companion services. Repeatable (default: $PREVIEW_RESERVED_UPSTREAMS, comma-separated)")
 	serve.Flags().StringVar(&opts.role, "role", "all", "Serving role: 'all' (single node — API, dashboard, proxy, and local process supervision), 'control' (route previews to a worker tier), or 'worker' (supervise processes on behalf of a control node)")
 	serve.Flags().StringVar(&opts.workerSecret, "worker-secret", "", "Shared secret authenticating the internal worker API in both directions (default: $PREVIEW_WORKER_SECRET)")
 	serve.Flags().StringVar(&opts.workerListen, "worker-listen", "", "Private address to expose the internal worker API on, e.g. :9100 — MUST NOT be internet/ALB-reachable; empty disables it (roles 'worker'/'all')")
@@ -207,6 +210,15 @@ func run(opts serveOptions) error {
 	envDefault(&opts.ssoAllowedTeam, "PREVIEW_SSO_ALLOWED_TEAM")
 	envDefault(&opts.ssoAllowedLogins, "PREVIEW_SSO_ALLOWED_LOGINS")
 	envDefault(&opts.ssoAllowedEmails, "PREVIEW_SSO_ALLOWED_EMAILS")
+	if len(opts.reservedUpstreams) == 0 {
+		if v := os.Getenv("PREVIEW_RESERVED_UPSTREAMS"); v != "" {
+			opts.reservedUpstreams = strings.Split(v, ",")
+		}
+	}
+	reserved, err := parseReservedUpstreams(opts.reservedUpstreams)
+	if err != nil {
+		return err
+	}
 	envDefault(&opts.s3Endpoint, "PREVIEW_S3_ENDPOINT")
 	envDefault(&opts.s3Bucket, "PREVIEW_S3_BUCKET")
 	envDefault(&opts.s3Prefix, "PREVIEW_S3_PREFIX")
@@ -473,6 +485,12 @@ func run(opts serveOptions) error {
 		router.SetPreviewAuth(true, dashboardOrigin, cookiesSecure)
 		startSessionGC(workCtx, database)
 	}
+	if len(reserved) > 0 {
+		router.SetReservedUpstreams(reserved)
+		for label, addr := range reserved {
+			log.Printf("reserved upstream: %s.%s -> %s", label, cfg.Preview.Domain, addr)
+		}
+	}
 
 	// Expose the internal worker API when configured (worker/all roles). It is a
 	// remote-code-execution surface — private listener, shared-secret only,
@@ -720,6 +738,34 @@ func workerEndpoints(opts serveOptions) []string {
 		add(e)
 	}
 	return out
+}
+
+// parseReservedUpstreams turns "<label>=host:port" entries (from repeated
+// --reserved-upstream flags or the comma-split env var) into a label→addr map,
+// rejecting malformed entries, an empty label, or a duplicate label so a
+// misconfiguration fails fast at startup rather than silently dropping a route.
+func parseReservedUpstreams(entries []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		label, addr, ok := strings.Cut(e, "=")
+		label = strings.ToLower(strings.TrimSpace(label))
+		addr = strings.TrimSpace(addr)
+		if !ok || label == "" || addr == "" {
+			return nil, fmt.Errorf("--reserved-upstream %q: want <label>=host:port", e)
+		}
+		if strings.Contains(label, ".") {
+			return nil, fmt.Errorf("--reserved-upstream %q: label must be a single DNS label (no dots)", e)
+		}
+		if _, dup := out[label]; dup {
+			return nil, fmt.Errorf("--reserved-upstream: label %q set more than once", label)
+		}
+		out[label] = addr
+	}
+	return out, nil
 }
 
 // fleetStatsFn adapts a fleet registry to the api.Deps.FleetStats accessor,

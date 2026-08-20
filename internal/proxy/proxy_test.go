@@ -611,6 +611,82 @@ func TestPreviewGrantCookieStrippedFromBackend(t *testing.T) {
 	}
 }
 
+// TestReservedUpstream: a reserved label is reverse-proxied wholesale to its
+// upstream with no deploy row at all, every path passes through unchanged, the
+// Host is rewritten to the upstream (real host in X-Forwarded-Host), and the
+// domain-wide preview-access cookie is stripped while the app's own cookies
+// survive.
+func TestReservedUpstream(t *testing.T) {
+	e := newTestEnv(t)
+
+	var gotPath, gotHost, gotForwarded, gotCookie string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotHost, gotForwarded = r.URL.Path, r.Host, r.Header.Get("X-Forwarded-Host")
+		gotCookie = r.Header.Get("Cookie")
+		fmt.Fprintf(w, "app:%s", r.URL.Path)
+	}))
+	t.Cleanup(upstream.Close)
+	u, _ := url.Parse(upstream.URL)
+	e.router.SetReservedUpstreams(map[string]string{"app": u.Host})
+
+	host := "app.preview.localhost:8080"
+	// A path that is neither /api nor a preview asset still reaches the upstream.
+	req := httptest.NewRequest("GET", "http://"+host+"/auth/oauth/callback?x=1", nil)
+	req.Host = host
+	req.AddCookie(&http.Cookie{Name: previewGrantCookieName, Value: "secret"})
+	req.AddCookie(&http.Cookie{Name: "fastapiusersauth", Value: "keep"})
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code != 200 || rec.Body.String() != "app:/auth/oauth/callback" {
+		t.Fatalf("reserved proxy: %d %q", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/auth/oauth/callback" {
+		t.Fatalf("upstream path = %q", gotPath)
+	}
+	if gotHost != u.Host {
+		t.Fatalf("upstream Host = %q, want %q", gotHost, u.Host)
+	}
+	if gotForwarded != host {
+		t.Fatalf("X-Forwarded-Host = %q, want %q", gotForwarded, host)
+	}
+	if strings.Contains(gotCookie, previewGrantCookieName) {
+		t.Fatalf("companion app must not receive the preview-access cookie: %q", gotCookie)
+	}
+	if !strings.Contains(gotCookie, "fastapiusersauth=keep") {
+		t.Fatalf("companion app should keep its own cookie: %q", gotCookie)
+	}
+}
+
+// TestReservedUpstreamBehindAuth: a reserved host is still gated by SSO — an
+// unauthenticated request bounces to the grant handshake and never reaches the
+// upstream.
+func TestReservedUpstreamBehindAuth(t *testing.T) {
+	e := newTestEnv(t)
+	reached := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		fmt.Fprint(w, "app")
+	}))
+	t.Cleanup(upstream.Close)
+	u, _ := url.Parse(upstream.URL)
+	e.router.SetReservedUpstreams(map[string]string{"app": u.Host})
+	e.router.SetPreviewAuth(true, "http://localhost:8080", false)
+
+	host := "app.preview.localhost:8080"
+	req := httptest.NewRequest("GET", "http://"+host+"/", nil)
+	req.Host = host
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("want 302 to grant handshake, got %d", rec.Code)
+	}
+	if reached {
+		t.Fatal("upstream must not be reached by an unauthenticated caller")
+	}
+}
+
 // TestInterimAndErrorPagesAreUncacheable: interim states are moments, and an
 // error page changes on redeploy — a cached copy of either would show
 // "Building…" or "Build failed" long after reality moved on.
