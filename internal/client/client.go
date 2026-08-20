@@ -39,6 +39,7 @@ type Deploy struct {
 	Branch       string           `json:"branch"`
 	AuthorName   string           `json:"author_name"`
 	AuthorEmail  string           `json:"author_email"`
+	CreatedBy    string           `json:"created_by"`
 	FeHash       string           `json:"fe_hash"`
 	BeHash       string           `json:"be_hash"`
 	Status       string           `json:"status"`

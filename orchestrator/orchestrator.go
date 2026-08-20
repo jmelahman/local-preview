@@ -473,7 +473,9 @@ func (o *Orchestrator) Repos() ([]Repo, error) {
 // queues a build if needed. Idempotent per commit; rebuild bypasses the
 // artifact cache.
 func (o *Orchestrator) RequestDeploy(ctx context.Context, repo, ref string, rebuild bool) (Deploy, error) {
-	row, err := o.queue.RequestDeploy(ctx, repo, ref, rebuild)
+	// The embedding-API façade has no notion of a triggering identity;
+	// created_by stays empty (the HTTP layer records it for real callers).
+	row, err := o.queue.RequestDeploy(ctx, repo, ref, rebuild, "")
 	if errors.Is(err, db.ErrNotFound) {
 		return Deploy{}, fmt.Errorf("repo %q: %w", repo, ErrNotFound)
 	}

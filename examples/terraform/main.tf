@@ -277,6 +277,13 @@ resource "aws_instance" "server" {
   metadata_options {
     http_endpoint = "enabled"
     http_tokens   = "required"
+    # Hop limit 1 keeps IMDS reachable from the host and from host-network
+    # containers (the orchestrator runs `--network host`) but NOT from preview
+    # containers on the docker bridge — those are one hop further out. Without
+    # this, arbitrary branch code in a preview could reach IMDSv2 and assume
+    # this instance's role (S3 artifacts + the SSM PREVIEW_SECRET_* deps
+    # credentials). Previews never need IMDS: they reach the deps by private IP.
+    http_put_response_hop_limit = 1
   }
 
   root_block_device {
@@ -712,6 +719,13 @@ resource "aws_instance" "worker" {
   metadata_options {
     http_endpoint = "enabled"
     http_tokens   = "required"
+    # Hop limit 1 keeps IMDS reachable from the host and from host-network
+    # containers (the orchestrator runs `--network host`) but NOT from preview
+    # containers on the docker bridge — those are one hop further out. Without
+    # this, arbitrary branch code in a preview could reach IMDSv2 and assume
+    # this instance's role (S3 artifacts + the SSM PREVIEW_SECRET_* deps
+    # credentials). Previews never need IMDS: they reach the deps by private IP.
+    http_put_response_hop_limit = 1
   }
 
   root_block_device {

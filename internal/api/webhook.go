@@ -54,9 +54,12 @@ func (d Deps) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var ev struct {
-		Ref        string `json:"ref"`
-		After      string `json:"after"`
-		Deleted    bool   `json:"deleted"`
+		Ref     string `json:"ref"`
+		After   string `json:"after"`
+		Deleted bool   `json:"deleted"`
+		Sender  struct {
+			Login string `json:"login"`
+		} `json:"sender"`
 		Repository struct {
 			FullName string `json:"full_name"`
 			CloneURL string `json:"clone_url"`
@@ -94,7 +97,7 @@ func (d Deps) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		ignore(w, "branch "+branch+" excluded by filter")
 		return
 	}
-	row, err := d.Queue.RequestDeploy(r.Context(), repo.Name, ev.After, false)
+	row, err := d.Queue.RequestDeploy(r.Context(), repo.Name, ev.After, false, ev.Sender.Login)
 	if errors.Is(err, build.ErrRepoNotReady) {
 		httpError(w, http.StatusConflict, err.Error())
 		return

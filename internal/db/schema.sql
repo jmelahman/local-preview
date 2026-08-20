@@ -62,6 +62,10 @@ CREATE TABLE IF NOT EXISTS deploys (
     be_build_log_path TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    -- Identity that triggered the deploy (SSO login, GitHub Actions actor for
+    -- CI/OIDC, or empty for the automatic poller). Audit trail only; distinct
+    -- from author_name/author_email, which are the commit's git author.
+    created_by TEXT NOT NULL DEFAULT '',
     UNIQUE (repo_id, sha),
     UNIQUE (repo_id, short_sha)
 );

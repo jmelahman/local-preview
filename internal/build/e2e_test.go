@@ -115,7 +115,7 @@ func newEnv(t *testing.T, srcRepo string, configure ...func(*Queue)) *env {
 // status.
 func (e *env) deployAndWait(t *testing.T, ref string) db.DeployRow {
 	t.Helper()
-	row, err := e.q.RequestDeploy(context.Background(), "demo", ref, false)
+	row, err := e.q.RequestDeploy(context.Background(), "demo", ref, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestVerticalSlice(t *testing.T) {
 	}
 
 	// Redeploy of the same sha is idempotent (no rebuild).
-	again, err := e.q.RequestDeploy(ctx, "demo", shaC, false)
+	again, err := e.q.RequestDeploy(ctx, "demo", shaC, false, "")
 	if err != nil || again.ID != c.ID || again.Status != db.DeployReady {
 		t.Fatalf("redeploy: %+v, %v", again, err)
 	}
@@ -302,7 +302,7 @@ func TestFailedBuildSurfacesInLog(t *testing.T) {
 	runTestGit(t, src, "commit", "-qam", "break build")
 
 	e := newEnv(t, src)
-	row, err := e.q.RequestDeploy(context.Background(), "demo", "main", false)
+	row, err := e.q.RequestDeploy(context.Background(), "demo", "main", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestFailedBuildSurfacesInLog(t *testing.T) {
 	}
 
 	// A failed deploy can be re-requested (reset + attempt_count bump).
-	again, err := e.q.RequestDeploy(context.Background(), "demo", got.SHA, false)
+	again, err := e.q.RequestDeploy(context.Background(), "demo", got.SHA, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,7 +598,7 @@ func TestLocalManifestFallback(t *testing.T) {
 
 	// No source anywhere yet: the deploy fails and the error names every
 	// location tried, including the local path.
-	row, err := e.q.RequestDeploy(context.Background(), "demo", "main", false)
+	row, err := e.q.RequestDeploy(context.Background(), "demo", "main", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -655,7 +655,7 @@ func TestReadyDeployStartsAutomatically(t *testing.T) {
 func TestRequestDeployUnknownRepo(t *testing.T) {
 	src := newFixtureRepo(t)
 	e := newEnv(t, src)
-	_, err := e.q.RequestDeploy(context.Background(), "nope", "main", false)
+	_, err := e.q.RequestDeploy(context.Background(), "nope", "main", false, "")
 	if !errors.Is(err, db.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}

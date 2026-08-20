@@ -60,6 +60,11 @@ type Deploy struct {
 	BeBuildLogPath string                 `json:"-"`
 	CreatedAt      string                 `json:"created_at"`
 	UpdatedAt      string                 `json:"updated_at"`
+	// CreatedBy is the identity that triggered the deploy: a GitHub login for
+	// an interactive/SSO caller, the GitHub Actions actor for a CI/OIDC caller,
+	// or empty for the automatic poller (which has no identity). Distinct from
+	// AuthorName/AuthorEmail, which are the commit's git author metadata.
+	CreatedBy string `json:"created_by,omitempty"`
 }
 
 // DeployRow is a deploy joined with its repo name.
@@ -77,7 +82,7 @@ type DeployRow struct {
 // qualified for joins (repos shares column names like created_at).
 const deployCols = `id, repo_id, sha, short_sha, ref, branch, author_name, ` +
 	`author_email, fe_hash, be_hash, artifacts, status, error, attempt_count, ` +
-	`fe_build_log_path, be_build_log_path, created_at, updated_at`
+	`fe_build_log_path, be_build_log_path, created_at, updated_at, created_by`
 
 var deployColsD = "d." + strings.ReplaceAll(deployCols, ", ", ", d.")
 
@@ -92,7 +97,7 @@ func scanDeploy(row interface{ Scan(...any) error }, extra ...any) (Deploy, erro
 	dest := []any{&d.ID, &d.RepoID, &d.SHA, &d.ShortSHA, &d.Ref, &d.Branch,
 		&d.AuthorName, &d.AuthorEmail, &d.FeHash, &d.BeHash, &artifacts,
 		&d.Status, &d.Error, &d.AttemptCount, &d.FeBuildLogPath, &d.BeBuildLogPath,
-		&d.CreatedAt, &d.UpdatedAt}
+		&d.CreatedAt, &d.UpdatedAt, &d.CreatedBy}
 	dest = append(dest, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return Deploy{}, err
@@ -112,6 +117,9 @@ type DeployMeta struct {
 	Branch      string
 	AuthorName  string
 	AuthorEmail string
+	// CreatedBy is the identity that triggered the deploy (SSO login, OIDC
+	// actor, or empty for the poller). See Deploy.CreatedBy.
+	CreatedBy string
 }
 
 // CreateDeploy inserts a queued deploy, computing the shortest sha prefix
@@ -137,10 +145,10 @@ func (s *Store) CreateDeploy(repoID int64, sha string, meta DeployMeta) (Deploy,
 
 func (s *Store) insertDeploy(repoID int64, sha, shortSHA string, meta DeployMeta) (Deploy, error) {
 	return scanDeploy(s.db.QueryRow(
-		`INSERT INTO deploys (repo_id, sha, short_sha, ref, branch, author_name, author_email)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO deploys (repo_id, sha, short_sha, ref, branch, author_name, author_email, created_by)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING `+deployCols,
-		repoID, sha, shortSHA, meta.Ref, meta.Branch, meta.AuthorName, meta.AuthorEmail))
+		repoID, sha, shortSHA, meta.Ref, meta.Branch, meta.AuthorName, meta.AuthorEmail, meta.CreatedBy))
 }
 
 // GetDeployBySHA returns the deploy for (repo, sha), or ErrNotFound.

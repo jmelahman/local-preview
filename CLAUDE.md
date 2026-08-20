@@ -131,6 +131,13 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - The worker API (`internal/workerapi`) starts arbitrary preview processes — a
   remote-code-execution surface. It must stay shared-secret authed and bound to
   a private listener only; never expose it via the ALB/apex router.
+- Preview containers run untrusted branch code, so the instance's IMDS must be
+  one hop out of their reach — set `http_put_response_hop_limit = 1` on every
+  node's `metadata_options`. The orchestrator runs `--network host` (reaches
+  IMDS as the host, hop 1), but a preview on the docker bridge is one hop
+  further; the AWS default of 2 lets it assume the instance role and read S3
+  artifacts + the SSM `PREVIEW_SECRET_*` deps credentials. Previews never need
+  IMDS — they reach the deps by private IP.
 - An unknown `user_data` silently defeats `user_data_replace_on_change` — a
   bucket name read from a resource makes the rendered script `(known after
   apply)`, so terraform plans an in-place update that cloud-init never re-runs;

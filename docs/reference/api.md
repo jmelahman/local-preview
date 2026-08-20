@@ -203,6 +203,7 @@ repository it was minted for.
   "branch": "main",
   "author_name": "Ada Lovelace",
   "author_email": "ada@example.com",
+  "created_by": "ada",
   "fe_hash": "…",
   "be_hash": "…",
   "status": "queued",
@@ -263,6 +264,14 @@ deploy is created. `branch` is best-effort: the requested ref when it is a
 branch, otherwise the first branch whose tip is the commit — deploys of
 commits that are no longer any branch's tip leave it empty. Deploys made
 before these fields existed omit them.
+
+`created_by` is the identity that *triggered* the deploy, an audit trail
+distinct from the commit's git author: the signed-in GitHub login for a
+session request, the GitHub Actions actor for a CI request authenticated with
+an OIDC token, the push event's sender for a webhook, or empty for a deploy
+the automatic [poller](/guide/triggers#watched-repos) created
+(which has no triggering identity). A bearer-PAT request also records empty —
+the token is verified but its identity is not currently threaded to the row.
 
 ### `GET /api/deploys`
 

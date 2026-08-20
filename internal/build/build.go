@@ -212,7 +212,10 @@ func (q *Queue) enqueue(id int64) {
 // hook, API, later poller/webhook): resolve ref → upsert deploy row →
 // enqueue. Idempotent per (repo, sha): an in-flight or ready deploy is
 // returned as-is unless rebuild is set.
-func (q *Queue) RequestDeploy(ctx context.Context, repoName, ref string, rebuild bool) (db.DeployRow, error) {
+// createdBy records the identity that triggered the deploy for the audit
+// trail (SSO login, GitHub Actions actor, or "" for the poller); it is stored
+// only on a freshly created row, not on a rebuild of an existing one.
+func (q *Queue) RequestDeploy(ctx context.Context, repoName, ref string, rebuild bool, createdBy string) (db.DeployRow, error) {
 	repo, gr, sha, err := q.resolveRepoRef(ctx, repoName, ref)
 	if err != nil {
 		return db.DeployRow{}, err
@@ -235,7 +238,9 @@ func (q *Queue) RequestDeploy(ctx context.Context, repoName, ref string, rebuild
 			q.enqueue(d.ID)
 		}
 	case errors.Is(err, db.ErrNotFound):
-		d, err = q.db.CreateDeploy(repo.ID, sha, commitMeta(ctx, gr, ref, sha))
+		meta := commitMeta(ctx, gr, ref, sha)
+		meta.CreatedBy = createdBy
+		d, err = q.db.CreateDeploy(repo.ID, sha, meta)
 		if err != nil {
 			return db.DeployRow{}, err
 		}

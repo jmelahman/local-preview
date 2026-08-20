@@ -474,14 +474,15 @@ func runDeployList(ctx context.Context, url string, out io.Writer, f client.Depl
 		return err
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tREPO\tSHA\tBRANCH\tAUTHOR\tSTATUS\tURL")
+	fmt.Fprintln(tw, "ID\tREPO\tSHA\tBRANCH\tAUTHOR\tBY\tSTATUS\tURL")
 	for _, d := range deploys {
 		url := d.PreviewURL
 		if url == "" {
 			url = "-"
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			d.ID, d.Repo, d.ShortSHA, orDash(d.Branch), orDash(d.AuthorName), displayState(d), url)
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			d.ID, d.Repo, d.ShortSHA, orDash(d.Branch), orDash(d.AuthorName),
+			orDash(d.CreatedBy), displayState(d), url)
 	}
 	return tw.Flush()
 }

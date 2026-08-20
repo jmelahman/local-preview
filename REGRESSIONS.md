@@ -548,3 +548,33 @@ The fix is one-owner-per-group: the stack ingress lives on its own
 the base SG. Any future rule added from outside the module must follow the
 same pattern — a new group, never a rule resource pointed at an
 inline-managed group.
+
+## IMDS must be one hop out of a preview container's reach
+
+**Symptom.** None yet — caught in a security review, not an outage. But the
+exposure is direct: a preview runs arbitrary branch code, and that code could
+reach the instance metadata service (IMDSv2) and mint credentials for the
+node's IAM role — which grants read on the S3 artifact bucket and the SSM
+`PREVIEW_SECRET_*` parameters (every dependency-stack password). A malicious
+commit could exfiltrate all of them.
+
+**Root cause.** `metadata_options` set `http_tokens = "required"` (IMDSv2) but
+left `http_put_response_hop_limit` at the AWS default of **2**. The hop limit
+is the IP TTL the metadata service allows on the token PUT: 1 means "only the
+host itself," 2 means "the host and one network hop past it." A container on
+the docker bridge is exactly one hop past the host, so hop limit 2 lets bridge
+containers — every preview — talk to IMDS. The orchestrator itself runs
+`--network host`, so it shares the host's namespace and reaches IMDS at hop 1
+regardless; the deps stack and previews reach each other by **private IP**,
+never IMDS. So nothing legitimate needs the second hop.
+
+**Fix.** `http_put_response_hop_limit = 1` on every node's `metadata_options`
+(control and workers). Host-network orchestrator: still works. Bridge-network
+previews: blocked from IMDS, which is what we want.
+
+**Reintroduces it.** Removing the line (reverting to the default 2), or
+running the orchestrator in a bridge network instead of `--network host` and
+"fixing" its lost IMDS access by raising the hop limit — that would re-open
+the path to every preview. If the orchestrator ever must run off host
+networking, give it credentials another way (a mounted role, a sidecar),
+never a higher hop limit.

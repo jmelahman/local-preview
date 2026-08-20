@@ -196,7 +196,8 @@ func (w *Watcher) reconcile(ctx context.Context, repo db.Repo, tips []gitrepo.Br
 		} else if !errors.Is(err, db.ErrNotFound) {
 			return err
 		}
-		if _, err := w.queue.RequestDeploy(ctx, repo.Name, tip.SHA, false); err != nil {
+		// The poller has no triggering identity — created_by stays empty.
+		if _, err := w.queue.RequestDeploy(ctx, repo.Name, tip.SHA, false, ""); err != nil {
 			log.Printf("watch: deploy %s@%s: %v", repo.Name, tip.Branch, err)
 			continue
 		}

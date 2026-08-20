@@ -501,12 +501,21 @@ func (d Deps) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 	// session — `preview upload ... --oidc --deploy` deploys what it just
 	// uploaded. The token is already verified; what it does not yet establish
 	// is that its workflow owns this repo.
+	// createdBy is the audit trail for who triggered this deploy: the GitHub
+	// Actions actor for a CI/OIDC caller, otherwise the signed-in GitHub login
+	// for a session caller. A PAT-bearer caller currently attaches no identity
+	// (AuthMiddleware verifies the token but discards the resolved identity),
+	// so it records empty rather than a wrong value.
+	var createdBy string
 	if claims, ok := oidcClaimsFrom(r.Context()); ok {
 		if !d.oidcMayActOn(w, claims, req.Repo, "deploy") {
 			return
 		}
+		createdBy = claims.Actor
+	} else if sess, ok := d.apexSession(r); ok {
+		createdBy = sess.GitHubLogin
 	}
-	row, err := d.Queue.RequestDeploy(r.Context(), req.Repo, req.Ref, req.Rebuild)
+	row, err := d.Queue.RequestDeploy(r.Context(), req.Repo, req.Ref, req.Rebuild, createdBy)
 	if errors.Is(err, db.ErrNotFound) {
 		httpError(w, http.StatusNotFound, fmt.Sprintf("repo %q is not registered", req.Repo))
 		return
