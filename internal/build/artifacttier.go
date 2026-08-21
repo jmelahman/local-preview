@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -98,23 +99,58 @@ func (q *Queue) enqueuePersist(repo, side, hash string) {
 	}
 }
 
-// runPersist uploads one artifact side. It uses a fresh timeout context, not
-// the build context, so a build finishing (or the server draining) doesn't
-// abort an in-flight upload mid-stream. A source directory that GC deleted
-// out from under the upload is a benign drop, not an error.
+// runPersist is the async pool's wrapper: it uploads one side and logs a
+// failure (the enqueue is best-effort — reconcile is the correctness net).
 func (q *Queue) runPersist(job persistJob) {
-	dir := q.artifactDir(job.repo, job.side, job.hash)
+	if err := q.persistSide(job.repo, job.side, job.hash); err != nil {
+		log.Printf("build: persist %s %s/%s: %v", job.repo, job.side, job.hash, err)
+	}
+}
+
+// persistSide uploads one artifact side to the durable tier synchronously and
+// returns the outcome, so a caller that must not proceed until the side is
+// durable (see ensureDurable) can wait and act on failure. It uses a fresh
+// timeout context, not the build context, so a build finishing (or the server
+// draining) doesn't abort an in-flight upload mid-stream. A source directory
+// that GC deleted out from under the upload is a benign nil — nothing to
+// persist. Save is skip-if-exists, so a side the async pool already uploaded
+// costs one HeadObject.
+func (q *Queue) persistSide(repo, side, hash string) error {
+	if q.tier == nil || hash == "" {
+		return nil
+	}
+	dir := q.artifactDir(repo, side, hash)
 	if dir == "" {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), persistTimeout)
 	defer cancel()
-	if err := q.tier.Save(ctx, job.repo, job.side, job.hash, dir); err != nil {
+	if err := q.tier.Save(ctx, repo, side, hash, dir); err != nil {
 		if errors.Is(err, s3store.ErrSourceGone) {
-			return // retention won the race; nothing to persist
+			return nil // retention won the race; nothing to persist
 		}
-		log.Printf("build: persist %s %s/%s: %v", job.repo, job.side, job.hash, err)
+		return err
 	}
+	return nil
+}
+
+// ensureDurable blocks until a deploy's frontend and backend are in the
+// durable tier, so "ready" can mean servable by any node. A worker hydrates
+// only from the tier, so auto-start (and an on-demand serve, which also gates
+// on ready) would otherwise race the async persist and fail with "not present
+// in durable tier" until the upload happened to finish. No-op without a tier:
+// on a single node local disk is the only tier and the serving node already
+// holds the files.
+func (q *Queue) ensureDurable(repo, feHash, beHash string) error {
+	if q.tier == nil {
+		return nil
+	}
+	for _, s := range []struct{ side, hash string }{{"fe", feHash}, {"be", beHash}} {
+		if err := q.persistSide(repo, s.side, s.hash); err != nil {
+			return fmt.Errorf("%s: %w", s.side, err)
+		}
+	}
+	return nil
 }
 
 // hydrate makes an artifact side present locally by fetching it from the

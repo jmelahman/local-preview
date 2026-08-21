@@ -161,6 +161,10 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - Every publish path must persist to the durable tier in the same breath —
   reconcile is a repair pass, not a route; uploads that skipped `enqueuePersist`
   502'd on workers ("not present in durable tier") until the next tick.
+- A deploy going `ready` must mean a serve-only worker could hydrate it — the
+  async persist races auto-start/first-serve, so gate `SetDeployReady` on a
+  synchronous `ensureDurable` (skip-if-exists) of fe/be, never mark ready off a
+  merely-published, not-yet-durable artifact.
 - Containered preview ports publish on loopback by default — a worker must
   also publish on its routable address (derived from `--worker-listen`) or the
   control node's proxy dials a port nothing answers; local health checks still

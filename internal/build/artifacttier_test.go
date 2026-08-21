@@ -73,11 +73,18 @@ type fakeTier struct {
 	mu    sync.Mutex
 	blobs map[string][]byte
 	saved []string
+	// saveDelay stalls every Save, widening the window in which an async
+	// persist has not yet finished — so a test can prove a guarantee comes
+	// from a synchronous wait, not from the pool happening to win the race.
+	saveDelay time.Duration
 }
 
 func fkey(repo, side, hash string) string { return repo + "/" + side + "/" + hash }
 
 func (f *fakeTier) Save(_ context.Context, repo, side, hash, srcDir string) error {
+	if f.saveDelay > 0 {
+		time.Sleep(f.saveDelay)
+	}
 	blob, err := tarDirRaw(srcDir)
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -220,6 +227,31 @@ func TestPersistTargetsContentAddresses(t *testing.T) {
 		if !found {
 			t.Fatalf("expected persist of %q; saved=%v", want, tier.savedKeys())
 		}
+	}
+}
+
+// TestReadyImpliesDurable locks in the invariant that a deploy does not reach
+// "ready" until its frontend and backend are in the durable tier. A worker
+// serves by hydrating from the tier, so auto-start or a first visit would
+// otherwise race the async persist and 502 with "not present in durable tier".
+// The tier's Save is delayed so the async persist pool cannot win the race on
+// its own — the guarantee has to come from the synchronous gate before ready.
+func TestReadyImpliesDurable(t *testing.T) {
+	src := newFixtureRepo(t)
+	tier := &fakeTier{saveDelay: 300 * time.Millisecond}
+	e := newEnv(t, src, func(q *Queue) {
+		q.SetAutoStart(false)
+		q.SetArtifactTier(tier)
+	})
+
+	// deployAndWait returns the instant the row flips to ready; both sides must
+	// already be durable at that moment, with no waitUntil masking a race.
+	row := e.deployAndWait(t, "main")
+	if !tier.has("demo", "fe", row.FeHash) {
+		t.Error("frontend not durable at ready")
+	}
+	if !tier.has("demo", "be", row.BeHash) {
+		t.Error("backend not durable at ready")
 	}
 }
 

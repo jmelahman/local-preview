@@ -377,6 +377,22 @@ func (q *Queue) process(ctx context.Context, id int64) {
 		q.db.SetDeployFailed(id, truncate(err.Error(), 500))
 		return
 	}
+	// The hashes landed during the build; a worker serves by hydrating them
+	// from the durable tier, so a deploy is not truly ready until its sides
+	// are durable. Block here (Save is skip-if-exists, so this only waits out
+	// the tail of the async persist) rather than let auto-start or a first
+	// visit race the upload and 502 with "not present in durable tier".
+	built, err := q.db.GetDeployByID(id)
+	if err != nil {
+		log.Printf("build: deploy %d: reload before ready: %v", id, err)
+		q.db.SetDeployFailed(id, truncate(err.Error(), 500))
+		return
+	}
+	if err := q.ensureDurable(built.RepoName, built.FeHash, built.BeHash); err != nil {
+		log.Printf("build: deploy %d (%s@%s) persist: %v", id, built.RepoName, built.ShortSHA, err)
+		q.db.SetDeployFailed(id, truncate("persist to durable tier: "+err.Error(), 500))
+		return
+	}
 	q.db.SetDeployReady(id)
 	log.Printf("build: deploy %d (%s@%s) ready", id, row.RepoName, row.ShortSHA)
 	if q.autoStart {

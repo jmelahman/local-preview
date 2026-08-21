@@ -534,6 +534,22 @@ The rule: reconcile exists to close crash windows and pre-tier history, not
 to be any publish path's primary route to the tier — anything that lands an
 artifact locally must enqueue its persist in the same breath.
 
+**Sequel — `ready` must mean durable, not just enqueued.** Enqueuing the
+persist closed the "never persisted" hole but not the *timing* one: the persist
+pool is asynchronous, and `SetDeployReady` (which unlocks both auto-start and
+the first on-demand serve) fired the instant the sides published locally. On a
+worker tier that is still a race — a fresh commit whose backend was a cache-hit
+(so its 300 MB upload had barely started) went `ready`, auto-started on a
+worker, and the worker hydrated the peer backend from S3 ~30 s before the Save
+finished: "not present in durable tier". The S3 object appeared seconds after
+the error. The fix gates the ready transition on a *synchronous* `ensureDurable`
+of fe/be before `SetDeployReady` (build.go `process`): `Save` is skip-if-exists,
+so it only waits out the tail of the in-flight async upload and no-ops when the
+pool already won. The invariant to preserve: **a deploy is not `ready` until a
+serve-only worker could hydrate it** — never mark ready (or auto-start, or serve
+on request) off a merely-published, not-yet-durable artifact. A persist failure
+here fails the deploy loudly rather than shipping a `ready` row that 502s.
+
 ## Never mix inline SG rules with standalone rule resources on one group
 
 `aws_security_group.server` defines its rules inline, and the worker tier
