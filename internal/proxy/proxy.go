@@ -68,6 +68,12 @@ const onyxReturnCookieName = "onyx_return"
 // browsing the canonical app straight to some old preview.
 const onyxReturnTTL = 15 * time.Minute
 
+// widenedOnyxTTL bounds the domain-wide onyx cookie the return-dance mints from
+// an existing canonical session (see setWidenedOnyxCookie). It mirrors onyx's
+// SESSION_EXPIRE_TIME_SECONDS default (7 days); the JWT's own exp is the real
+// authority, so a cookie outliving the token just triggers a fresh login.
+const widenedOnyxTTL = 7 * 24 * time.Hour
+
 // defaultOnyxCookieName mirrors onyx's FASTAPI_USERS_AUTH_COOKIE_NAME default
 // (its AUTH_COOKIE_NAME env, unset). The proxy only checks this cookie's
 // presence — it never validates the JWT (that's each onyx backend's job with
@@ -657,8 +663,17 @@ func (rt *Router) ensureAndProxy(w http.ResponseWriter, r *http.Request, e cache
 func (rt *Router) serveReserved(w http.ResponseWriter, r *http.Request, sub, addr string) {
 	isOnyxAuth := rt.onyxAuthEnabled() && sub == rt.onyxAuthLabel
 	if isOnyxAuth {
-		if _, err := r.Cookie(rt.onyxCookieName); err == nil {
+		if c, err := r.Cookie(rt.onyxCookieName); err == nil {
 			if ret, err := r.Cookie(onyxReturnCookieName); err == nil && rt.safeOnyxReturn(ret.Value) {
+				// The browser reached the canonical host carrying an onyx
+				// session, but that cookie is host-only to this host — the
+				// preview it's being sent back to would never receive it, so
+				// needsOnyxLogin would bounce it right back here, forever.
+				// Widen the session to the preview domain before redirecting,
+				// so the return actually sticks. (onyx only sets — and thus
+				// rewriteOnyxCookieDomain only widens — the cookie on a fresh
+				// login; an already-logged-in user never re-triggers that.)
+				rt.setWidenedOnyxCookie(w, c.Value)
 				rt.clearOnyxReturn(w)
 				http.Redirect(w, r, ret.Value, http.StatusFound)
 				return
@@ -706,6 +721,26 @@ func (rt *Router) rewriteOnyxCookieDomain(resp *http.Response) error {
 		}
 	}
 	return nil
+}
+
+// setWidenedOnyxCookie emits a preview-domain copy of the onyx session cookie
+// from an existing canonical session, for the return-dance path where the user
+// is already logged in and onyx will not re-set (and rewriteOnyxCookieDomain
+// will not widen) the cookie. Request cookies carry no attributes, so we mint
+// onyx's own: HttpOnly, Path=/, Lax, Secure per the deployment. The value is the
+// stateless JWT — every preview validates it locally with the shared secret.
+func (rt *Router) setWidenedOnyxCookie(w http.ResponseWriter, value string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     rt.onyxCookieName,
+		Value:    value,
+		Path:     "/",
+		Domain:   "." + rt.domain,
+		HttpOnly: true,
+		Secure:   rt.authSecure,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Now().Add(widenedOnyxTTL),
+		MaxAge:   int(widenedOnyxTTL.Seconds()),
+	})
 }
 
 // matchesRoute reports whether path falls under any of the prefixes.

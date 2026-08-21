@@ -852,6 +852,20 @@ func TestOnyxAuthPostLoginHandoff(t *testing.T) {
 	if c := cookieByName(rec.Result().Cookies(), onyxReturnCookieName); c == nil || c.MaxAge >= 0 {
 		t.Fatalf("onyx_return should be cleared, got %+v", c)
 	}
+	// The dance must also hand the browser a preview-domain copy of the onyx
+	// session — otherwise the host-only canonical cookie never reaches the
+	// preview, needsOnyxLogin bounces the browser right back here, and the
+	// user loops between the preview and the canonical login forever.
+	auth := cookieByName(rec.Result().Cookies(), "fastapiusersauth")
+	if auth == nil || auth.Value != "jwt" {
+		t.Fatalf("expected widened onyx session cookie, got %+v", auth)
+	}
+	if auth.Domain != "preview.localhost" {
+		t.Fatalf("widened session Domain = %q, want preview.localhost", auth.Domain)
+	}
+	if !auth.HttpOnly || auth.MaxAge <= 0 {
+		t.Fatalf("widened session must be HttpOnly and persistent, got %+v", auth)
+	}
 }
 
 // TestOnyxAuthRejectsForeignReturn: a return marker pointing off our domain (a

@@ -179,6 +179,11 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   validated to our own domain before the post-login redirect, or it's an open
   redirect. onyx's `sanitize_next_url` blocks cross-host `next`, so the return
   hop lives in the proxy, not onyx.
+- The onyx-login return-dance must widen the session cookie itself, not lean on
+  the login response — an already-logged-in user hits the canonical host with a
+  host-only cookie the preview never receives, so the dance has to mint a
+  `Domain=.<preview-domain>` copy before redirecting or the browser loops
+  `preview/app → canonical/auth/login → preview/app` forever.
 - A `nofail` data volume must gate the service that bind-mounts it — without
   `RequiresMountsFor=`, a boot that races the volume attach starts the
   orchestrator on an empty dir with a fresh SQLite DB, and a later mount can't

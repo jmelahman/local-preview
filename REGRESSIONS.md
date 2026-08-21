@@ -632,3 +632,21 @@ an expired session redirects to it, so letting it through reintroduces the
 password login we bounce past. And logout is best-effort: onyx clears the
 cookie host-only, which can't remove the domain-scoped one — acceptable only
 because the JWT is stateless and the whole surface is team-gated.
+
+**Sequel — the return-dance must widen the cookie too, not just redirect.** The
+widening above hangs off `rewriteOnyxCookieDomain`, which only fires when onyx
+*sets* the cookie — i.e. on a **fresh** login response. An **already-logged-in**
+user never re-triggers that: they arrive at the canonical host already carrying
+a host-only session, the return-dance (`serveReserved`) sees the cookie + a
+valid `onyx_return` and 302s them back to the preview — but the browser's cookie
+is scoped to `app.<preview-domain>` and is *never sent to the preview host*. So
+`needsOnyxLogin` fires again on arrival, bounces back to the canonical login,
+the dance fires again, and the browser loops `preview/app → canonical/auth/login
+→ preview/app` forever (never showing a password form — it's a redirect loop,
+not the disabled-auth symptom). The fix: the dance itself mints a
+`Domain=.<preview-domain>` copy of the session (`setWidenedOnyxCookie`) before
+redirecting. Request cookies carry no attributes, so mirror onyx's own
+(HttpOnly, `Path=/`, Lax, Secure-per-deployment) and give it a TTL matching
+onyx's session default — the JWT's `exp` is the real authority, so an over-long
+cookie just forces a fresh login, never a stale-auth accept. Don't lean on the
+login-response widening alone: it covers first login, not the returning user.
