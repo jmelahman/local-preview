@@ -578,3 +578,41 @@ running the orchestrator in a bridge network instead of `--network host` and
 the path to every preview. If the orchestrator ever must run off host
 networking, give it credentials another way (a mounted role, a sidecar),
 never a higher hop limit.
+
+## Onyx SSO on previews: widen the cookie, validate the return marker
+
+**Symptom class.** Two ways this breaks. (1) You log in on the canonical onyx
+host but every per-commit preview still shows a login page — the session never
+reaches them. (2) A crafted link (or a malicious previewed backend) sends a
+just-logged-in user off to an attacker's site right after login.
+
+**Why the session must be widened.** onyx's `CookieTransport` sets a
+**host-only** session cookie (no `Domain`), so a cookie minted on
+`app.<preview-domain>` is sent to `app.` only — not to `<sha>-onyx.<preview-
+domain>`. The previews can only *validate* it (they run `AUTH_BACKEND=jwt`, a
+stateless HS256 JWT signed by the shared `USER_AUTH_SECRET`, so no shared
+session store is needed — but the browser still has to present the cookie).
+The proxy therefore rewrites the canonical host's `Set-Cookie` to add
+`Domain=.<preview-domain>` (`rewriteOnyxCookieDomain`). Only the auth cookie is
+touched; CSRF/PKCE cookies stay host-only.
+
+**Why the cross-host return can't live in onyx.** onyx's `sanitize_next_url`
+rejects any `next` carrying a scheme or netloc (open-redirect guard), so after
+login on the canonical host onyx can only land you back on the canonical host —
+never on the preview you came from. The return hop is orchestrated by the proxy
+instead: bouncing to login stashes an `onyx_return` cookie (domain-scoped, so it
+survives the hop), and the canonical host consumes it once a session appears.
+
+**The trap.** `onyx_return` is domain-scoped, so a **previewed backend can set
+it** (a subdomain may set a parent-domain cookie). If the post-login redirect
+trusted it blindly, any preview could redirect a freshly-authenticated user
+anywhere. `safeOnyxReturn` requires the target host to be the preview domain or
+a label under it before redirecting. Keep that check — do not "simplify" the
+handoff by trusting the cookie value.
+
+**Also.** The preview's own `/auth/login` is intercepted unconditionally (even
+with a cookie present): single-tenant onyx renders a password form there, and
+an expired session redirects to it, so letting it through reintroduces the
+password login we bounce past. And logout is best-effort: onyx clears the
+cookie host-only, which can't remove the domain-scoped one — acceptable only
+because the JWT is stateless and the whole surface is team-gated.

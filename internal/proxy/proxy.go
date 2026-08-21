@@ -56,6 +56,24 @@ const previewGrantCookieName = "preview_grant"
 // previewAuthParam is the one-time handoff code the apex redirects back with.
 const previewAuthParam = "preview_auth"
 
+// onyxReturnCookieName stashes the preview URL a browser was headed for when it
+// got bounced to the canonical onyx host to log in. It is domain-scoped (like
+// the grant cookie) so it survives the cross-host hop, and consumed once the
+// user lands back on the canonical host with a session. Distinct from any onyx
+// cookie: it carries no credential, only a return address.
+const onyxReturnCookieName = "onyx_return"
+
+// onyxReturnTTL bounds how long a stashed return address lives — long enough to
+// complete a Google login, short enough that a stale marker can't yank a user
+// browsing the canonical app straight to some old preview.
+const onyxReturnTTL = 15 * time.Minute
+
+// defaultOnyxCookieName mirrors onyx's FASTAPI_USERS_AUTH_COOKIE_NAME default
+// (its AUTH_COOKIE_NAME env, unset). The proxy only checks this cookie's
+// presence — it never validates the JWT (that's each onyx backend's job with
+// the shared USER_AUTH_SECRET).
+const defaultOnyxCookieName = "fastapiusersauth"
+
 // Backends is the slice of the supervisor the proxy needs. EnsureRunning
 // returns the "host:port" the started process serves on — loopback for a
 // process on this node (single-node / worker-local), or a worker's address when
@@ -94,6 +112,17 @@ type Router struct {
 	// canonical app instance) that must live under the preview domain to inherit
 	// the wildcard cert and the login gate, yet aren't per-commit previews.
 	reserved map[string]string
+
+	// onyxAuthLabel, when set, turns on single-sign-on for onyx previews: a
+	// per-commit preview host without an onyx session cookie is bounced to this
+	// reserved label (the one canonical onyx host that owns the Google OAuth
+	// client + registered redirect URI) to log in, and the minted session — a
+	// stateless JWT signed by the shared USER_AUTH_SECRET — rides back on the
+	// preview domain so every preview validates it locally. onyxCookieName is
+	// the onyx session cookie the proxy watches for (presence only). Empty label
+	// leaves previews as they were (browse-as-admin, no onyx login).
+	onyxAuthLabel  string
+	onyxCookieName string
 
 	mu    sync.Mutex
 	cache map[string]cacheEntry
@@ -153,6 +182,22 @@ func (rt *Router) SetReservedUpstreams(m map[string]string) {
 	}
 }
 
+// SetOnyxAuth turns on onyx single-sign-on for preview subdomains. label is the
+// reserved upstream that runs the canonical onyx (the sole Google-OAuth host);
+// it must also be registered via SetReservedUpstreams. cookieName is the onyx
+// session cookie to watch for (empty → onyx's "fastapiusersauth" default). An
+// empty label (the zero value) leaves previews un-gated by onyx, as before.
+func (rt *Router) SetOnyxAuth(label, cookieName string) {
+	rt.onyxAuthLabel = strings.ToLower(strings.TrimSpace(label))
+	if cookieName == "" {
+		cookieName = defaultOnyxCookieName
+	}
+	rt.onyxCookieName = cookieName
+}
+
+// onyxAuthEnabled reports whether onyx SSO gating is configured.
+func (rt *Router) onyxAuthEnabled() bool { return rt.onyxAuthLabel != "" }
+
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sub, ok := rt.parseHost(r.Host)
 	if !ok {
@@ -167,7 +212,13 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A reserved label is an always-on companion service, not a deploy: route it
 	// straight to its upstream (still behind the gate above), skipping resolve.
 	if addr, ok := rt.reserved[sub]; ok {
-		rt.serveReserved(w, r, addr)
+		rt.serveReserved(w, r, sub, addr)
+		return
+	}
+	// onyx SSO: a per-commit preview host (never the canonical label above) that
+	// lacks an onyx session gets bounced to the canonical host to log in.
+	if rt.onyxAuthEnabled() && rt.needsOnyxLogin(r) {
+		rt.redirectToOnyxLogin(w, r)
 		return
 	}
 	entry := rt.resolve(sub)
@@ -255,6 +306,81 @@ func (rt *Router) redirectToGrant(w http.ResponseWriter, r *http.Request) {
 	target := rt.authBaseURL + "/api/auth/preview-grant?return_to=" +
 		url.QueryEscape(previewReturnURL(r))
 	http.Redirect(w, r, target, http.StatusFound)
+}
+
+// needsOnyxLogin reports whether a preview request must first go get an onyx
+// session on the canonical host. It intercepts the onyx login page outright —
+// single-tenant onyx would otherwise render a password form there, and an
+// expired session redirects the browser to it — and otherwise gates only
+// top-level browser navigations that carry no session cookie. Assets and
+// XHR/fetch fall through to the preview's onyx (which 401s on its own), so a
+// logged-in SPA keeps working and non-browser callers aren't bounced.
+func (rt *Router) needsOnyxLogin(r *http.Request) bool {
+	if r.URL.Path == "/auth/login" {
+		return true
+	}
+	if !wantsHTML(r) {
+		return false
+	}
+	_, err := r.Cookie(rt.onyxCookieName)
+	return err != nil
+}
+
+// redirectToOnyxLogin stashes where the browser was headed (domain-scoped so it
+// survives the hop to the canonical host) and 302s to that host's /auth/login,
+// which bounces on to Google. The onyx login page itself returns to the preview
+// root, not back to /auth/login, so there is no loop.
+func (rt *Router) redirectToOnyxLogin(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     onyxReturnCookieName,
+		Value:    onyxReturnURL(r),
+		Path:     "/",
+		Domain:   "." + rt.domain,
+		HttpOnly: true,
+		Secure:   rt.authSecure,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Now().Add(onyxReturnTTL),
+		MaxAge:   int(onyxReturnTTL.Seconds()),
+	})
+	target := requestScheme(r) + "://" + rt.onyxAuthLabel + "." + rt.domain + "/auth/login"
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
+// onyxReturnURL is where login should land the browser afterward: the current
+// preview URL, except on the login page itself (return to the preview root, so
+// the marker can't point back at /auth/login and loop).
+func onyxReturnURL(r *http.Request) string {
+	if r.URL.Path == "/auth/login" {
+		return requestScheme(r) + "://" + r.Host + "/"
+	}
+	return previewReturnURL(r)
+}
+
+// safeOnyxReturn guards the stashed return address against open redirects: it
+// must be an http(s) URL whose host is the preview domain or a label under it.
+// The marker is domain-scoped, so a malicious previewed backend could set it —
+// this keeps the post-login redirect inside our own hosts.
+func (rt *Router) safeOnyxReturn(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	host := u.Hostname()
+	return host == rt.domain || strings.HasSuffix(host, "."+rt.domain)
+}
+
+// clearOnyxReturn expires the return marker once it has been consumed.
+func (rt *Router) clearOnyxReturn(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     onyxReturnCookieName,
+		Value:    "",
+		Path:     "/",
+		Domain:   "." + rt.domain,
+		HttpOnly: true,
+		Secure:   rt.authSecure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
 }
 
 // previewReturnURL is the absolute URL of the current preview request with the
@@ -522,7 +648,23 @@ func (rt *Router) ensureAndProxy(w http.ResponseWriter, r *http.Request, e cache
 // but has no cold-start, deploy state, or /api-prefix logic: every path passes
 // through unchanged. The upstream owns its own routing and (for the canonical
 // onyx) its own auth.
-func (rt *Router) serveReserved(w http.ResponseWriter, r *http.Request, addr string) {
+//
+// When this is the onyx SSO host, it also (a) completes the post-login handoff
+// — a browser landing here with a fresh onyx session and a stashed return
+// address is sent back to the preview it came from — and (b) rewrites the onyx
+// session cookie to the preview domain on the way out, so the JWT minted here
+// validates on every preview host.
+func (rt *Router) serveReserved(w http.ResponseWriter, r *http.Request, sub, addr string) {
+	isOnyxAuth := rt.onyxAuthEnabled() && sub == rt.onyxAuthLabel
+	if isOnyxAuth {
+		if _, err := r.Cookie(rt.onyxCookieName); err == nil {
+			if ret, err := r.Cookie(onyxReturnCookieName); err == nil && rt.safeOnyxReturn(ret.Value) {
+				rt.clearOnyxReturn(w)
+				http.Redirect(w, r, ret.Value, http.StatusFound)
+				return
+			}
+		}
+	}
 	target := &url.URL{Scheme: "http", Host: addr}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -534,7 +676,36 @@ func (rt *Router) serveReserved(w http.ResponseWriter, r *http.Request, addr str
 			rt.errorPage(w, r, http.StatusBadGateway, "Service unavailable", err.Error())
 		},
 	}
+	if isOnyxAuth {
+		proxy.ModifyResponse = rt.rewriteOnyxCookieDomain
+	}
 	proxy.ServeHTTP(w, r)
+}
+
+// rewriteOnyxCookieDomain widens the onyx session cookie set by the canonical
+// host to the whole preview domain, so the browser presents it to every preview
+// subdomain. onyx's CookieTransport sets a host-only cookie (no Domain); we add
+// ".<domain>". Only the auth cookie is touched — other cookies (CSRF, PKCE)
+// belong to the canonical host and pass through unchanged.
+func (rt *Router) rewriteOnyxCookieDomain(resp *http.Response) error {
+	cookies := resp.Cookies()
+	changed := false
+	for _, c := range cookies {
+		if c.Name == rt.onyxCookieName && c.Domain == "" {
+			c.Domain = "." + rt.domain
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	resp.Header.Del("Set-Cookie")
+	for _, c := range cookies {
+		if s := c.String(); s != "" {
+			resp.Header.Add("Set-Cookie", s)
+		}
+	}
+	return nil
 }
 
 // matchesRoute reports whether path falls under any of the prefixes.

@@ -722,3 +722,196 @@ func TestInterimAndErrorPagesAreUncacheable(t *testing.T) {
 		t.Fatalf("error page Cache-Control = %q, want no-store", cc)
 	}
 }
+
+// TestOnyxAuthBouncesPreviewWithoutSession: a browser navigation to a preview
+// with no onyx session cookie is 302'd to the canonical host's /auth/login, and
+// a domain-scoped return marker is stashed so login can send it back.
+func TestOnyxAuthBouncesPreviewWithoutSession(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	e.router.SetReservedUpstreams(map[string]string{"app": "127.0.0.1:9"})
+	e.router.SetOnyxAuth("app", "")
+
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	req := httptest.NewRequest("GET", "http://"+host+"/chat", nil)
+	req.Host = host
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("want 302, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "http://app.preview.localhost/auth/login" {
+		t.Fatalf("Location = %q", loc)
+	}
+	ret := cookieByName(rec.Result().Cookies(), onyxReturnCookieName)
+	if ret == nil || ret.Value != "http://"+host+"/chat" {
+		t.Fatalf("onyx_return = %+v, want the preview URL", ret)
+	}
+	// Go strips the leading dot when serializing Set-Cookie; a Domain-scoped
+	// cookie is still presented to every subdomain (RFC 6265).
+	if ret.Domain != "preview.localhost" {
+		t.Fatalf("onyx_return Domain = %q, want preview.localhost", ret.Domain)
+	}
+}
+
+// TestOnyxAuthPassesWithSession: once the browser holds an onyx cookie the
+// request proceeds to the deploy (the preview's own onyx validates the JWT).
+func TestOnyxAuthPassesWithSession(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	e.router.SetReservedUpstreams(map[string]string{"app": "127.0.0.1:9"})
+	e.router.SetOnyxAuth("app", "")
+
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	req := httptest.NewRequest("GET", "http://"+host+"/", nil)
+	req.Host = host
+	req.Header.Set("Accept", "text/html")
+	req.AddCookie(&http.Cookie{Name: "fastapiusersauth", Value: "jwt"})
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "preview home") {
+		t.Fatalf("want the static preview served, got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOnyxAuthInterceptsLoginPage: the preview's own /auth/login is always
+// bounced to the canonical host (single-tenant onyx would show a password form
+// there, and an expired session redirects to it) — even with a cookie present —
+// and the return marker points at the preview root, not back at /auth/login.
+func TestOnyxAuthInterceptsLoginPage(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	e.router.SetReservedUpstreams(map[string]string{"app": "127.0.0.1:9"})
+	e.router.SetOnyxAuth("app", "")
+
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	req := httptest.NewRequest("GET", "http://"+host+"/auth/login", nil)
+	req.Host = host
+	req.Header.Set("Accept", "text/html")
+	req.AddCookie(&http.Cookie{Name: "fastapiusersauth", Value: "stale"})
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("want 302, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "http://app.preview.localhost/auth/login" {
+		t.Fatalf("Location = %q", loc)
+	}
+	ret := cookieByName(rec.Result().Cookies(), onyxReturnCookieName)
+	if ret == nil || ret.Value != "http://"+host+"/" {
+		t.Fatalf("onyx_return = %+v, want the preview root", ret)
+	}
+}
+
+// TestOnyxAuthNonBrowserFallsThrough: an XHR/fetch (no text/html) without a
+// session is not redirected — it falls through to the preview's onyx, which
+// 401s on its own. Here it reaches the (missing) backend and 502s, proving it
+// was not bounced.
+func TestOnyxAuthNonBrowserFallsThrough(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	e.fake.err = errors.New("no backend")
+	e.router.SetReservedUpstreams(map[string]string{"app": "127.0.0.1:9"})
+	e.router.SetOnyxAuth("app", "")
+
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	code, _, _ := doReq(t, e.router, host, "/api/me", false)
+	if code == http.StatusFound {
+		t.Fatal("a non-browser request must not be bounced to onyx login")
+	}
+}
+
+// TestOnyxAuthPostLoginHandoff: back on the canonical host with a fresh session
+// and a stashed return address, the browser is sent to the preview it came
+// from and the marker is cleared.
+func TestOnyxAuthPostLoginHandoff(t *testing.T) {
+	e := newTestEnv(t)
+	e.router.SetReservedUpstreams(map[string]string{"app": "127.0.0.1:9"})
+	e.router.SetOnyxAuth("app", "")
+
+	host := "app.preview.localhost:8080"
+	ret := "http://1a2b3c4-demo.preview.localhost:8080/chat"
+	req := httptest.NewRequest("GET", "http://"+host+"/", nil)
+	req.Host = host
+	req.Header.Set("Accept", "text/html")
+	req.AddCookie(&http.Cookie{Name: "fastapiusersauth", Value: "jwt"})
+	req.AddCookie(&http.Cookie{Name: onyxReturnCookieName, Value: ret})
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("want 302, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != ret {
+		t.Fatalf("Location = %q, want %q", loc, ret)
+	}
+	if c := cookieByName(rec.Result().Cookies(), onyxReturnCookieName); c == nil || c.MaxAge >= 0 {
+		t.Fatalf("onyx_return should be cleared, got %+v", c)
+	}
+}
+
+// TestOnyxAuthRejectsForeignReturn: a return marker pointing off our domain (a
+// malicious previewed backend could set the domain-scoped cookie) is ignored —
+// no open redirect.
+func TestOnyxAuthRejectsForeignReturn(t *testing.T) {
+	e := newTestEnv(t)
+	var reached bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		fmt.Fprint(w, "app-home")
+	}))
+	t.Cleanup(upstream.Close)
+	u, _ := url.Parse(upstream.URL)
+	e.router.SetReservedUpstreams(map[string]string{"app": u.Host})
+	e.router.SetOnyxAuth("app", "")
+
+	host := "app.preview.localhost:8080"
+	req := httptest.NewRequest("GET", "http://"+host+"/", nil)
+	req.Host = host
+	req.Header.Set("Accept", "text/html")
+	req.AddCookie(&http.Cookie{Name: "fastapiusersauth", Value: "jwt"})
+	req.AddCookie(&http.Cookie{Name: onyxReturnCookieName, Value: "http://evil.com/steal"})
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusFound {
+		t.Fatalf("must not redirect to a foreign return, got Location %q", rec.Header().Get("Location"))
+	}
+	if !reached {
+		t.Fatal("expected the request to fall through to the canonical app")
+	}
+}
+
+// TestOnyxAuthCookieDomainRewrite: the onyx session cookie the canonical host
+// sets host-only is widened to the whole preview domain on the way out, so the
+// browser presents it to every preview subdomain.
+func TestOnyxAuthCookieDomainRewrite(t *testing.T) {
+	e := newTestEnv(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "fastapiusersauth", Value: "jwt", Path: "/", HttpOnly: true})
+		http.SetCookie(w, &http.Cookie{Name: "csrftoken", Value: "c", Path: "/"})
+		fmt.Fprint(w, "ok")
+	}))
+	t.Cleanup(upstream.Close)
+	u, _ := url.Parse(upstream.URL)
+	e.router.SetReservedUpstreams(map[string]string{"app": u.Host})
+	e.router.SetOnyxAuth("app", "")
+
+	host := "app.preview.localhost:8080"
+	req := httptest.NewRequest("GET", "http://"+host+"/api/auth/oauth/callback", nil)
+	req.Host = host
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+
+	auth := cookieByName(rec.Result().Cookies(), "fastapiusersauth")
+	if auth == nil || auth.Domain != "preview.localhost" {
+		t.Fatalf("auth cookie Domain = %+v, want preview.localhost", auth)
+	}
+	if csrf := cookieByName(rec.Result().Cookies(), "csrftoken"); csrf == nil || csrf.Domain != "" {
+		t.Fatalf("csrf cookie should stay host-only, got %+v", csrf)
+	}
+}

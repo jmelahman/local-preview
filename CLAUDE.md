@@ -168,6 +168,13 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - Never mix inline SG rules with standalone rule resources on one group —
   Terraform wipes the standalone ones on the next in-place SG update (a retype
   deleted the deps ingress in production); give each rule owner its own group.
+- Onyx SSO on previews: the canonical host's host-only session cookie must be
+  widened to `Domain=.<preview-domain>` in the proxy (previews run
+  `AUTH_BACKEND=jwt` and only validate the shared-secret JWT), and the
+  cross-host `onyx_return` marker — which a previewed backend can set — must be
+  validated to our own domain before the post-login redirect, or it's an open
+  redirect. onyx's `sanitize_next_url` blocks cross-host `next`, so the return
+  hop lives in the proxy, not onyx.
 - A `nofail` data volume must gate the service that bind-mounts it — without
   `RequiresMountsFor=`, a boot that races the volume attach starts the
   orchestrator on an empty dir with a fresh SQLite DB, and a later mount can't

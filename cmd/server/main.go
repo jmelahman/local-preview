@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -111,6 +112,9 @@ type serveOptions struct {
 
 	reservedUpstreams []string
 
+	onyxAuthUpstream string
+	onyxAuthCookie   string
+
 	role            string
 	workerSecret    string
 	workerListen    string
@@ -163,6 +167,8 @@ func Root() *cobra.Command {
 	serve.Flags().Int64Var(&opts.cacheMaxArtifactBytes, "cache-max-artifact-bytes", 0, "Soft cap on resident (local-disk) artifact bytes; the coldest artifacts are swept back to the durable tier above it. Requires the artifact tier; 0 disables cache eviction and keeps every artifact resident (default: $PREVIEW_CACHE_MAX_ARTIFACT_BYTES)")
 	serve.Flags().Int64Var(&opts.maxUploadBytes, "max-upload-bytes", defaultMaxUploadBytes, "Maximum bytes a CI upload may stream: the compressed request body is rejected with 413 above it, and extraction aborts if the decompressed tar exceeds it (guards against a gzip bomb filling the disk). Raise it for larger legitimate artifacts; 0 disables both caps (default: $PREVIEW_MAX_UPLOAD_BYTES)")
 	serve.Flags().StringArrayVar(&opts.reservedUpstreams, "reserved-upstream", nil, "Route a fixed host under the preview domain to an upstream, as <label>=host:port (e.g. app=127.0.0.1:3100) — served behind the SSO gate but outside the deploy machinery, for always-on companion services. Repeatable (default: $PREVIEW_RESERVED_UPSTREAMS, comma-separated)")
+	serve.Flags().StringVar(&opts.onyxAuthUpstream, "onyx-auth-upstream", "", "Enable onyx single-sign-on for previews: the reserved-upstream label of the one canonical onyx host that owns the Google OAuth client (e.g. app). Previews without an onyx session bounce there to log in, and the shared-secret JWT rides back across the preview domain (default: $PREVIEW_ONYX_AUTH_UPSTREAM; empty disables it)")
+	serve.Flags().StringVar(&opts.onyxAuthCookie, "onyx-auth-cookie", "", "onyx session cookie the proxy watches for when --onyx-auth-upstream is set (default: $PREVIEW_ONYX_AUTH_COOKIE, else onyx's own default \"fastapiusersauth\")")
 	serve.Flags().StringVar(&opts.role, "role", "all", "Serving role: 'all' (single node — API, dashboard, proxy, and local process supervision), 'control' (route previews to a worker tier), or 'worker' (supervise processes on behalf of a control node)")
 	serve.Flags().StringVar(&opts.workerSecret, "worker-secret", "", "Shared secret authenticating the internal worker API in both directions (default: $PREVIEW_WORKER_SECRET)")
 	serve.Flags().StringVar(&opts.workerListen, "worker-listen", "", "Private address to expose the internal worker API on, e.g. :9100 — MUST NOT be internet/ALB-reachable; empty disables it (roles 'worker'/'all')")
@@ -218,6 +224,13 @@ func run(opts serveOptions) error {
 	reserved, err := parseReservedUpstreams(opts.reservedUpstreams)
 	if err != nil {
 		return err
+	}
+	envDefault(&opts.onyxAuthUpstream, "PREVIEW_ONYX_AUTH_UPSTREAM")
+	envDefault(&opts.onyxAuthCookie, "PREVIEW_ONYX_AUTH_COOKIE")
+	if opts.onyxAuthUpstream != "" {
+		if _, ok := reserved[strings.ToLower(opts.onyxAuthUpstream)]; !ok {
+			return fmt.Errorf("--onyx-auth-upstream %q must also be a --reserved-upstream label", opts.onyxAuthUpstream)
+		}
 	}
 	envDefault(&opts.s3Endpoint, "PREVIEW_S3_ENDPOINT")
 	envDefault(&opts.s3Bucket, "PREVIEW_S3_BUCKET")
@@ -490,6 +503,12 @@ func run(opts serveOptions) error {
 		for label, addr := range reserved {
 			log.Printf("reserved upstream: %s.%s -> %s", label, cfg.Preview.Domain, addr)
 		}
+	}
+	if opts.onyxAuthUpstream != "" {
+		router.SetOnyxAuth(opts.onyxAuthUpstream, opts.onyxAuthCookie)
+		log.Printf("onyx SSO: previews log in via %s.%s (cookie %q)",
+			strings.ToLower(opts.onyxAuthUpstream), cfg.Preview.Domain,
+			cmp.Or(opts.onyxAuthCookie, "fastapiusersauth"))
 	}
 
 	// Expose the internal worker API when configured (worker/all roles). It is a
