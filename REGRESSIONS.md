@@ -721,3 +721,30 @@ Two more invariants around it:
   resource reference renders the script `(known after apply)` and silently
   defeats `user_data_replace_on_change` — the same trap as the bucket-name entry
   above.
+
+## Manifest env is baked into the artifact at build time — an env-borne fix never reaches existing deploys
+
+The first stress test exhausted the shared deps Postgres (`sorry, too many
+clients already`): every onyx api server holds a sync and an async SQLAlchemy
+pool, so a handful of previews with default pools (40+10 per engine) ate
+`max_connections`. The fix had two halves with very different reach:
+
+- **Server-side settings are retroactive.** `max_connections`, and later
+  `idle_session_timeout`, apply to every preview the moment the server has
+  them — old artifacts included.
+- **Manifest env is not.** The env block is part of the artifact hash and is
+  baked in at build time, so capping pools via manifest env
+  (`POSTGRES_API_SERVER_POOL_SIZE`) fixes only deploys built *after* the
+  change. Everything already built keeps the fat pools until something
+  produces a new artifact — which the env change itself guarantees for any
+  *redeploy* (env → new hash → rebuild), but nothing rebuilds existing
+  deploys spontaneously. The stress fleet promptly exhausted the raised 600
+  cap with old-env artifacts.
+
+So: an operational fix delivered through manifest env MUST be paired with a
+server-side guard that covers the legacy artifacts. Here that guard is
+Postgres `idle_session_timeout=10min` — safe because onyx defaults
+`pool_pre_ping=true`, so a server-side kill of a parked connection is
+invisible (the pool re-dials on next checkout). Set via `ALTER SYSTEM` (lives
+on the data volume) and mirrored in the stack's command line for fresh
+volumes.

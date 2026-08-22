@@ -196,6 +196,10 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   boots extra nodes into a fleet that no longer reports demand); whatever
   registers demand must retry `ErrNoWorker` until its node arrives, or the node
   it summoned boots to nothing (the pre-warm's `startWithRetry`).
+- Manifest env is baked into the artifact at build time — an env-borne
+  operational fix (e.g. DB pool caps) never reaches already-built deploys;
+  pair it with a server-side guard that covers legacy artifacts (the
+  deps Postgres `idle_session_timeout`, safe under onyx's pool_pre_ping).
 - A `nofail` data volume must gate the service that bind-mounts it — without
   `RequiresMountsFor=`, a boot that races the volume attach starts the
   orchestrator on an empty dir with a fresh SQLite DB, and a later mount can't
