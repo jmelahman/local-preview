@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/fleet"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
 )
@@ -610,6 +611,22 @@ func (rt *Router) ensureAndProxy(w http.ResponseWriter, r *http.Request, e cache
 				state: "starting", title: "Starting " + what + "…",
 				detail: "The preview " + what + " is starting.",
 				repo:   repoName, side: string(k.Side), hash: k.Hash,
+			})
+			return
+		}
+		if errors.Is(err, fleet.ErrNoWorker) && r.Context().Err() == nil {
+			// The fleet is at zero — and this very request registered the
+			// unserved demand that scales it out, so a worker is on its way.
+			// Not a failure: an interim page whose 1s polls re-enter this
+			// function, each re-registering demand (keeping the scale-out
+			// signal alive while the node boots) until a worker joins — at
+			// which point the poll lands in the cold-start path above and the
+			// same page becomes the "starting" screen, then loads the preview.
+			rt.interimResponse(w, r, http.StatusServiceUnavailable, interim{
+				state: "waking", title: "Waking the preview fleet…",
+				detail: "No preview server is running, so one is being launched for this request — " +
+					"usually two to four minutes. The preview loads automatically once it's up.",
+				repo: repoName, side: string(k.Side), hash: k.Hash,
 			})
 			return
 		}

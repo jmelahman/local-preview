@@ -63,7 +63,12 @@ CloudWatch, and reconciles EC2 scale-in protection so an ASG scale-in drains an
 idle node instead of terminating one mid-preview. A worker passes its
 `--worker-instance-id` so the control node knows which instance to protect.
 A freshly built deploy's pre-warm retries while the fleet is at zero — the
-demand it registers is what launches the worker it then lands on. The
+demand it registers is what launches the worker it then lands on. A browser
+hitting a preview while the fleet is at zero gets a "Waking the preview
+fleet…" waiting page (not an error): its polls keep the demand signal alive
+while the node boots, hand off to the usual "Starting…" screen once a worker
+registers, and load the preview when it's up; API callers get a retryable
+`503` with `Retry-After`. The
 scaling policies and alarms themselves live in your infrastructure (see the
 [Terraform example](https://github.com/jmelahman/local-preview/tree/master/examples/terraform)).
 

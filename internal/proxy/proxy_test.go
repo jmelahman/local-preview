@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/fleet"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
 )
@@ -270,6 +271,48 @@ func TestColdStartAndCrash(t *testing.T) {
 	code, body, _ = doReq(t, e.router, host, "/api/x", false)
 	if code != 502 || !strings.Contains(body, "exited") {
 		t.Fatalf("crash: %d %q", code, body)
+	}
+}
+
+// A fleet at zero workers is a wait, not a failure: the request itself
+// registered the demand that launches a node, so the browser gets the waking
+// poller page (whose polls re-register demand until the worker joins) and API
+// callers get a retryable 503 — never the hard "failed to start" error.
+func TestNoWorkerIsInterimNotFailure(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	e.fake.err = fmt.Errorf("start frontend: %w", fleet.ErrNoWorker)
+
+	// Browser: the poller page in the waking state.
+	code, body, hdr := doReq(t, e.router, host, "/api/x", true)
+	if code != 503 || hdr.Get("X-Preview-Interim") != "waking" ||
+		!strings.Contains(body, "Waking the preview fleet") ||
+		!strings.Contains(body, "X-Preview-Poll") || strings.Contains(body, "failed to start") {
+		t.Fatalf("waking page: %d %v %q", code, hdr, body)
+	}
+
+	// Poll: stays interim (the page keeps polling; each poll re-registers
+	// demand), never flips to the terminal "failed" state.
+	code, body, hdr = doPoll(t, e.router, host, "/api/x", 0, 0)
+	if code != 503 || hdr.Get("X-Preview-Interim") != "waking" ||
+		!strings.Contains(body, `"state":"waking"`) {
+		t.Fatalf("waking poll: %d %v %q", code, hdr, body)
+	}
+
+	// API caller: retryable 503 with Retry-After, not a 502.
+	code, body, hdr = doReq(t, e.router, host, "/api/x", false)
+	if code != 503 || hdr.Get("Retry-After") == "" || !strings.Contains(body, "Waking") {
+		t.Fatalf("api caller: %d %v %q", code, hdr, body)
+	}
+
+	// A worker joined and the process is cold-starting: the same poll now
+	// lands in the "starting" state — the page transitions in place.
+	e.fake.err = nil
+	e.fake.slow = true
+	code, _, hdr = doPoll(t, e.router, host, "/api/x", 0, 0)
+	if code != 503 || hdr.Get("X-Preview-Interim") != "starting" {
+		t.Fatalf("transition to starting: %d %v", code, hdr)
 	}
 }
 

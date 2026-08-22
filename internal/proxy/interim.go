@@ -49,7 +49,7 @@ func (rt *Router) SetRunLogs(logs RunLogs) { rt.runLogs = logs }
 
 // interim describes one interim state of a preview address.
 type interim struct {
-	state  string // "building" | "starting" | "hydrating" | "failed"
+	state  string // "building" | "waking" | "starting" | "hydrating" | "failed"
 	title  string
 	detail string
 	// Non-empty hash: polls include the run log of this artifact side.
