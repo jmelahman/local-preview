@@ -144,17 +144,24 @@ func (c *Client) Heartbeat(ctx context.Context) (Heartbeat, error) {
 // post sends a JSON body to path and decodes an optional JSON response. A
 // non-2xx carries the worker's error text so the proxy renders the real reason.
 func (c *Client) post(ctx context.Context, path string, body, out any) error {
+	return postJSON(ctx, c.hc, c.base+path, c.secret, body, out)
+}
+
+// postJSON POSTs body as JSON to url with the shared-secret bearer header and
+// decodes an optional JSON response. A non-2xx carries the peer's error text.
+// Shared by both directions of the protocol (control→worker and worker→control).
+func postJSON(ctx context.Context, hc *http.Client, url, secret string, body, out any) error {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
 	if err != nil {
 		return err
 	}
-	req.Header.Set(AuthHeader, "Bearer "+c.secret)
+	req.Header.Set(AuthHeader, "Bearer "+secret)
 	req.Header.Set("Content-Type", "application/json")
-	res, err := c.hc.Do(req)
+	res, err := hc.Do(req)
 	if err != nil {
 		return err
 	}
@@ -167,4 +174,34 @@ func (c *Client) post(ctx context.Context, path string, body, out any) error {
 		return nil
 	}
 	return json.NewDecoder(res.Body).Decode(out)
+}
+
+// ControlClient is the worker-side transport to the control node's registration
+// endpoint — the reverse direction of Client. A self-registering worker calls
+// Register on boot and periodically (so a restarted control node re-learns it),
+// and Deregister on graceful shutdown.
+type ControlClient struct {
+	base   string // control node's control-API base URL, e.g. http://10.0.1.1:9101
+	secret string
+	hc     *http.Client
+}
+
+// NewControlClient dials the control node's registration API. A nil httpClient
+// gets a default with a sane timeout.
+func NewControlClient(baseURL, secret string, hc *http.Client) *ControlClient {
+	if hc == nil {
+		hc = &http.Client{Timeout: 15 * time.Second}
+	}
+	return &ControlClient{base: baseURL, secret: secret, hc: hc}
+}
+
+// Register announces this worker to the control node: endpoint is this worker's
+// own worker-API base URL, host the routable host its processes serve on.
+func (c *ControlClient) Register(ctx context.Context, endpoint, host string) error {
+	return postJSON(ctx, c.hc, c.base+pathRegister, c.secret, registerReq{Endpoint: endpoint, Host: host}, nil)
+}
+
+// Deregister removes this worker from the control node's fleet.
+func (c *ControlClient) Deregister(ctx context.Context, endpoint string) error {
+	return postJSON(ctx, c.hc, c.base+pathDeregister, c.secret, deregisterReq{Endpoint: endpoint}, nil)
 }

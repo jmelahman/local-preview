@@ -39,6 +39,17 @@ Start the orchestrator.
 | `--worker-endpoint` | `$PREVIEW_WORKER_ENDPOINT` | Control node only: a worker's private worker-API base URL, e.g. `http://10.0.1.5:9100` |
 | `--worker-endpoints` | `$PREVIEW_WORKER_ENDPOINTS` | Control node only: comma-separated worker-API base URLs forming the fleet; combined with `--worker-endpoint` |
 | `--worker-host` | (the endpoint host) | Control node only: the routable host a single worker's preview processes are reached on (per-endpoint host is derived from the URL when several are given) |
+| `--control-listen` | `$PREVIEW_CONTROL_LISTEN` | Control node only: private address to expose the worker-registration API on, e.g. `:9101`. Lets workers self-register instead of being hand-listed via `--worker-endpoint(s)`, so an autoscaled worker joins the fleet on boot (the fleet may even start empty and fill on demand). **Must not be internet/ALB-reachable.** Requires `--worker-secret` |
+| `--control-endpoint` | `$PREVIEW_CONTROL_ENDPOINT` | Worker node only: the control node's `--control-listen` base URL, e.g. `http://10.0.1.1:9101`. The worker registers itself there on boot and every ~20s, and deregisters on shutdown; empty disables self-registration |
+| `--worker-advertise` | `$PREVIEW_WORKER_ADVERTISE` | Worker node only: this worker's own worker-API base URL the control node should dial back, e.g. `http://10.0.1.5:9100`. Required with `--control-endpoint` unless it can be derived from a host-qualified `--worker-listen` |
+
+Two ways to assemble a worker tier: a **static** fleet, where the control node
+is handed every worker's URL via `--worker-endpoint(s)`; or a **self-registering**
+fleet, where the control node opens `--control-listen` and each worker announces
+itself via `--control-endpoint`. The latter is what lets a worker autoscaling
+group scale from zero — the control node needs no prior knowledge of a worker's
+address. Both paths join a worker to the same fleet by the same internal
+transport, and both are shared-secret authenticated on private listeners only.
 
 ## `preview repo`
 

@@ -21,7 +21,10 @@ import (
 // from SSM/config on both ends.
 const AuthHeader = "Authorization"
 
-// Route paths, versioned so the wire format can evolve.
+// Route paths, versioned so the wire format can evolve. The /worker/ paths are
+// served on the worker (control dials in); the /control/ paths are served on
+// the control node (a self-registering worker dials in) — opposite directions,
+// same shared secret and same private-listener-only rule.
 const (
 	pathEnsure    = "/internal/worker/v1/ensure"
 	pathStop      = "/internal/worker/v1/stop"
@@ -31,7 +34,28 @@ const (
 	pathReport    = "/internal/worker/v1/report"
 	pathRunLog    = "/internal/worker/v1/runlog"
 	pathConfigure = "/internal/worker/v1/configure"
+
+	pathRegister   = "/internal/control/v1/register"
+	pathDeregister = "/internal/control/v1/deregister"
 )
+
+// registerReq is a worker announcing itself to the control node. Endpoint is the
+// worker's own worker-API base URL (what the control node will dial back to
+// place work); Host is the routable host its preview processes serve on. These
+// are exactly what the static --worker-endpoint/--worker-host flags carry for a
+// hand-wired fleet — a self-registering worker supplies them itself, so an
+// autoscaled node the control node was never configured with can still join.
+type registerReq struct {
+	Endpoint string `json:"endpoint"`
+	Host     string `json:"host"`
+}
+
+// deregisterReq is a worker leaving the fleet (graceful shutdown / the
+// pre-terminate half of an ASG scale-in). Best-effort: an ungraceful exit just
+// lets the worker go stale and drop out of placement.
+type deregisterReq struct {
+	Endpoint string `json:"endpoint"`
+}
 
 // WireKey is the JSON form of a supervise.Key crossing the boundary.
 type WireKey struct {

@@ -121,6 +121,9 @@ type serveOptions struct {
 	workerEndpoint  string
 	workerEndpoints string
 	workerHost      string
+	controlListen   string
+	controlEndpoint string
+	workerAdvertise string
 }
 
 func Root() *cobra.Command {
@@ -175,6 +178,9 @@ func Root() *cobra.Command {
 	serve.Flags().StringVar(&opts.workerEndpoint, "worker-endpoint", "", "Control node only: a worker's private worker-API base URL, e.g. http://10.0.1.5:9100 (default: $PREVIEW_WORKER_ENDPOINT)")
 	serve.Flags().StringVar(&opts.workerEndpoints, "worker-endpoints", "", "Control node only: comma-separated worker-API base URLs forming the fleet, e.g. http://10.0.1.5:9100,http://10.0.1.6:9100 (default: $PREVIEW_WORKER_ENDPOINTS). Combined with --worker-endpoint")
 	serve.Flags().StringVar(&opts.workerHost, "worker-host", "", "Control node only: the routable host the worker's preview processes are reached on, e.g. 10.0.1.5 (default: the --worker-endpoint host)")
+	serve.Flags().StringVar(&opts.controlListen, "control-listen", "", "Control node only: private address to expose the worker-registration API on, e.g. :9101 — lets workers self-register instead of being hand-listed via --worker-endpoint(s), so an autoscaled worker joins the fleet on boot. MUST NOT be internet/ALB-reachable; empty disables it (default: $PREVIEW_CONTROL_LISTEN)")
+	serve.Flags().StringVar(&opts.controlEndpoint, "control-endpoint", "", "Worker node only: the control node's --control-listen base URL, e.g. http://10.0.1.1:9101 — this worker registers itself there on boot and periodically, and deregisters on shutdown (default: $PREVIEW_CONTROL_ENDPOINT; empty disables self-registration)")
+	serve.Flags().StringVar(&opts.workerAdvertise, "worker-advertise", "", "Worker node only: this worker's own worker-API base URL the control node should dial back, e.g. http://10.0.1.5:9100 — required with --control-endpoint unless it can be derived from a host-qualified --worker-listen (default: $PREVIEW_WORKER_ADVERTISE)")
 	cmd.AddCommand(serve)
 
 	addClientCommands(cmd)
@@ -249,6 +255,9 @@ func run(opts serveOptions) error {
 	envDefault(&opts.workerSecret, "PREVIEW_WORKER_SECRET")
 	envDefault(&opts.workerEndpoint, "PREVIEW_WORKER_ENDPOINT")
 	envDefault(&opts.workerEndpoints, "PREVIEW_WORKER_ENDPOINTS")
+	envDefault(&opts.controlListen, "PREVIEW_CONTROL_LISTEN")
+	envDefault(&opts.controlEndpoint, "PREVIEW_CONTROL_ENDPOINT")
+	envDefault(&opts.workerAdvertise, "PREVIEW_WORKER_ADVERTISE")
 	switch opts.role {
 	case "all", "control", "worker":
 	default:
@@ -259,6 +268,22 @@ func run(opts serveOptions) error {
 	}
 	if opts.workerListen != "" && opts.workerSecret == "" {
 		return fmt.Errorf("--worker-listen requires --worker-secret (the worker API is a remote-code-execution surface)")
+	}
+	if opts.controlListen != "" {
+		if opts.role != "control" {
+			return fmt.Errorf("--control-listen is a control-node flag; got --role=%q", opts.role)
+		}
+		if opts.workerSecret == "" {
+			return fmt.Errorf("--control-listen requires --worker-secret (worker registration steers preview traffic)")
+		}
+	}
+	if opts.controlEndpoint != "" {
+		if opts.role != "worker" && opts.role != "all" {
+			return fmt.Errorf("--control-endpoint is a worker-node flag; got --role=%q", opts.role)
+		}
+		if opts.workerSecret == "" {
+			return fmt.Errorf("--control-endpoint requires --worker-secret")
+		}
 	}
 	// Setting the client ID turns on interactive SSO for the dashboard, API,
 	// and previews; leaving it unset keeps the historical open behavior.
@@ -403,20 +428,22 @@ func run(opts serveOptions) error {
 	var backends proxy.Backends = supervise.LocalBackends{M: super}
 	var runtime api.RuntimeView = super
 	var reg *fleet.Registry
+	var registrar workerRegistrar
 	if opts.role == "control" {
-		if endpoints := workerEndpoints(opts); len(endpoints) > 0 {
+		// Build the fleet whenever this node routes to workers at all: either a
+		// static list (--worker-endpoint(s)) or a registration listener
+		// (--control-listen) that workers join at runtime — including an empty
+		// fleet that fills in on demand as workers scale up from zero.
+		endpoints := workerEndpoints(opts)
+		if len(endpoints) > 0 || opts.controlListen != "" {
 			reg = fleet.New(fleetStaleAfter)
+			registrar = workerRegistrar{reg: reg, super: super, secret: opts.workerSecret}
 			for _, ep := range endpoints {
 				host := opts.workerHost
 				if host == "" || len(endpoints) > 1 {
 					host = hostOf(ep)
 				}
-				wc := workerapi.NewClient(ep, host, opts.workerSecret, nil)
-				// The worker has no artifact rows: every ensure carries the
-				// control-DB-resolved run spec.
-				wc.SpecResolver = super.ResolveWireSpec
-				reg.Add(ep, wc)
-				log.Printf("role=control: registered worker %s (processes at %s)", ep, host)
+				_ = registrar.Register(ep, host)
 			}
 			if warmOverridden {
 				reg.SetMaxWarm(effectiveMaxWarm)
@@ -435,7 +462,7 @@ func run(opts serveOptions) error {
 			// not on this node's (otherwise idle) local manager.
 			queue.SetStarter(reg)
 		} else {
-			log.Printf("role=control with no --worker-endpoint(s): previews will serve locally")
+			log.Printf("role=control with no --worker-endpoint(s) or --control-listen: previews will serve locally")
 		}
 	}
 
@@ -552,6 +579,42 @@ func run(opts serveOptions) error {
 		}()
 	}
 
+	// Control node: accept worker self-registration. Same RCE-adjacent trust
+	// model as the worker API — private listener, shared-secret only, never
+	// ALB-reachable. Only started when the fleet registry exists.
+	var controlSrv *http.Server
+	if opts.controlListen != "" && reg != nil {
+		if isPublicBind(opts.controlListen) {
+			log.Printf("WARNING: --control-listen %q binds all interfaces — worker registration steers preview traffic and must be firewalled to the worker subnet only (private subnet / security group)",
+				opts.controlListen)
+		}
+		controlSrv = &http.Server{
+			Addr:              opts.controlListen,
+			Handler:           workerapi.NewControlServer(registrar, opts.workerSecret).Handler(),
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+		go func() {
+			log.Printf("control registration API listening on %s (private; shared-secret auth)", opts.controlListen)
+			if err := controlSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("control API listen: %v", err)
+			}
+		}()
+	}
+
+	// Worker node: self-register with the control node so an autoscaled worker
+	// the control node was never configured with joins the fleet on boot.
+	if opts.controlEndpoint != "" && (opts.role == "worker" || opts.role == "all") {
+		advertise, err := deriveAdvertise(opts)
+		if err != nil {
+			return err
+		}
+		cc := workerapi.NewControlClient(opts.controlEndpoint, opts.workerSecret, nil)
+		startWorkerRegistration(workCtx, cc, advertise, hostOf(advertise))
+		log.Printf("role=worker: self-registering with control at %s (advertising %s)", opts.controlEndpoint, advertise)
+	}
+
 	srv := &http.Server{
 		Addr:              opts.addr,
 		Handler:           recoverPanics(logRequests(compressResponses(router))),
@@ -583,6 +646,11 @@ func run(opts serveOptions) error {
 	if workerSrv != nil {
 		workerSrv.Shutdown(ctx) //nolint:errcheck
 	}
+	if controlSrv != nil {
+		controlSrv.Shutdown(ctx) //nolint:errcheck
+	}
+	// Cancelling workCtx signals the self-registration loop to send a
+	// best-effort deregister before the process exits.
 	stopWork()
 	// Drain in-flight artifact uploads before stopping processes: the build
 	// workers have stopped enqueuing (their context is cancelled), so this only
@@ -736,6 +804,10 @@ const (
 	fleetHeartbeatInterval = 10 * time.Second
 	fleetStaleAfter        = 30 * time.Second
 	fleetSignalInterval    = time.Minute
+	// workerRegisterInterval is how often a self-registering worker re-announces
+	// itself. Registration is idempotent; re-announcing lets a restarted control
+	// node re-learn a worker that is already up (registrations aren't persisted).
+	workerRegisterInterval = 20 * time.Second
 )
 
 // workerEndpoints returns the deduplicated worker-API base URLs for the control
@@ -840,4 +912,78 @@ func isPublicBind(addr string) bool {
 		return true
 	}
 	return false
+}
+
+// workerRegistrar adds workers to the fleet registry — the one place that turns
+// an endpoint into a workerapi.Client with the control-DB SpecResolver attached.
+// Shared by the static --worker-endpoint boot loop and the dynamic
+// self-registration handler so a hand-listed and a self-registered worker join
+// by exactly the same path. Satisfies workerapi.Registrar.
+type workerRegistrar struct {
+	reg    *fleet.Registry
+	super  *supervise.Manager
+	secret string
+}
+
+func (wr workerRegistrar) Register(endpoint, host string) error {
+	wc := workerapi.NewClient(endpoint, host, wr.secret, nil)
+	// The worker has no artifact rows: every ensure carries the control-DB
+	// resolved run spec.
+	wc.SpecResolver = wr.super.ResolveWireSpec
+	wr.reg.Add(endpoint, wc)
+	log.Printf("fleet: worker registered %s (processes at %s)", endpoint, host)
+	return nil
+}
+
+func (wr workerRegistrar) Deregister(endpoint string) error {
+	wr.reg.Remove(endpoint)
+	log.Printf("fleet: worker deregistered %s", endpoint)
+	return nil
+}
+
+// deriveAdvertise resolves the worker-API base URL a self-registering worker
+// tells the control node to dial back: the explicit --worker-advertise, else
+// derived from a host-qualified --worker-listen (":9100" with no host can't be
+// dialed remotely, so that case is an error the operator must resolve).
+func deriveAdvertise(opts serveOptions) (string, error) {
+	if opts.workerAdvertise != "" {
+		return opts.workerAdvertise, nil
+	}
+	host, port, err := net.SplitHostPort(opts.workerListen)
+	if err == nil && host != "" && host != "0.0.0.0" && host != "127.0.0.1" && host != "localhost" && host != "::" {
+		return "http://" + net.JoinHostPort(host, port), nil
+	}
+	return "", fmt.Errorf("--control-endpoint requires --worker-advertise (this worker's routable worker-API URL); it cannot be derived from --worker-listen %q", opts.workerListen)
+}
+
+// startWorkerRegistration announces this worker to the control node immediately
+// and every workerRegisterInterval, and sends a best-effort deregister when ctx
+// is cancelled (graceful shutdown). Returns immediately.
+func startWorkerRegistration(ctx context.Context, cc *workerapi.ControlClient, endpoint, host string) {
+	register := func() {
+		rctx, cancel := context.WithTimeout(ctx, workerRegisterInterval)
+		defer cancel()
+		if err := cc.Register(rctx, endpoint, host); err != nil {
+			log.Printf("worker registration: %v (will retry)", err)
+		}
+	}
+	go func() {
+		register()
+		t := time.NewTicker(workerRegisterInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				// Deregister with a fresh short-lived context — ctx is cancelled.
+				dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := cc.Deregister(dctx, endpoint); err != nil {
+					log.Printf("worker deregistration: %v", err)
+				}
+				cancel()
+				return
+			case <-t.C:
+				register()
+			}
+		}
+	}()
 }

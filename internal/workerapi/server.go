@@ -67,10 +67,17 @@ func (s *Server) Handler() http.Handler {
 
 // authed rejects any request without the shared secret, in constant time.
 func (s *Server) authed(next http.Handler) http.Handler {
-	want := "Bearer " + s.secret
+	return bearerAuth(s.secret, next)
+}
+
+// bearerAuth wraps next in a constant-time "Authorization: Bearer <secret>"
+// check, rejecting an empty secret outright. Shared by both directions of the
+// protocol (the worker's Server and the control node's ControlServer).
+func bearerAuth(secret string, next http.Handler) http.Handler {
+	want := "Bearer " + secret
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := r.Header.Get(AuthHeader)
-		if s.secret == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		if secret == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
