@@ -650,3 +650,46 @@ redirecting. Request cookies carry no attributes, so mirror onyx's own
 onyx's session default — the JWT's `exp` is the real authority, so an over-long
 cookie just forces a fresh login, never a stale-auth accept. Don't lean on the
 login-response widening alone: it covers first login, not the returning user.
+
+## Scale-from-zero is a demand signal, not a load signal; load must be suppressed at zero workers
+
+The worker tier autoscales on two custom CloudWatch metrics the control node
+publishes (`internal/cloudscale`). It is tempting to drive all of it off fleet
+utilization, but utilization is **degenerate at zero workers**: with no capacity,
+`fleet.Registry.LoadRatio` scores a saturated `1` — indistinguishable from a
+fleet that is genuinely full. So it cannot tell "idle at zero" from "slammed",
+and cannot launch the first node.
+
+The keystone is therefore **`UnservedDemand`** — the count of `EnsureRunning`
+calls that found no fresh worker (`ErrNoWorker`, tracked via
+`unservedDemand`/`DrainDemand`). A request arriving with nowhere to run is the
+unambiguous "someone wants a preview and there are zero workers" signal, and
+`place()` only returns `ErrNoWorker` when there are zero *fresh* workers (it
+falls back to `leastLoaded` when workers are merely full), so demand ≥ 1 means
+exactly that. This metric is published **every interval, including 0**, so a gap
+means the control node is down — the demand alarm treats missing data as
+`notBreaching`.
+
+`FleetLoad` (utilization %) drives scale-out-under-load and scale-in-when-idle,
+but it must be **published only when at least one worker is fresh**
+(`LoadSample` returns `(0, 0)` at zero workers, and `publishMetrics` skips the
+datum). Publish a `0` at zero workers and the scale-in alarm fires on an empty
+fleet it can do nothing about, sitting in ALARM forever. The scale-in alarm
+likewise treats missing data as `notBreaching` — a gap means zero workers, and
+there is nothing to reclaim.
+
+Two more invariants around it:
+
+- **Drain-aware scale-in via instance protection, keyed off the fleet, not an
+  AWS query.** The control node scale-in-protects a worker with `Running > 0`
+  (`BusyByInstance`) so an ASG scale-in drains an idle node instead of killing a
+  preview. It derives busy-ness from the live registry, so the IAM grant is only
+  `cloudwatch:PutMetricData` (namespace-conditioned) + `autoscaling:SetInstance-
+  Protection` (ASG-scoped) — **no** `DescribeAutoScalingInstances`. Don't add a
+  describe call and widen the role; the fleet already knows who is busy.
+- **The ASG name reaching `user_data` must be a plan-time literal.** The control
+  node's `--worker-asg-name` is rendered into `user_data`; use the literal
+  `"${var.name}-worker"`, never `aws_autoscaling_group.worker[0].name`. A
+  resource reference renders the script `(known after apply)` and silently
+  defeats `user_data_replace_on_change` — the same trap as the bucket-name entry
+  above.

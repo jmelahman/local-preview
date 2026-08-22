@@ -12,8 +12,10 @@ import (
 // dynamic worker joins by the same path a hand-listed one does.
 type Registrar interface {
 	// Register adds (or replaces) a worker by its advertised worker-API
-	// endpoint, reaching its preview processes at host.
-	Register(endpoint, host string) error
+	// endpoint, reaching its preview processes at host. instanceID is the
+	// worker's cloud instance-id when it has one (used for scale-in
+	// protection), empty otherwise.
+	Register(endpoint, host, instanceID string) error
 	// Deregister removes a worker that is leaving the fleet.
 	Deregister(endpoint string) error
 }
@@ -60,7 +62,7 @@ func (s *ControlServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: endpoint has no host and none given", http.StatusBadRequest)
 		return
 	}
-	if err := s.reg.Register(req.Endpoint, host); err != nil {
+	if err := s.reg.Register(req.Endpoint, host, req.InstanceID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

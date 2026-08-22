@@ -184,6 +184,11 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   host-only cookie the preview never receives, so the dance has to mint a
   `Domain=.<preview-domain>` copy before redirecting or the browser loops
   `preview/app → canonical/auth/login → preview/app` forever.
+- Scale-from-zero rides on unserved demand, not load — `LoadRatio` is degenerate
+  at zero workers (idle and saturated both read as full); publish `FleetLoad`
+  only when a worker exists (else the scale-in alarm fires on an empty fleet),
+  drive scale-in protection off the live fleet (no `DescribeAutoScalingInstances`
+  grant), and keep the ASG name reaching `user_data` a plan-time literal.
 - A `nofail` data volume must gate the service that bind-mounts it — without
   `RequiresMountsFor=`, a boot that races the volume attach starts the
   orchestrator on an empty dir with a fresh SQLite DB, and a later mount can't

@@ -89,6 +89,11 @@ locals {
   worker_autoscale = var.workers != null && var.workers.autoscale != null
   worker_static    = var.workers != null && var.workers.autoscale == null
 
+  # CloudWatch namespace for the fleet autoscaling metrics. One source of truth
+  # for the control node's --metrics-namespace flag, the IAM PutMetricData
+  # condition, and the scaling alarms' namespace.
+  metrics_namespace = "LocalPreview"
+
   # The instance types the elastic tier's mixed-instances policy draws from:
   # the explicit list when given, else the single instance_type. The launch
   # template still names instance_type as its own default, but the ASG's
@@ -110,6 +115,16 @@ locals {
       # Accept worker self-registrations on the control node's pinned private
       # address; workers dial it to join and leave the fleet.
       "--control-listen", "${var.private_ip}:${var.workers.control_port}",
+      # Publish fleet autoscaling metrics (UnservedDemand, FleetLoad) to
+      # CloudWatch under this ASG's name and reconcile scale-in protection on
+      # busy workers. The control node reaches the AWS APIs via its instance
+      # role over host-network IMDS (hop limit 1). The ASG name is the literal
+      # "${var.name}-worker" — not aws_autoscaling_group.worker[0].name — so it
+      # stays known at plan time; a resource reference would render user_data
+      # "(known after apply)" and silently defeat user_data_replace_on_change.
+      "--worker-asg-name", "${var.name}-worker",
+      "--aws-region", data.aws_region.current.name,
+      "--metrics-namespace", local.metrics_namespace,
       ] : [
       "--worker-endpoints", join(",", local.worker_endpoints),
     ],
@@ -241,6 +256,42 @@ resource "aws_iam_instance_profile" "instance" {
   name = var.name
   role = aws_iam_role.instance.name
   tags = local.tags
+}
+
+# Control-node autoscaling permissions: publish the fleet metrics and
+# reconcile scale-in protection on busy workers. Only the elastic tier's
+# control node needs these — the cloudscale publisher (cmd/server) calls exactly
+# PutMetricData and SetInstanceProtection, nothing else.
+data "aws_iam_policy_document" "autoscale" {
+  count = local.worker_autoscale ? 1 : 0
+
+  # PutMetricData has no resource-level ARN; scope it to our namespace with a
+  # condition so this role can't write metrics into any other namespace.
+  statement {
+    actions   = ["cloudwatch:PutMetricData"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "cloudwatch:namespace"
+      values   = [local.metrics_namespace]
+    }
+  }
+
+  # Drain-aware scale-in: protect a worker that is serving a preview so the ASG
+  # reclaims an idle node instead. Scoped to this deployment's worker ASG.
+  statement {
+    actions   = ["autoscaling:SetInstanceProtection"]
+    resources = [aws_autoscaling_group.worker[0].arn]
+  }
+}
+
+resource "aws_iam_role_policy" "autoscale" {
+  count = local.worker_autoscale ? 1 : 0
+
+  name   = "${var.name}-autoscale"
+  role   = aws_iam_role.instance.id
+  policy = data.aws_iam_policy_document.autoscale[0].json
 }
 
 resource "aws_ebs_volume" "data" {
@@ -749,16 +800,18 @@ resource "aws_instance" "worker" {
   }
 
   user_data_base64 = base64gzip(templatefile("${path.module}/worker-data.sh.tftpl", {
-    aws_region  = data.aws_region.current.name
-    image       = var.image
-    data_dir    = var.data_dir
-    private_ip  = var.workers.private_ips[count.index]
-    api_port    = var.workers.api_port
-    max_warm    = var.workers.max_warm
-    server_args = join(" ", var.workers.extra_server_args)
-    worker_ssm  = var.workers.secret_ssm_parameter
-    secret_env  = var.secret_env_ssm_parameters
-    warm_images = var.workers.warm_images
+    aws_region      = data.aws_region.current.name
+    image           = var.image
+    data_dir        = var.data_dir
+    private_ip      = var.workers.private_ips[count.index]
+    api_port        = var.workers.api_port
+    max_warm        = var.workers.max_warm
+    warm_per_gb     = var.workers.warm_per_gb
+    warm_reserve_gb = var.workers.warm_reserve_gb
+    server_args     = join(" ", var.workers.extra_server_args)
+    worker_ssm      = var.workers.secret_ssm_parameter
+    secret_env      = var.secret_env_ssm_parameters
+    warm_images     = var.workers.warm_images
     # Static workers are hand-listed on the control node via --worker-endpoints,
     # so they don't self-register. Only the elastic tier sets this.
     control_endpoint = ""
@@ -845,15 +898,17 @@ resource "aws_launch_template" "worker" {
   # preserve (unlike the static tier's persistent/stop request).
 
   user_data = base64gzip(templatefile("${path.module}/worker-data.sh.tftpl", {
-    aws_region  = data.aws_region.current.name
-    image       = var.image
-    data_dir    = var.data_dir
-    api_port    = var.workers.api_port
-    max_warm    = var.workers.max_warm
-    server_args = join(" ", var.workers.extra_server_args)
-    worker_ssm  = var.workers.secret_ssm_parameter
-    secret_env  = var.secret_env_ssm_parameters
-    warm_images = var.workers.warm_images
+    aws_region      = data.aws_region.current.name
+    image           = var.image
+    data_dir        = var.data_dir
+    api_port        = var.workers.api_port
+    max_warm        = var.workers.max_warm
+    warm_per_gb     = var.workers.warm_per_gb
+    warm_reserve_gb = var.workers.warm_reserve_gb
+    server_args     = join(" ", var.workers.extra_server_args)
+    worker_ssm      = var.workers.secret_ssm_parameter
+    secret_env      = var.secret_env_ssm_parameters
+    warm_images     = var.workers.warm_images
     # No fixed address — the worker reads its private IP from IMDS at boot.
     private_ip = ""
     # Self-register with the control node's pinned private address.
@@ -961,4 +1016,147 @@ resource "aws_autoscaling_group" "worker" {
       propagate_at_launch = true
     }
   }
+}
+
+# ---------------------------------------------------------------------------
+# Worker autoscaling policies + alarms. The control node publishes two custom
+# metrics (namespace local.metrics_namespace, dimension AutoScalingGroupName):
+#
+#   UnservedDemand — count of placement attempts that found no fresh worker.
+#     The scale-FROM-ZERO signal: LoadRatio is degenerate at zero workers (idle
+#     and saturated both read as full), so a request arriving with nowhere to
+#     run is what launches the first node.
+#   FleetLoad — utilization %, published only while >=1 worker is fresh. Drives
+#     scale-out under load and scale-in when idle.
+#
+# desired_capacity is owned by these policies at runtime (the ASG ignores
+# changes to it), so the fleet rests at min_size and grows on demand.
+# ---------------------------------------------------------------------------
+
+# Scale out on unmet demand — including from zero. Step scaling proportional to
+# how many requests are going unserved, so a burst of N simultaneous first-hits
+# doesn't take N minutes to satisfy one node at a time.
+resource "aws_autoscaling_policy" "scale_out_demand" {
+  count = local.worker_autoscale ? 1 : 0
+
+  name                      = "${var.name}-worker-scale-out-demand"
+  autoscaling_group_name    = aws_autoscaling_group.worker[0].name
+  policy_type               = "StepScaling"
+  adjustment_type           = "ChangeInCapacity"
+  metric_aggregation_type   = "Maximum"
+  estimated_instance_warmup = 180
+
+  # Bounds are relative to the alarm threshold (1): [1,3)->+1, [3,5)->+2, 5+->+3.
+  step_adjustment {
+    metric_interval_lower_bound = 0
+    metric_interval_upper_bound = 2
+    scaling_adjustment          = 1
+  }
+  step_adjustment {
+    metric_interval_lower_bound = 2
+    metric_interval_upper_bound = 4
+    scaling_adjustment          = 2
+  }
+  step_adjustment {
+    metric_interval_lower_bound = 4
+    scaling_adjustment          = 3
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "demand" {
+  count = local.worker_autoscale ? 1 : 0
+
+  alarm_name          = "${var.name}-worker-unserved-demand"
+  alarm_description   = "A preview request found no worker to place on — scale the fleet out (from zero if need be)."
+  namespace           = local.metrics_namespace
+  metric_name         = "UnservedDemand"
+  dimensions          = { AutoScalingGroupName = aws_autoscaling_group.worker[0].name }
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  threshold           = 1
+  # The metric is published every interval (0 when there's no demand), so a gap
+  # means the control node is down — not that demand is zero. Don't scale on it.
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_autoscaling_policy.scale_out_demand[0].arn]
+  tags               = local.tags
+}
+
+# Scale out when the running fleet is hot, so demand doesn't have to go fully
+# unserved before more capacity arrives.
+resource "aws_autoscaling_policy" "scale_out_load" {
+  count = local.worker_autoscale ? 1 : 0
+
+  name                      = "${var.name}-worker-scale-out-load"
+  autoscaling_group_name    = aws_autoscaling_group.worker[0].name
+  policy_type               = "StepScaling"
+  adjustment_type           = "ChangeInCapacity"
+  metric_aggregation_type   = "Average"
+  estimated_instance_warmup = 180
+
+  step_adjustment {
+    metric_interval_lower_bound = 0
+    scaling_adjustment          = 1
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "load_high" {
+  count = local.worker_autoscale ? 1 : 0
+
+  alarm_name          = "${var.name}-worker-load-high"
+  alarm_description   = "Fleet utilization is high — add a worker."
+  namespace           = local.metrics_namespace
+  metric_name         = "FleetLoad"
+  dimensions          = { AutoScalingGroupName = aws_autoscaling_group.worker[0].name }
+  statistic           = "Average"
+  period              = 60
+  evaluation_periods  = 2
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 70
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_autoscaling_policy.scale_out_load[0].arn]
+  tags                = local.tags
+}
+
+# Scale in when the fleet sits idle. Busy workers are scale-in-protected by the
+# control node, so the ASG reclaims an idle node rather than killing a preview;
+# a long evaluation window keeps warm-but-idle capacity around a while before
+# giving it up (the on-demand-from-zero cost model — a little warmth retained
+# against the next request).
+resource "aws_autoscaling_policy" "scale_in" {
+  count = local.worker_autoscale ? 1 : 0
+
+  name                      = "${var.name}-worker-scale-in"
+  autoscaling_group_name    = aws_autoscaling_group.worker[0].name
+  policy_type               = "StepScaling"
+  adjustment_type           = "ChangeInCapacity"
+  metric_aggregation_type   = "Average"
+  estimated_instance_warmup = 180
+
+  # Below the threshold (upper bound 0 == threshold): remove one node.
+  step_adjustment {
+    metric_interval_upper_bound = 0
+    scaling_adjustment          = -1
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "load_low" {
+  count = local.worker_autoscale ? 1 : 0
+
+  alarm_name          = "${var.name}-worker-load-low"
+  alarm_description   = "Fleet utilization is low for a sustained window — reclaim an idle worker."
+  namespace           = local.metrics_namespace
+  metric_name         = "FleetLoad"
+  dimensions          = { AutoScalingGroupName = aws_autoscaling_group.worker[0].name }
+  statistic           = "Average"
+  period              = 60
+  evaluation_periods  = 10
+  comparison_operator = "LessThanThreshold"
+  threshold           = 20
+  # No data means zero workers (load isn't published at zero) — nothing to
+  # scale in, so a gap must not breach.
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_autoscaling_policy.scale_in[0].arn]
+  tags               = local.tags
 }

@@ -42,6 +42,10 @@ Start the orchestrator.
 | `--control-listen` | `$PREVIEW_CONTROL_LISTEN` | Control node only: private address to expose the worker-registration API on, e.g. `:9101`. Lets workers self-register instead of being hand-listed via `--worker-endpoint(s)`, so an autoscaled worker joins the fleet on boot (the fleet may even start empty and fill on demand). **Must not be internet/ALB-reachable.** Requires `--worker-secret` |
 | `--control-endpoint` | `$PREVIEW_CONTROL_ENDPOINT` | Worker node only: the control node's `--control-listen` base URL, e.g. `http://10.0.1.1:9101`. The worker registers itself there on boot and every ~20s, and deregisters on shutdown; empty disables self-registration |
 | `--worker-advertise` | `$PREVIEW_WORKER_ADVERTISE` | Worker node only: this worker's own worker-API base URL the control node should dial back, e.g. `http://10.0.1.5:9100`. Required with `--control-endpoint` unless it can be derived from a host-qualified `--worker-listen` |
+| `--worker-instance-id` | `$PREVIEW_WORKER_INSTANCE_ID` | Worker node only: this worker's cloud instance-id (EC2 instance-id), sent with self-registration so the control node can scale-in-protect the node while it serves previews. Empty for a non-cloud worker |
+| `--worker-asg-name` | `$PREVIEW_WORKER_ASG_NAME` | Control node only: the worker tier's EC2 Auto Scaling group name. Set it to publish fleet autoscaling metrics (`UnservedDemand`, `FleetLoad`) to CloudWatch and reconcile scale-in protection on busy workers; empty disables the autoscaling integration |
+| `--aws-region` | `$AWS_REGION` | Control node only: AWS region for the CloudWatch/Auto Scaling API. Defaults to the ambient SDK region |
+| `--metrics-namespace` | `LocalPreview` | Control node only: CloudWatch namespace for the published fleet metrics |
 
 Two ways to assemble a worker tier: a **static** fleet, where the control node
 is handed every worker's URL via `--worker-endpoint(s)`; or a **self-registering**
@@ -50,6 +54,15 @@ itself via `--control-endpoint`. The latter is what lets a worker autoscaling
 group scale from zero — the control node needs no prior knowledge of a worker's
 address. Both paths join a worker to the same fleet by the same internal
 transport, and both are shared-secret authenticated on private listeners only.
+
+With `--worker-asg-name` set, the control node closes the autoscaling loop: it
+publishes `UnservedDemand` (a request that found no worker — the scale-from-zero
+signal) and `FleetLoad` (utilization, published only once a worker exists) to
+CloudWatch, and reconciles EC2 scale-in protection so an ASG scale-in drains an
+idle node instead of terminating one mid-preview. A worker passes its
+`--worker-instance-id` so the control node knows which instance to protect. The
+scaling policies and alarms themselves live in your infrastructure (see the
+[Terraform example](https://github.com/jmelahman/local-preview/tree/master/examples/terraform)).
 
 ## `preview repo`
 

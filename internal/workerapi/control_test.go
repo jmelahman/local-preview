@@ -10,23 +10,25 @@ import (
 
 // fakeRegistrar records register/deregister calls.
 type fakeRegistrar struct {
-	mu      sync.Mutex
-	added   map[string]string // endpoint -> host
-	removed []string
-	regErr  error
+	mu        sync.Mutex
+	added     map[string]string // endpoint -> host
+	instances map[string]string // endpoint -> instance-id
+	removed   []string
+	regErr    error
 }
 
 func newFakeRegistrar() *fakeRegistrar {
-	return &fakeRegistrar{added: map[string]string{}}
+	return &fakeRegistrar{added: map[string]string{}, instances: map[string]string{}}
 }
 
-func (f *fakeRegistrar) Register(endpoint, host string) error {
+func (f *fakeRegistrar) Register(endpoint, host, instanceID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.regErr != nil {
 		return f.regErr
 	}
 	f.added[endpoint] = host
+	f.instances[endpoint] = instanceID
 	return nil
 }
 
@@ -57,12 +59,15 @@ func TestRegisterDeregisterRoundTrip(t *testing.T) {
 	c, done := testControlServer(t, reg)
 	defer done()
 
-	const ep, host = "http://10.0.1.5:9100", "10.0.1.5"
-	if err := c.Register(context.Background(), ep, host); err != nil {
+	const ep, host, iid = "http://10.0.1.5:9100", "10.0.1.5", "i-0abc123"
+	if err := c.Register(context.Background(), ep, host, iid); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := reg.host(ep); !ok || got != host {
 		t.Fatalf("after register: host=%q ok=%v, want %q true", got, ok, host)
+	}
+	if got := reg.instances[ep]; got != iid {
+		t.Fatalf("after register: instance-id=%q, want %q", got, iid)
 	}
 
 	if err := c.Deregister(context.Background(), ep); err != nil {
@@ -81,7 +86,7 @@ func TestRegisterDerivesHostFromEndpoint(t *testing.T) {
 	defer done()
 
 	const ep = "http://10.0.1.9:9100"
-	if err := c.Register(context.Background(), ep, ""); err != nil {
+	if err := c.Register(context.Background(), ep, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := reg.host(ep); got != "10.0.1.9" {
@@ -94,7 +99,7 @@ func TestRegisterRejectsEmptyEndpoint(t *testing.T) {
 	c, done := testControlServer(t, reg)
 	defer done()
 
-	if err := c.Register(context.Background(), "", ""); err == nil {
+	if err := c.Register(context.Background(), "", "", ""); err == nil {
 		t.Fatal("want error for empty endpoint")
 	}
 	if len(reg.added) != 0 {
@@ -111,7 +116,7 @@ func TestControlServerRejectsBadSecret(t *testing.T) {
 
 	// Wrong secret via a client dialing the same server.
 	bad := NewControlClient(srv.URL, "wrong", srv.Client())
-	if err := bad.Register(context.Background(), "http://10.0.1.5:9100", "10.0.1.5"); err == nil {
+	if err := bad.Register(context.Background(), "http://10.0.1.5:9100", "10.0.1.5", ""); err == nil {
 		t.Fatal("want unauthorized with wrong secret")
 	}
 	if len(reg.added) != 0 {
@@ -137,7 +142,7 @@ func TestControlServerEmptySecretFailsClosed(t *testing.T) {
 	defer srv.Close()
 
 	c := NewControlClient(srv.URL, "", srv.Client())
-	if err := c.Register(context.Background(), "http://10.0.1.5:9100", "10.0.1.5"); err == nil {
+	if err := c.Register(context.Background(), "http://10.0.1.5:9100", "10.0.1.5", ""); err == nil {
 		t.Fatal("want rejection when server secret is empty")
 	}
 }

@@ -51,7 +51,7 @@ func regFresh(t *testing.T, hbs map[string]workerapi.Heartbeat) (*Registry, map[
 	for id, hb := range hbs {
 		be := &fakeBackend{id: id}
 		bes[id] = be
-		r.Add(id, be)
+		r.Add(id, "", be)
 		r.recordHeartbeat(id, hb, time.Now(), true)
 	}
 	return r, bes
@@ -123,7 +123,7 @@ func TestNoWorkersOrAllStale(t *testing.T) {
 		t.Fatalf("empty registry err = %v, want ErrNoWorker", err)
 	}
 	// A stale heartbeat is as good as gone.
-	r.Add("w", &fakeBackend{id: "w"})
+	r.Add("w", "", &fakeBackend{id: "w"})
 	r.recordHeartbeat("w", workerapi.Heartbeat{MaxWarm: 10}, time.Now().Add(-time.Hour), true)
 	if w := r.place(supervise.BackendKey(1, "h")); w != nil {
 		t.Fatalf("placed on stale worker %s", w.id)

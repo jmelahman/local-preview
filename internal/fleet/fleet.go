@@ -46,6 +46,10 @@ type Backend interface {
 type workerState struct {
 	id string
 	be Backend
+	// instanceID is the worker's cloud instance-id (empty for a hand-wired or
+	// non-cloud worker). The autoscaler uses it to scale-in-protect a worker
+	// that is currently serving previews.
+	instanceID string
 
 	mu        sync.Mutex
 	hb        workerapi.Heartbeat
@@ -89,6 +93,14 @@ type Registry struct {
 	desiredMaxWarm atomic.Int64
 	desiredMinWarm atomic.Int64
 	desiredIdleSec atomic.Int64
+
+	// unservedDemand counts EnsureRunning calls that found no worker to place on
+	// (ErrNoWorker) since the last DrainDemand. It is the scale-from-zero
+	// signal: LoadRatio reads 1 with an empty fleet (see its doc), which can't
+	// distinguish "idle at zero" from "saturated", so demand — a request that
+	// arrived with nowhere to run — is what tells the autoscaler to lift the
+	// fleet off zero.
+	unservedDemand atomic.Int64
 }
 
 // New returns an empty registry. A worker whose last heartbeat is older than
@@ -121,11 +133,12 @@ func (r *Registry) SetIdleOverride(d time.Duration) {
 	r.desiredIdleSec.Store(int64(max(d, 0) / time.Second))
 }
 
-// Add registers (or replaces) a worker by id.
-func (r *Registry) Add(id string, be Backend) {
+// Add registers (or replaces) a worker by id. instanceID is the worker's cloud
+// instance-id (empty if it has none), used for scale-in protection.
+func (r *Registry) Add(id, instanceID string, be Backend) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.workers[id] = &workerState{id: id, be: be}
+	r.workers[id] = &workerState{id: id, instanceID: instanceID, be: be}
 }
 
 // Remove deregisters a worker.
@@ -229,6 +242,7 @@ func (r *Registry) StartHeartbeats(ctx context.Context, interval time.Duration) 
 func (r *Registry) EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (string, error) {
 	w := r.place(k)
 	if w == nil {
+		r.unservedDemand.Add(1)
 		return "", ErrNoWorker
 	}
 	return w.be.EnsureRunning(ctx, k, repoName)
@@ -324,6 +338,68 @@ func (r *Registry) LoadRatio() float64 {
 		return 1
 	}
 	return float64(running) / float64(capacity)
+}
+
+// DrainDemand returns the number of unserved-placement (ErrNoWorker) events
+// since the last call and resets the counter to zero. The autoscaler publishes
+// it once per interval as the scale-from-zero metric.
+func (r *Registry) DrainDemand() int64 {
+	return r.unservedDemand.Swap(0)
+}
+
+// LoadSample returns fleet utilization as a percentage (committed warm slots ÷
+// bounded capacity × 100) alongside the count of fresh workers. It exists so
+// the autoscaler can tell an empty fleet (workers == 0) — which LoadRatio
+// scores as a saturated 1, and which is driven off zero by demand not load —
+// apart from a fleet that is genuinely busy or idle. Semantics otherwise match
+// LoadRatio: an unbounded fresh worker means spare room, so load 0.
+func (r *Registry) LoadSample() (loadPct float64, workers int) {
+	now := time.Now()
+	var running, capacity int
+	var unbounded bool
+	for _, w := range r.list() {
+		hb, last, reachable := w.snapshot()
+		if !r.fresh(last, reachable, now) {
+			continue
+		}
+		workers++
+		running += hb.Running
+		if hb.MaxWarm > 0 {
+			capacity += hb.MaxWarm
+		} else {
+			unbounded = true
+		}
+	}
+	switch {
+	case workers == 0:
+		return 0, 0
+	case unbounded:
+		return 0, workers
+	case capacity <= 0:
+		return 100, workers
+	default:
+		return float64(running) / float64(capacity) * 100, workers
+	}
+}
+
+// BusyByInstance maps each fresh worker's cloud instance-id to whether it is
+// serving at least one preview (Running > 0). Workers with no instance-id are
+// omitted — there is nothing to protect. The autoscaler scale-in-protects the
+// busy ones so an ASG scale-in drains idle nodes instead of killing a preview.
+func (r *Registry) BusyByInstance() map[string]bool {
+	now := time.Now()
+	out := map[string]bool{}
+	for _, w := range r.list() {
+		if w.instanceID == "" {
+			continue
+		}
+		hb, last, reachable := w.snapshot()
+		if !r.fresh(last, reachable, now) {
+			continue
+		}
+		out[w.instanceID] = hb.Running > 0
+	}
+	return out
 }
 
 func (r *Registry) fresh(last time.Time, reachable bool, now time.Time) bool {

@@ -88,6 +88,8 @@ for lookup order and caching semantics.
 | `--preview-base-url` | (derived from `--preview-domain` and `--addr`) | Public base URL of previews, e.g. `https://preview.example.com`. Sets the scheme, domain, and port of the URLs the server hands out — see [hosting behind a proxy](#hosting-behind-a-proxy) |
 | `--build-concurrency` | `2` | Number of deploys built in parallel |
 | `--max-warm` | `8` | Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (`0` = unlimited) |
+| `--max-warm-per-gb` | `0` | Derive `--max-warm` from this machine's RAM instead of a fixed number: `(total GiB − --max-warm-reserve-gb) × this`, floored at 1. Lets one worker launch template drive a mixed-instances fleet where each node sizes its warm cap to the instance it landed on; `0` keeps the fixed `--max-warm` (`$PREVIEW_MAX_WARM_PER_GB`) |
+| `--max-warm-reserve-gb` | `1` | GiB of RAM held back for the OS, orchestrator, and cache when `--max-warm-per-gb` derives the cap (`$PREVIEW_MAX_WARM_RESERVE_GB`) |
 | `--poll-interval` | `1m` | How often [watched repos](/guide/triggers#watched-repos) are fetched for new commits (`0` disables watching) |
 | `--github-webhook-secret` | (unset) | Shared secret validating [GitHub webhook](/guide/triggers#github-webhooks) deliveries; empty disables the endpoint. Prefer the environment variable — flags are visible in `ps` |
 | `--github-oidc-audience` | (unset) | Expected `aud` of [GitHub Actions OIDC](/guide/uploads#authenticating-with-github-actions-oidc) tokens. Setting it **requires uploads to authenticate**; use a value unique to this server (its URL is a good choice) |

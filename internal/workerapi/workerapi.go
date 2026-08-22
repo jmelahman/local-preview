@@ -48,6 +48,11 @@ const (
 type registerReq struct {
 	Endpoint string `json:"endpoint"`
 	Host     string `json:"host"`
+	// InstanceID is the worker's cloud instance identifier (EC2 instance-id),
+	// when it knows one. The control node uses it to set scale-in protection on
+	// busy workers so an autoscaling group drains idle nodes rather than
+	// terminating one mid-preview. Empty for a hand-wired or non-cloud worker.
+	InstanceID string `json:"instance_id,omitempty"`
 }
 
 // deregisterReq is a worker leaving the fleet (graceful shutdown / the

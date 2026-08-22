@@ -22,6 +22,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/api"
 	"github.com/jmelahman/local-preview/internal/build"
 	"github.com/jmelahman/local-preview/internal/clone"
+	"github.com/jmelahman/local-preview/internal/cloudscale"
 	"github.com/jmelahman/local-preview/internal/config"
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/fleet"
@@ -88,6 +89,8 @@ type serveOptions struct {
 	previewBaseURL   string
 	buildConcurrency int
 	maxWarm          int
+	maxWarmPerGB     float64
+	maxWarmReserveGB float64
 	pollInterval     time.Duration
 	githubSecret     string
 	githubOIDCAud    string
@@ -115,15 +118,19 @@ type serveOptions struct {
 	onyxAuthUpstream string
 	onyxAuthCookie   string
 
-	role            string
-	workerSecret    string
-	workerListen    string
-	workerEndpoint  string
-	workerEndpoints string
-	workerHost      string
-	controlListen   string
-	controlEndpoint string
-	workerAdvertise string
+	role             string
+	workerSecret     string
+	workerListen     string
+	workerEndpoint   string
+	workerEndpoints  string
+	workerHost       string
+	controlListen    string
+	controlEndpoint  string
+	workerAdvertise  string
+	workerInstanceID string
+	asgName          string
+	awsRegion        string
+	metricsNamespace string
 }
 
 func Root() *cobra.Command {
@@ -149,6 +156,8 @@ func Root() *cobra.Command {
 	serve.Flags().StringVar(&opts.previewBaseURL, "preview-base-url", "", "Public base URL of previews, e.g. https://preview.example.com — sets the scheme, domain, and port of generated preview URLs when the server sits behind a proxy (default: $PREVIEW_BASE_URL)")
 	serve.Flags().IntVar(&opts.buildConcurrency, "build-concurrency", 2, "Number of deploys built in parallel")
 	serve.Flags().IntVar(&opts.maxWarm, "max-warm", 8, "Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (0 = unlimited)")
+	serve.Flags().Float64Var(&opts.maxWarmPerGB, "max-warm-per-gb", 0, "Derive --max-warm from this machine's RAM instead of a fixed number: (total GiB - --max-warm-reserve-gb) × this, floored at 1. Lets one launch template drive a mixed-instances fleet where each worker sizes its warm cap to the instance it landed on (default: $PREVIEW_MAX_WARM_PER_GB; 0 disables, keeping --max-warm)")
+	serve.Flags().Float64Var(&opts.maxWarmReserveGB, "max-warm-reserve-gb", 1, "GiB of RAM held back for the OS, orchestrator, and cache when --max-warm-per-gb derives the cap (default: $PREVIEW_MAX_WARM_RESERVE_GB)")
 	serve.Flags().DurationVar(&opts.pollInterval, "poll-interval", watch.DefaultInterval, "How often watched repos are fetched for new commits (0 disables watching)")
 	serve.Flags().StringVar(&opts.githubSecret, "github-webhook-secret", "", "Shared secret validating GitHub webhook deliveries (default: $PREVIEW_GITHUB_WEBHOOK_SECRET; empty disables the endpoint)")
 	serve.Flags().StringVar(&opts.githubOIDCAud, "github-oidc-audience", "", "Expected audience of GitHub Actions OIDC tokens (default: $PREVIEW_GITHUB_OIDC_AUDIENCE); setting it requires uploads to authenticate with a valid token bound to the target repo")
@@ -181,6 +190,10 @@ func Root() *cobra.Command {
 	serve.Flags().StringVar(&opts.controlListen, "control-listen", "", "Control node only: private address to expose the worker-registration API on, e.g. :9101 — lets workers self-register instead of being hand-listed via --worker-endpoint(s), so an autoscaled worker joins the fleet on boot. MUST NOT be internet/ALB-reachable; empty disables it (default: $PREVIEW_CONTROL_LISTEN)")
 	serve.Flags().StringVar(&opts.controlEndpoint, "control-endpoint", "", "Worker node only: the control node's --control-listen base URL, e.g. http://10.0.1.1:9101 — this worker registers itself there on boot and periodically, and deregisters on shutdown (default: $PREVIEW_CONTROL_ENDPOINT; empty disables self-registration)")
 	serve.Flags().StringVar(&opts.workerAdvertise, "worker-advertise", "", "Worker node only: this worker's own worker-API base URL the control node should dial back, e.g. http://10.0.1.5:9100 — required with --control-endpoint unless it can be derived from a host-qualified --worker-listen (default: $PREVIEW_WORKER_ADVERTISE)")
+	serve.Flags().StringVar(&opts.workerInstanceID, "worker-instance-id", "", "Worker node only: this worker's cloud instance-id (EC2 instance-id), passed to the control node with self-registration so it can scale-in-protect this node while it serves previews (default: $PREVIEW_WORKER_INSTANCE_ID; empty for a non-cloud worker)")
+	serve.Flags().StringVar(&opts.asgName, "worker-asg-name", "", "Control node only: the worker tier's EC2 Auto Scaling group name. Set it to publish fleet autoscaling metrics (UnservedDemand, FleetLoad) to CloudWatch and reconcile scale-in protection on busy workers (default: $PREVIEW_WORKER_ASG_NAME; empty disables autoscaling integration)")
+	serve.Flags().StringVar(&opts.awsRegion, "aws-region", "", "Control node only: AWS region for the CloudWatch/Auto Scaling autoscaling API. Defaults to the ambient SDK region (default: $AWS_REGION)")
+	serve.Flags().StringVar(&opts.metricsNamespace, "metrics-namespace", "LocalPreview", "Control node only: CloudWatch namespace for published fleet metrics")
 	cmd.AddCommand(serve)
 
 	addClientCommands(cmd)
@@ -258,6 +271,25 @@ func run(opts serveOptions) error {
 	envDefault(&opts.controlListen, "PREVIEW_CONTROL_LISTEN")
 	envDefault(&opts.controlEndpoint, "PREVIEW_CONTROL_ENDPOINT")
 	envDefault(&opts.workerAdvertise, "PREVIEW_WORKER_ADVERTISE")
+	envDefault(&opts.workerInstanceID, "PREVIEW_WORKER_INSTANCE_ID")
+	envDefault(&opts.asgName, "PREVIEW_WORKER_ASG_NAME")
+	if opts.awsRegion == "" {
+		opts.awsRegion = os.Getenv("AWS_REGION")
+	}
+	if opts.maxWarmPerGB == 0 {
+		if v := os.Getenv("PREVIEW_MAX_WARM_PER_GB"); v != "" {
+			if f, e := strconv.ParseFloat(v, 64); e == nil {
+				opts.maxWarmPerGB = f
+			}
+		}
+	}
+	if opts.maxWarmReserveGB == 1 { // still the compiled default
+		if v := os.Getenv("PREVIEW_MAX_WARM_RESERVE_GB"); v != "" {
+			if f, e := strconv.ParseFloat(v, 64); e == nil {
+				opts.maxWarmReserveGB = f
+			}
+		}
+	}
 	switch opts.role {
 	case "all", "control", "worker":
 	default:
@@ -331,6 +363,20 @@ func run(opts serveOptions) error {
 	gitMgr := gitrepo.NewManager(cfg.ReposDir())
 	super := supervise.New(database, files, cfg.LogsDir())
 	super.ReclaimOrphans()
+	// Memory-calibrated warm cap: when --max-warm-per-gb is set, derive the boot
+	// --max-warm from this machine's RAM so one launch template can serve a
+	// mixed-instances fleet of differently sized workers. This only sets the
+	// boot default; a dashboard-saved setting still overrides below.
+	if opts.maxWarmPerGB > 0 {
+		if mem, merr := readMemTotalBytes(); merr != nil {
+			log.Printf("warm calibration: reading memory failed (%v); keeping --max-warm %d", merr, opts.maxWarm)
+		} else {
+			n := warmFromMemory(mem, opts.maxWarmPerGB, opts.maxWarmReserveGB)
+			log.Printf("warm calibration: %d warm slots from %.1f GiB RAM (%.2f/GiB, %.1f GiB reserved); --max-warm %d superseded",
+				n, float64(mem)/(1<<30), opts.maxWarmPerGB, opts.maxWarmReserveGB, opts.maxWarm)
+			opts.maxWarm = n
+		}
+	}
 	// The warm cap: the --max-warm flag is the boot default, overridden by the
 	// dashboard-saved setting when one exists (the setting survives restarts
 	// and, via the fleet's reconcile loop, worker reboots).
@@ -443,7 +489,9 @@ func run(opts serveOptions) error {
 				if host == "" || len(endpoints) > 1 {
 					host = hostOf(ep)
 				}
-				_ = registrar.Register(ep, host)
+				// Hand-listed workers carry no instance-id — scale-in protection is
+				// only meaningful for autoscaled, self-registering nodes.
+				_ = registrar.Register(ep, host, "")
 			}
 			if warmOverridden {
 				reg.SetMaxWarm(effectiveMaxWarm)
@@ -456,6 +504,24 @@ func run(opts serveOptions) error {
 			}
 			reg.StartHeartbeats(workCtx, fleetHeartbeatInterval)
 			startFleetSignal(workCtx, reg)
+			// With an ASG named, publish the scale-from-zero (UnservedDemand) and
+			// load (FleetLoad) metrics to CloudWatch and reconcile scale-in
+			// protection on busy workers. Best-effort: a credential/region failure
+			// logs and leaves the fleet running without autoscaling integration.
+			if opts.asgName != "" {
+				pub, err := cloudscale.New(workCtx, reg, cloudscale.Config{
+					Region:    opts.awsRegion,
+					ASGName:   opts.asgName,
+					Namespace: opts.metricsNamespace,
+					Interval:  fleetSignalInterval,
+				})
+				if err != nil {
+					log.Printf("cloudscale: disabled (%v)", err)
+				} else {
+					go pub.Run(workCtx)
+					log.Printf("cloudscale: publishing fleet metrics for ASG %q (namespace %q)", opts.asgName, opts.metricsNamespace)
+				}
+			}
 			backends = reg
 			runtime = reg
 			// Freshly built deploys pre-warm on the worker traffic routes to,
@@ -611,8 +677,8 @@ func run(opts serveOptions) error {
 			return err
 		}
 		cc := workerapi.NewControlClient(opts.controlEndpoint, opts.workerSecret, nil)
-		startWorkerRegistration(workCtx, cc, advertise, hostOf(advertise))
-		log.Printf("role=worker: self-registering with control at %s (advertising %s)", opts.controlEndpoint, advertise)
+		startWorkerRegistration(workCtx, cc, advertise, hostOf(advertise), opts.workerInstanceID)
+		log.Printf("role=worker: self-registering with control at %s (advertising %s, instance %q)", opts.controlEndpoint, advertise, opts.workerInstanceID)
 	}
 
 	srv := &http.Server{
@@ -925,13 +991,13 @@ type workerRegistrar struct {
 	secret string
 }
 
-func (wr workerRegistrar) Register(endpoint, host string) error {
+func (wr workerRegistrar) Register(endpoint, host, instanceID string) error {
 	wc := workerapi.NewClient(endpoint, host, wr.secret, nil)
 	// The worker has no artifact rows: every ensure carries the control-DB
 	// resolved run spec.
 	wc.SpecResolver = wr.super.ResolveWireSpec
-	wr.reg.Add(endpoint, wc)
-	log.Printf("fleet: worker registered %s (processes at %s)", endpoint, host)
+	wr.reg.Add(endpoint, instanceID, wc)
+	log.Printf("fleet: worker registered %s (processes at %s, instance %q)", endpoint, host, instanceID)
 	return nil
 }
 
@@ -959,11 +1025,11 @@ func deriveAdvertise(opts serveOptions) (string, error) {
 // startWorkerRegistration announces this worker to the control node immediately
 // and every workerRegisterInterval, and sends a best-effort deregister when ctx
 // is cancelled (graceful shutdown). Returns immediately.
-func startWorkerRegistration(ctx context.Context, cc *workerapi.ControlClient, endpoint, host string) {
+func startWorkerRegistration(ctx context.Context, cc *workerapi.ControlClient, endpoint, host, instanceID string) {
 	register := func() {
 		rctx, cancel := context.WithTimeout(ctx, workerRegisterInterval)
 		defer cancel()
-		if err := cc.Register(rctx, endpoint, host); err != nil {
+		if err := cc.Register(rctx, endpoint, host, instanceID); err != nil {
 			log.Printf("worker registration: %v (will retry)", err)
 		}
 	}

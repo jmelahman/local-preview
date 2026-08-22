@@ -196,9 +196,11 @@ func NewControlClient(baseURL, secret string, hc *http.Client) *ControlClient {
 }
 
 // Register announces this worker to the control node: endpoint is this worker's
-// own worker-API base URL, host the routable host its processes serve on.
-func (c *ControlClient) Register(ctx context.Context, endpoint, host string) error {
-	return postJSON(ctx, c.hc, c.base+pathRegister, c.secret, registerReq{Endpoint: endpoint, Host: host}, nil)
+// own worker-API base URL, host the routable host its processes serve on, and
+// instanceID its cloud instance-id (empty if it has none) so the control node
+// can scale-in-protect it while busy.
+func (c *ControlClient) Register(ctx context.Context, endpoint, host, instanceID string) error {
+	return postJSON(ctx, c.hc, c.base+pathRegister, c.secret, registerReq{Endpoint: endpoint, Host: host, InstanceID: instanceID}, nil)
 }
 
 // Deregister removes this worker from the control node's fleet.

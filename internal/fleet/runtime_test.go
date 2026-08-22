@@ -106,7 +106,7 @@ func (c *confBackend) Configure(_ context.Context, cfg workerapi.WorkerConfig) e
 func TestHeartbeatReconcilesMaxWarm(t *testing.T) {
 	r := New(time.Minute)
 	be := &confBackend{got: make(chan int, 1), gotIdle: make(chan int, 1)}
-	r.Add("w", be) // Heartbeat reports zero values — the "boot flag" state
+	r.Add("w", "", be) // Heartbeat reports zero values — the "boot flag" state
 	r.SetMaxWarm(5)
 	r.SetIdleOverride(90 * time.Second)
 

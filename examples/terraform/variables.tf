@@ -386,8 +386,15 @@ variable "workers" {
     instance_types = optional(list(string), [])
     api_port       = optional(number, 9100)
     # Elastic tier only: the control node's worker-registration listener port.
-    control_port        = optional(number, 9101)
-    max_warm            = optional(number, 12)
+    control_port = optional(number, 9101)
+    max_warm     = optional(number, 12)
+    # Per-instance warm calibration. When warm_per_gb > 0 the worker derives its
+    # own warm cap from its RAM at boot — (MemTotal_GiB - warm_reserve_gb) *
+    # warm_per_gb, floored at 1 — instead of the fixed max_warm above. This is
+    # what lets one launch template serve a mixed-instances fleet where a larger
+    # node hosts proportionally more warm processes; 0 keeps the fixed max_warm.
+    warm_per_gb         = optional(number, 0)
+    warm_reserve_gb     = optional(number, 1)
     root_volume_size_gb = optional(number, 60)
     extra_server_args   = optional(list(string), [])
     stack_ingress_ports = optional(list(number), [])
