@@ -25,6 +25,7 @@ type Supervisor interface {
 	Running() int
 	MaxWarm() int
 	SetMaxWarm(n int)
+	DrainEvents() []supervise.ProcEventRecord
 	MinWarm() int
 	SetMinWarm(n int)
 	IdleOverride() time.Duration
@@ -167,6 +168,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		Draining:           s.draining.Load(),
 		WarmHits:           warm,
 		ColdStarts:         cold,
+		// Drained here, delivered at-most-once: a response lost in transit
+		// loses its batch, an accepted trade for statistics.
+		Events: s.sup.DrainEvents(),
 	})
 }
 

@@ -112,6 +112,16 @@ type Manager struct {
 	wireSpecs map[Key]WireSpec // control-supplied run specs (worker serving)
 	stopping  bool             // set by StopAll; refuses new starts during shutdown
 
+	// eventBuf holds process events since the last DrainEvents, shipped to
+	// the control node in the worker heartbeat. Events land in this node's
+	// own database too, but a worker's database is ephemeral — the control's
+	// process_events trail (which feeds the startup-latency percentiles) only
+	// sees them via this buffer. Capped: on a node nothing drains (a
+	// single-node deployment, or the control's own idle Manager) it fills
+	// once and stops growing.
+	eventMu  sync.Mutex
+	eventBuf []ProcEventRecord
+
 	stateDirWarned bool   // one {state_dir}-over-workers warning per process
 	publishIP      string // extra host address container ports publish on
 
@@ -776,7 +786,7 @@ func (m *Manager) start(k Key, p *process) {
 	// watcher defers to the start, which knows what it was waiting for.
 	fail := func(event string, err error) {
 		p.err = err
-		m.db.AddProcessEvent(k.RepoID, k.Hash, event, err.Error())
+		m.recordEvent(k.RepoID, k.Hash, event, err.Error())
 		m.noteFailure(k, err.Error())
 		close(p.failed)
 		m.forget(k, p)
@@ -840,7 +850,7 @@ func (m *Manager) start(k Key, p *process) {
 	// holds for every later cold start. A failure leaves init_done_at unset
 	// and the next start attempt retries from the first step.
 	if k.Side == SideBackend && len(spec.init) > 0 && !spec.initDone {
-		m.db.AddProcessEvent(k.RepoID, k.Hash, "init_attempt", fmt.Sprintf("%d steps", len(spec.init)))
+		m.recordEvent(k.RepoID, k.Hash, "init_attempt", fmt.Sprintf("%d steps", len(spec.init)))
 		if err := m.runInit(k, p.repoName, spec, rt, logFile); err != nil {
 			logFile.Close()
 			fail("init_failed", err)
@@ -851,7 +861,7 @@ func (m *Manager) start(k Key, p *process) {
 			fail("init_failed", fmt.Errorf("record init success: %w", err))
 			return
 		}
-		m.db.AddProcessEvent(k.RepoID, k.Hash, "init_done", "")
+		m.recordEvent(k.RepoID, k.Hash, "init_done", "")
 	}
 
 	port, err := probeFreePort()
@@ -885,7 +895,7 @@ func (m *Manager) start(k Key, p *process) {
 		}
 		p.cmd = cmd
 		p.startedAt = time.Now()
-		m.db.AddProcessEvent(k.RepoID, k.Hash, "start_attempt",
+		m.recordEvent(k.RepoID, k.Hash, "start_attempt",
 			fmt.Sprintf("pid %d port %d", cmd.Process.Pid, port))
 		m.db.UpsertProcessRecord(db.ProcessRecord{
 			RepoID: k.RepoID, BeHash: k.Hash,
@@ -904,7 +914,7 @@ func (m *Manager) start(k Key, p *process) {
 			m.forget(k, p)
 			m.db.DeleteProcessRecord(k.RepoID, k.Hash)
 			if !p.intentional {
-				m.db.AddProcessEvent(k.RepoID, k.Hash, "exited", p.exit)
+				m.recordEvent(k.RepoID, k.Hash, "exited", p.exit)
 				m.noteExit(k, p)
 			}
 		}()
@@ -929,7 +939,7 @@ func (m *Manager) start(k Key, p *process) {
 		fail(event, err)
 		return
 	}
-	m.db.AddProcessEvent(k.RepoID, k.Hash, "healthy", fmt.Sprintf("port %d", port))
+	m.recordEvent(k.RepoID, k.Hash, "healthy", fmt.Sprintf("port %d", port))
 	close(p.ready)
 	if m.MaxWarm() > 0 {
 		// Enforce the warm cap promptly rather than waiting a reap tick.
@@ -1162,6 +1172,50 @@ func (m *Manager) awaitHealthy(p *process, healthPath string, timeout time.Durat
 	}
 }
 
+// ProcEventRecord is one process_events row with its timestamp, buffered on a
+// worker and shipped to the control node in the heartbeat. OccurredAt is the
+// event's true time on the worker: the control replays these into its own
+// trail, and the startup percentiles are computed from timestamp deltas —
+// stamping them at replay time would read every fleet cold start as ~0s.
+type ProcEventRecord struct {
+	RepoID     int64     `json:"repo_id"`
+	BeHash     string    `json:"be_hash"`
+	Event      string    `json:"event"`
+	Detail     string    `json:"detail,omitempty"`
+	OccurredAt time.Time `json:"occurred_at"`
+}
+
+// maxEventBuf bounds the heartbeat event buffer. At a 10s heartbeat cadence
+// this is far beyond a burst; when it fills (nothing draining), newest events
+// are dropped rather than growing without bound.
+const maxEventBuf = 256
+
+// recordEvent appends to this node's process_events trail and buffers the
+// event for the worker heartbeat (DrainEvents).
+func (m *Manager) recordEvent(repoID int64, beHash, event, detail string) {
+	m.db.AddProcessEvent(repoID, beHash, event, detail) //nolint:errcheck // observability trail, best-effort
+	m.eventMu.Lock()
+	if len(m.eventBuf) < maxEventBuf {
+		m.eventBuf = append(m.eventBuf, ProcEventRecord{
+			RepoID: repoID, BeHash: beHash, Event: event, Detail: detail,
+			OccurredAt: time.Now().UTC(),
+		})
+	}
+	m.eventMu.Unlock()
+}
+
+// DrainEvents returns the events buffered since the last call and resets the
+// buffer. At-most-once: the caller (the worker heartbeat handler) consumes
+// them into one response, and a response lost in transit loses its batch —
+// an accepted trade for statistics.
+func (m *Manager) DrainEvents() []ProcEventRecord {
+	m.eventMu.Lock()
+	defer m.eventMu.Unlock()
+	out := m.eventBuf
+	m.eventBuf = nil
+	return out
+}
+
 // Stop gracefully stops the process for key, if running. Reason lands in
 // the process_events trail.
 func (m *Manager) Stop(k Key, reason string) {
@@ -1211,7 +1265,7 @@ func (m *Manager) stopLocked(k Key, reason string) {
 		return
 	}
 	m.forget(k, p)
-	m.db.AddProcessEvent(k.RepoID, k.Hash, "idle_stop", reason)
+	m.recordEvent(k.RepoID, k.Hash, "idle_stop", reason)
 }
 
 // killProcess force-terminates either process kind.
@@ -1427,7 +1481,7 @@ func (m *Manager) ReclaimOrphans() {
 				terminateGroup(r.PGID) //nolint:errcheck
 				time.Sleep(200 * time.Millisecond)
 				killGroup(r.PGID) //nolint:errcheck
-				m.db.AddProcessEvent(r.RepoID, r.BeHash, "exited", "reclaimed orphan after unclean shutdown")
+				m.recordEvent(r.RepoID, r.BeHash, "exited", "reclaimed orphan after unclean shutdown")
 			}
 			m.db.DeleteProcessRecord(r.RepoID, r.BeHash)
 		}

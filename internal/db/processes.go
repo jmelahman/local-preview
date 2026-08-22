@@ -1,5 +1,7 @@
 package db
 
+import "time"
+
 // ProcessRecord is crash-recovery bookkeeping for a running backend process.
 // The supervisor's in-memory state is authoritative while the orchestrator
 // runs; rows left behind at startup identify an unclean exit.
@@ -57,5 +59,17 @@ func (s *Store) AddProcessEvent(repoID int64, beHash, event, detail string) erro
 	_, err := s.db.Exec(
 		`INSERT INTO process_events (repo_id, be_hash, event, detail) VALUES (?, ?, ?, ?)`,
 		repoID, beHash, event, detail)
+	return err
+}
+
+// AddProcessEventAt appends an event with an explicit timestamp — the replay
+// path for events shipped from workers, whose true occurrence time must be
+// preserved: startup percentiles are computed from timestamp deltas between
+// paired rows, and stamping replayed rows at insert time would read every
+// fleet cold start as ~0s.
+func (s *Store) AddProcessEventAt(repoID int64, beHash, event, detail string, at time.Time) error {
+	_, err := s.db.Exec(
+		`INSERT INTO process_events (repo_id, be_hash, event, detail, occurred_at) VALUES (?, ?, ?, ?, ?)`,
+		repoID, beHash, event, detail, at.UTC().Format("2006-01-02T15:04:05Z"))
 	return err
 }

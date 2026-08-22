@@ -3,6 +3,7 @@ package db
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 // addEventAt inserts a process_events row with an explicit occurred_at so the
@@ -81,5 +82,31 @@ func TestStartupDurationsWindow(t *testing.T) {
 	}
 	if len(durs) != 0 {
 		t.Fatalf("stale start should be excluded by the window, got %v", durs)
+	}
+}
+
+// AddProcessEventAt is the worker-replay path: events shipped over the
+// heartbeat must keep their original occurred_at, because durations are
+// timestamp deltas between paired rows — stamping them at replay time would
+// read every fleet cold start as ~0s.
+func TestAddProcessEventAtFeedsStartupDurations(t *testing.T) {
+	s := newTestStore(t)
+	r, err := s.CreateRepo("fleet", "/src/fleet", "/data/repos/fleet.git", RepoReady)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	if err := s.AddProcessEventAt(r.ID, "beX", "start_attempt", "", start); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddProcessEventAt(r.ID, "beX", "healthy", "port 1", start.Add(42*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	durs, err := s.StartupDurations(3650)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(durs) != 1 || math.Abs(durs[0]-42) > 0.5 {
+		t.Fatalf("durations = %v, want [42]", durs)
 	}
 }

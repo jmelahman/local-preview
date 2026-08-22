@@ -94,6 +94,12 @@ type Registry struct {
 	desiredMinWarm atomic.Int64
 	desiredIdleSec atomic.Int64
 
+	// eventSink, when set, receives the process-event batches workers ship in
+	// their heartbeats (SetEventSink). Events are recorded where a process
+	// RUNS — a worker's own ephemeral database — so without shipping them the
+	// control node's startup-latency percentiles read empty in fleet mode.
+	eventSink func([]supervise.ProcEventRecord)
+
 	// unservedDemand records the placement keys of EnsureRunning calls that
 	// found no worker (ErrNoWorker) since the last DrainDemand. It is the
 	// scale-from-zero signal: LoadRatio reads 1 with an empty fleet (see its
@@ -146,12 +152,34 @@ func (r *Registry) SetIdleOverride(d time.Duration) {
 	r.desiredIdleSec.Store(int64(max(d, 0) / time.Second))
 }
 
-// Add registers (or replaces) a worker by id. instanceID is the worker's cloud
-// instance-id (empty if it has none), used for scale-in protection.
-func (r *Registry) Add(id, instanceID string, be Backend) {
+// SetEventSink wires where worker-shipped process events land (the control
+// node's process_events trail). Optional: without it the batches are dropped
+// and fleet startup statistics stay empty.
+func (r *Registry) SetEventSink(sink func([]supervise.ProcEventRecord)) {
+	r.eventSink = sink
+}
+
+// Add registers a worker by id, reporting whether it was new. instanceID is
+// the worker's cloud instance-id (empty if it has none), used for scale-in
+// protection.
+//
+// Idempotent for a known worker, deliberately: workers re-announce every ~20s
+// (so a restarted control node re-learns them), and replacing the state on
+// each announcement zeroed heartbeat freshness — making a healthy worker
+// unplaceable until the next heartbeat poll, ~a quarter of wall-clock. A
+// small fleet could transiently read as empty, serving real requests the
+// waking page and registering phantom unserved demand. The one case that DOES
+// replace: the same endpoint returning with a different instance-id — that is
+// a different machine (an ASG replacement reusing the IP), and fresh state,
+// blind until its first heartbeat, is exactly right for it.
+func (r *Registry) Add(id, instanceID string, be Backend) (isNew bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if w, ok := r.workers[id]; ok && w.instanceID == instanceID {
+		return false
+	}
 	r.workers[id] = &workerState{id: id, instanceID: instanceID, be: be}
+	return true
 }
 
 // Remove deregisters a worker.
@@ -209,6 +237,13 @@ func (r *Registry) StartHeartbeats(ctx context.Context, interval time.Duration) 
 				defer cancel()
 				hb, err := w.be.Heartbeat(hctx)
 				r.recordHeartbeat(w.id, hb, time.Now(), err == nil)
+				// Process events ride the heartbeat: the worker drained its
+				// buffer into this response, and they only exist there — a
+				// worker's database is ephemeral, so the control node's
+				// process_events trail is the durable copy.
+				if err == nil && len(hb.Events) > 0 && r.eventSink != nil {
+					r.eventSink(hb.Events)
+				}
 				// Reconcile the dashboard-configured settings: a worker
 				// reporting different values (fresh boot, missed push) gets
 				// them re-applied here, so the settings survive the whole

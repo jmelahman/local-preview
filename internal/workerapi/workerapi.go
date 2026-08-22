@@ -174,4 +174,9 @@ type Heartbeat struct {
 	// monotonic for as long as the control node runs.
 	WarmHits   int64 `json:"warm_hits"`
 	ColdStarts int64 `json:"cold_starts"`
+	// Events are the process events recorded on this worker since its last
+	// heartbeat (drained at read — at-most-once). A worker's own database is
+	// ephemeral, so the control node replays these into its process_events
+	// trail, which feeds the dashboard's startup-latency percentiles.
+	Events []supervise.ProcEventRecord `json:"events,omitempty"`
 }

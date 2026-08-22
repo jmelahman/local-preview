@@ -748,3 +748,47 @@ Postgres `idle_session_timeout=10min` — safe because onyx defaults
 invisible (the pool re-dials on next checkout). Set via `ALTER SYSTEM` (lives
 on the data volume) and mirrored in the stack's command line for fresh
 volumes.
+
+## Worker re-registration must be idempotent — replacing live state blinds the fleet
+
+**Symptom.** (Found by external review, confirmed against the code.) Healthy
+workers intermittently vanished from placement: cache-affinity broke, the
+scale-in reconciler churned redundant SetInstanceProtection calls, and — on a
+small fleet — a request could land in a window where every worker read stale,
+get the waking page, and register phantom unserved demand against a fleet
+that was fully up.
+
+**Root cause.** Workers re-announce every ~20s (so a restarted control node
+re-learns them), and `fleet.Registry.Add` replaced the `workerState` on every
+call: zero `lastBeat` (not fresh until the next 10s heartbeat poll — blind
+~a quarter of wall-clock), zero hit-counter banks, `reachable=false`.
+
+**Fix.** `Add` is idempotent for a known (id, instanceID) pair and reports
+`isNew` so the registrar only logs genuine joins. The one replacing case is
+the same endpoint returning with a different instance-id — an ASG replacement
+reusing the IP is a different machine, and heartbeat-blind fresh state is
+exactly right for it.
+
+**What would reintroduce it.** Any periodic "refresh" path that recreates
+live-tracked state instead of updating it — the same shape as the
+on-disk-leftovers rule: re-announcement is a liveness signal, not a reset.
+
+## Fleet statistics must ship from where the data is born
+
+**Symptom.** The dashboard's startup-latency percentiles read empty on the
+fleet deployment: `handleStats` reads the control node's `process_events`,
+but processes run on workers, which record events into their own — ephemeral
+— databases.
+
+**Fix.** Workers buffer `ProcEventRecord`s (capped) and drain them into the
+heartbeat (`Heartbeat.Events`, at-most-once — a lost response loses its
+batch, an accepted trade for statistics). The control's heartbeat loop hands
+batches to an event sink that replays them via `AddProcessEventAt`,
+**preserving the original `occurred_at`** — the percentiles are timestamp
+deltas between paired rows, so stamping at replay time would read every
+fleet cold start as ~0s.
+
+**What would reintroduce it.** Any new dashboard statistic derived from a
+control-DB table that fleet-mode writes on workers (the warm/cold hit
+counters already ride the heartbeat for the same reason) — and any replay
+path that lets the database default a timestamp the metric depends on.

@@ -914,3 +914,28 @@ func TestHitStatsCountJoinedStartsCold(t *testing.T) {
 	}
 	f.m.Stop(k, "test")
 }
+
+// recordEvent both persists locally and buffers for the worker heartbeat;
+// DrainEvents empties the buffer (at-most-once delivery to the control node)
+// and preserves order and timestamps.
+func TestDrainEventsBuffersAndResets(t *testing.T) {
+	f := newFixture(t)
+	f.m.recordEvent(f.repoID, "beH", "start_attempt", "")
+	f.m.recordEvent(f.repoID, "beH", "healthy", "port 1")
+
+	evs := f.m.DrainEvents()
+	if len(evs) != 2 || evs[0].Event != "start_attempt" || evs[1].Event != "healthy" {
+		t.Fatalf("drained %+v", evs)
+	}
+	if evs[0].OccurredAt.IsZero() || evs[1].OccurredAt.Before(evs[0].OccurredAt) {
+		t.Fatalf("timestamps not sane: %+v", evs)
+	}
+	if again := f.m.DrainEvents(); len(again) != 0 {
+		t.Fatalf("redelivered %+v", again)
+	}
+	// The local trail got them too (single-node deployments read it directly).
+	durs, err := f.db.StartupDurations(30)
+	if err != nil || len(durs) != 1 {
+		t.Fatalf("local trail durations = %v, %v", durs, err)
+	}
+}

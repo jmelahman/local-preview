@@ -196,6 +196,13 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   boots extra nodes into a fleet that no longer reports demand); whatever
   registers demand must retry `ErrNoWorker` until its node arrives, or the node
   it summoned boots to nothing (the pre-warm's `startWithRetry`).
+- Worker re-registration (every ~20s) must be idempotent in the fleet registry
+  — replacing live `workerState` zeroes heartbeat freshness, blinding placement
+  ~25% of wall-clock and registering phantom demand on small fleets; only a
+  changed instance-id (new machine, same IP) may replace.
+- A control-DB statistic doesn't exist in fleet mode unless workers ship it —
+  process events ride the heartbeat (drained at-most-once) and replay with
+  their ORIGINAL occurred_at (percentiles are timestamp deltas).
 - Manifest env is baked into the artifact at build time — an env-borne
   operational fix (e.g. DB pool caps) never reaches already-built deploys;
   pair it with a server-side guard that covers legacy artifacts (the

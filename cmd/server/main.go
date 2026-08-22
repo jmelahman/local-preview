@@ -502,6 +502,16 @@ func run(opts serveOptions) error {
 			if idleOverridden {
 				reg.SetIdleOverride(time.Duration(idleOverrideSec) * time.Second)
 			}
+			// Worker-shipped process events land in the control's own trail:
+			// they're recorded where the process runs (a worker's ephemeral
+			// database), so without this the dashboard's startup percentiles
+			// would read empty in fleet mode. Original timestamps preserved —
+			// the percentiles are deltas between paired rows.
+			reg.SetEventSink(func(evs []supervise.ProcEventRecord) {
+				for _, e := range evs {
+					database.AddProcessEventAt(e.RepoID, e.BeHash, e.Event, e.Detail, e.OccurredAt) //nolint:errcheck // observability trail, best-effort
+				}
+			})
 			reg.StartHeartbeats(workCtx, fleetHeartbeatInterval)
 			startFleetSignal(workCtx, reg)
 			// With an ASG named, publish the scale-from-zero (UnservedDemand) and
@@ -1005,8 +1015,11 @@ func (wr workerRegistrar) Register(endpoint, host, instanceID string) error {
 	// The worker has no artifact rows: every ensure carries the control-DB
 	// resolved run spec.
 	wc.SpecResolver = wr.super.ResolveWireSpec
-	wr.reg.Add(endpoint, instanceID, wc)
-	log.Printf("fleet: worker registered %s (processes at %s, instance %q)", endpoint, host, instanceID)
+	// Add is idempotent for a known worker (they re-announce every ~20s);
+	// only a genuinely new one is worth a log line.
+	if wr.reg.Add(endpoint, instanceID, wc) {
+		log.Printf("fleet: worker registered %s (processes at %s, instance %q)", endpoint, host, instanceID)
+	}
 	return nil
 }
 

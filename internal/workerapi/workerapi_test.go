@@ -53,6 +53,7 @@ type fakeSup struct {
 	idleOverride time.Duration
 	warmHits     int64
 	coldStarts   int64
+	events       []supervise.ProcEventRecord
 }
 
 func (f *fakeSup) OfferWireSpec(k supervise.Key, s supervise.WireSpec) {
@@ -92,6 +93,11 @@ func (f *fakeSup) SetIdleOverride(d time.Duration) { f.idleOverride = d }
 func (f *fakeSup) Running() int                    { return f.running }
 func (f *fakeSup) MaxWarm() int                    { return f.maxWarm }
 func (f *fakeSup) HitStats() (warm, cold int64)    { return f.warmHits, f.coldStarts }
+func (f *fakeSup) DrainEvents() []supervise.ProcEventRecord {
+	out := f.events
+	f.events = nil
+	return out
+}
 
 const secret = "s3cr3t"
 
@@ -194,7 +200,9 @@ func TestReportAndRunLogRoundTrip(t *testing.T) {
 }
 
 func TestHeartbeat(t *testing.T) {
-	sup := &fakeSup{running: 5, maxWarm: 12}
+	sup := &fakeSup{running: 5, maxWarm: 12, events: []supervise.ProcEventRecord{
+		{RepoID: 7, BeHash: "h", Event: "healthy", Detail: "port 1"},
+	}}
 	c, done := testServer(t, sup)
 	defer done()
 	hb, err := c.Heartbeat(context.Background())
@@ -203,6 +211,14 @@ func TestHeartbeat(t *testing.T) {
 	}
 	if hb.Running != 5 || hb.MaxWarm != 12 || hb.Draining {
 		t.Fatalf("heartbeat = %+v", hb)
+	}
+	// Buffered process events ride along, drained at read: a second
+	// heartbeat must not redeliver them.
+	if len(hb.Events) != 1 || hb.Events[0].Event != "healthy" || hb.Events[0].RepoID != 7 {
+		t.Fatalf("heartbeat events = %+v", hb.Events)
+	}
+	if hb2, _ := c.Heartbeat(context.Background()); len(hb2.Events) != 0 {
+		t.Fatalf("events redelivered: %+v", hb2.Events)
 	}
 }
 

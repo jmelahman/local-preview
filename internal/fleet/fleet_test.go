@@ -12,6 +12,7 @@ import (
 
 type fakeBackend struct {
 	id         string
+	hb         workerapi.Heartbeat // returned by Heartbeat (zero by default)
 	ensured    []supervise.Key
 	report     []supervise.ProcReport
 	logs       map[string]supervise.RunLog // keyed side+"-"+hash
@@ -24,7 +25,7 @@ func (f *fakeBackend) EnsureRunning(_ context.Context, k supervise.Key, _ string
 	return f.id + ":8000", nil
 }
 func (f *fakeBackend) Heartbeat(context.Context) (workerapi.Heartbeat, error) {
-	return workerapi.Heartbeat{}, nil
+	return f.hb, nil
 }
 func (f *fakeBackend) Report(context.Context) ([]supervise.ProcReport, error) {
 	return f.report, nil
@@ -246,5 +247,69 @@ func TestStatSurvivesWorkerRestart(t *testing.T) {
 	st := r.Stat()
 	if st.WarmHits != 42 || st.ColdStarts != 6 {
 		t.Fatalf("hits after restart = %d/%d, want 42/6 (banked 40/5 + fresh 2/1)", st.WarmHits, st.ColdStarts)
+	}
+}
+
+// Workers re-announce every ~20s; replacing the state on each announcement
+// zeroed heartbeat freshness, making a healthy worker unplaceable until the
+// next heartbeat poll (~a quarter of wall-clock) — and letting a small fleet
+// transiently read as empty, which registered phantom unserved demand.
+func TestReRegistrationPreservesFreshness(t *testing.T) {
+	r := New(time.Minute)
+	if isNew := r.Add("w", "i-1", &fakeBackend{id: "w"}); !isNew {
+		t.Fatal("first Add should report new")
+	}
+	r.recordHeartbeat("w", workerapi.Heartbeat{MaxWarm: 10, Running: 1}, time.Now(), true)
+
+	// Same endpoint + same instance: a re-announcement. Live state must hold.
+	if isNew := r.Add("w", "i-1", &fakeBackend{id: "w"}); isNew {
+		t.Fatal("re-announcement should not report new")
+	}
+	if w := r.place(supervise.BackendKey(1, "h")); w == nil {
+		t.Fatal("worker lost placement freshness on re-announcement")
+	}
+	if _, workers := r.LoadSample(); workers != 1 {
+		t.Fatalf("LoadSample workers = %d, want 1 (freshness lost)", workers)
+	}
+
+	// Same endpoint, different instance-id: an ASG replacement reusing the
+	// IP — a different machine, so fresh (heartbeat-blind) state is correct.
+	if isNew := r.Add("w", "i-2", &fakeBackend{id: "w"}); !isNew {
+		t.Fatal("new instance-id should replace")
+	}
+	if w := r.place(supervise.BackendKey(1, "h")); w != nil {
+		t.Fatal("replaced worker must be blind until its first heartbeat")
+	}
+}
+
+// Process events ride the worker heartbeat to the control node's event sink —
+// a worker's own database is ephemeral, so the sink is the durable trail.
+func TestHeartbeatShipsEventsToSink(t *testing.T) {
+	r := New(time.Minute)
+	be := &fakeBackend{id: "w", hb: workerapi.Heartbeat{
+		MaxWarm: 10,
+		Events: []supervise.ProcEventRecord{
+			{RepoID: 1, BeHash: "h", Event: "start_attempt"},
+			{RepoID: 1, BeHash: "h", Event: "healthy", Detail: "port 1"},
+		},
+	}}
+	r.Add("w", "", be)
+	got := make(chan []supervise.ProcEventRecord, 1)
+	r.SetEventSink(func(evs []supervise.ProcEventRecord) {
+		select {
+		case got <- evs:
+		default:
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.StartHeartbeats(ctx, 10*time.Millisecond)
+	select {
+	case evs := <-got:
+		if len(evs) != 2 || evs[1].Event != "healthy" {
+			t.Fatalf("sink received %+v", evs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("event sink never received the heartbeat batch")
 	}
 }
