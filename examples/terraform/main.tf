@@ -1033,33 +1033,33 @@ resource "aws_autoscaling_group" "worker" {
 # changes to it), so the fleet rests at min_size and grows on demand.
 # ---------------------------------------------------------------------------
 
-# Scale out on unmet demand — including from zero. Step scaling proportional to
-# how many requests are going unserved, so a burst of N simultaneous first-hits
-# doesn't take N minutes to satisfy one node at a time.
+# Scale out on unmet demand — including from zero. A single +1 step, on
+# purpose: UnservedDemand counts previews waiting for capacity (deduplicated
+# per publish interval), and once ANY worker registers, placement stops
+# returning ErrNoWorker entirely (a full fleet falls back to least-loaded), so
+# every waiting preview lands on that first node the moment it arrives. Sizing
+# the response to the demand VALUE double-provisions: the first live run of a
+# proportional step ladder launched three nodes for one deploy's pre-warm and
+# drained two of them idle minutes later. Sustained pressure beyond one node is
+# load_high's job — it has real utilization to act on.
 resource "aws_autoscaling_policy" "scale_out_demand" {
   count = local.worker_autoscale ? 1 : 0
 
-  name                      = "${var.name}-worker-scale-out-demand"
-  autoscaling_group_name    = aws_autoscaling_group.worker[0].name
-  policy_type               = "StepScaling"
-  adjustment_type           = "ChangeInCapacity"
-  metric_aggregation_type   = "Maximum"
-  estimated_instance_warmup = 180
+  name                    = "${var.name}-worker-scale-out-demand"
+  autoscaling_group_name  = aws_autoscaling_group.worker[0].name
+  policy_type             = "StepScaling"
+  adjustment_type         = "ChangeInCapacity"
+  metric_aggregation_type = "Maximum"
+  # Longer than a worker's worst-case boot-to-registration (spot fulfillment +
+  # dnf + image pull + self-register ≈ 2–4 min): demand stays >=1 the whole
+  # time a node boots (the pre-warm retry keeps re-registering it), and the
+  # warmup window is what stops the still-breaching alarm from stacking a
+  # second node onto a first that just hasn't finished booting.
+  estimated_instance_warmup = 300
 
-  # Bounds are relative to the alarm threshold (1): [1,3)->+1, [3,5)->+2, 5+->+3.
   step_adjustment {
     metric_interval_lower_bound = 0
-    metric_interval_upper_bound = 2
     scaling_adjustment          = 1
-  }
-  step_adjustment {
-    metric_interval_lower_bound = 2
-    metric_interval_upper_bound = 4
-    scaling_adjustment          = 2
-  }
-  step_adjustment {
-    metric_interval_lower_bound = 4
-    scaling_adjustment          = 3
   }
 }
 
@@ -1127,12 +1127,11 @@ resource "aws_cloudwatch_metric_alarm" "load_high" {
 resource "aws_autoscaling_policy" "scale_in" {
   count = local.worker_autoscale ? 1 : 0
 
-  name                      = "${var.name}-worker-scale-in"
-  autoscaling_group_name    = aws_autoscaling_group.worker[0].name
-  policy_type               = "StepScaling"
-  adjustment_type           = "ChangeInCapacity"
-  metric_aggregation_type   = "Average"
-  estimated_instance_warmup = 180
+  name                    = "${var.name}-worker-scale-in"
+  autoscaling_group_name  = aws_autoscaling_group.worker[0].name
+  policy_type             = "StepScaling"
+  adjustment_type         = "ChangeInCapacity"
+  metric_aggregation_type = "Average"
 
   # Below the threshold (upper bound 0 == threshold): remove one node.
   step_adjustment {

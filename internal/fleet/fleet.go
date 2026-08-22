@@ -94,19 +94,32 @@ type Registry struct {
 	desiredMinWarm atomic.Int64
 	desiredIdleSec atomic.Int64
 
-	// unservedDemand counts EnsureRunning calls that found no worker to place on
-	// (ErrNoWorker) since the last DrainDemand. It is the scale-from-zero
-	// signal: LoadRatio reads 1 with an empty fleet (see its doc), which can't
-	// distinguish "idle at zero" from "saturated", so demand — a request that
-	// arrived with nowhere to run — is what tells the autoscaler to lift the
-	// fleet off zero.
-	unservedDemand atomic.Int64
+	// unservedDemand records the placement keys of EnsureRunning calls that
+	// found no worker (ErrNoWorker) since the last DrainDemand. It is the
+	// scale-from-zero signal: LoadRatio reads 1 with an empty fleet (see its
+	// doc), which can't distinguish "idle at zero" from "saturated", so demand
+	// — a request that arrived with nowhere to run — is what tells the
+	// autoscaler to lift the fleet off zero.
+	//
+	// Keys, not a raw counter, deliberately: demand must count previews
+	// waiting for capacity, not requests. An impatient refresh loop (or a
+	// pre-warm retrying while a node boots) hits EnsureRunning many times for
+	// one preview, and raw counts inflated the metric into the scale-out
+	// policy's higher steps — production launched three nodes for what was one
+	// deploy's worth of demand. Guarded by demandMu; only the ErrNoWorker path
+	// ever takes the lock, so placement's happy path stays lock-free.
+	demandMu       sync.Mutex
+	unservedDemand map[string]struct{}
 }
 
 // New returns an empty registry. A worker whose last heartbeat is older than
 // staleAfter is treated as gone for placement.
 func New(staleAfter time.Duration) *Registry {
-	r := &Registry{workers: map[string]*workerState{}, staleAfter: staleAfter}
+	r := &Registry{
+		workers:        map[string]*workerState{},
+		staleAfter:     staleAfter,
+		unservedDemand: map[string]struct{}{},
+	}
 	r.desiredMaxWarm.Store(-1)
 	r.desiredMinWarm.Store(-1)
 	r.desiredIdleSec.Store(-1)
@@ -242,7 +255,9 @@ func (r *Registry) StartHeartbeats(ctx context.Context, interval time.Duration) 
 func (r *Registry) EnsureRunning(ctx context.Context, k supervise.Key, repoName string) (string, error) {
 	w := r.place(k)
 	if w == nil {
-		r.unservedDemand.Add(1)
+		r.demandMu.Lock()
+		r.unservedDemand[placementKey(k)] = struct{}{}
+		r.demandMu.Unlock()
 		return "", ErrNoWorker
 	}
 	return w.be.EnsureRunning(ctx, k, repoName)
@@ -340,11 +355,17 @@ func (r *Registry) LoadRatio() float64 {
 	return float64(running) / float64(capacity)
 }
 
-// DrainDemand returns the number of unserved-placement (ErrNoWorker) events
-// since the last call and resets the counter to zero. The autoscaler publishes
-// it once per interval as the scale-from-zero metric.
+// DrainDemand returns the number of distinct placement keys that went unserved
+// (ErrNoWorker) since the last call and resets the set. The autoscaler
+// publishes it once per interval as the scale-from-zero metric: it reads as
+// "previews currently waiting for capacity", however many times each was
+// retried within the interval.
 func (r *Registry) DrainDemand() int64 {
-	return r.unservedDemand.Swap(0)
+	r.demandMu.Lock()
+	defer r.demandMu.Unlock()
+	n := int64(len(r.unservedDemand))
+	clear(r.unservedDemand)
+	return n
 }
 
 // LoadSample returns fleet utilization as a percentage (committed warm slots ÷

@@ -79,7 +79,7 @@ ExecStart=/usr/bin/docker run --rm --name local-preview-worker \\
 %{ if control_endpoint != "" ~}
   --control-endpoint ${control_endpoint} \\
   --worker-advertise http://$PRIVATE_IP:${api_port} \\
-  --worker-instance-id $INSTANCE_ID \\
+  --worker-instance-id "$INSTANCE_ID" \\
 %{ endif ~}
 %{ if warm_per_gb > 0 ~}
   --max-warm-per-gb ${warm_per_gb} \\

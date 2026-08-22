@@ -189,6 +189,13 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   only when a worker exists (else the scale-in alarm fires on an empty fleet),
   drive scale-in protection off the live fleet (no `DescribeAutoScalingInstances`
   grant), and keep the ASG name reaching `user_data` a plan-time literal.
+- Unserved demand is a boolean per preview, not a request counter — dedupe by
+  placement key (retries/refreshes of one preview read as 1) and respond with a
+  single +1 step, because once any worker registers `place()` stops returning
+  `ErrNoWorker` and every waiting preview lands on it (a proportional ladder
+  boots extra nodes into a fleet that no longer reports demand); whatever
+  registers demand must retry `ErrNoWorker` until its node arrives, or the node
+  it summoned boots to nothing (the pre-warm's `startWithRetry`).
 - A `nofail` data volume must gate the service that bind-mounts it — without
   `RequiresMountsFor=`, a boot that races the volume attach starts the
   orchestrator on an empty dir with a fresh SQLite DB, and a later mount can't

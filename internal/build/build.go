@@ -30,6 +30,7 @@ import (
 
 	"github.com/jmelahman/local-preview/internal/db"
 	"github.com/jmelahman/local-preview/internal/devcontainer"
+	"github.com/jmelahman/local-preview/internal/fleet"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
 	"github.com/jmelahman/local-preview/internal/hashkey"
 	"github.com/jmelahman/local-preview/internal/manifest"
@@ -409,6 +410,15 @@ func (q *Queue) process(ctx context.Context, id int64) {
 // background so its first visit skips the cold start. Failures are logged
 // only: the deploy is ready and start-on-request still applies; the idle
 // reaper and warm cap govern the processes from here.
+//
+// ErrNoWorker is retried, and the retry is what makes scale-from-zero work
+// for pushes: the failed placement registers unserved demand, the autoscaler
+// launches a worker off it, and the retry loop is the only caller that will
+// come back to actually warm the process once that worker registers
+// (~2–4 min). Give up fire-once here and the summoned node boots to nothing —
+// it idles until scale-in reclaims it, and the pusher still pays the cold
+// start. Any other error is terminal: a worker existed and the start failed
+// there, so retrying would just re-run a broken start against a live worker.
 func (q *Queue) autoStartDeploy(ctx context.Context, id int64) {
 	row, err := q.db.GetDeployByID(id) // re-read: the hashes landed during the build
 	if err != nil {
@@ -416,10 +426,34 @@ func (q *Queue) autoStartDeploy(ctx context.Context, id int64) {
 		return
 	}
 	go func() {
-		if err := q.deployStarter().StartDeploy(ctx, row); err != nil && ctx.Err() == nil {
+		// ~8 min of 30s attempts: comfortably past spot fulfillment + boot +
+		// image pull + self-registration, bounded so a fleet that never gets a
+		// worker (max_size reached, spot drought) doesn't retry forever.
+		err := startWithRetry(ctx, 16, 30*time.Second, func() error {
+			return q.deployStarter().StartDeploy(ctx, row)
+		})
+		if err != nil && ctx.Err() == nil {
 			log.Printf("build: auto-start deploy %d (%s@%s): %v", id, row.RepoName, row.ShortSHA, err)
 		}
 	}()
+}
+
+// startWithRetry runs start, retrying only fleet.ErrNoWorker (a fleet at zero
+// whose demand signal is busy launching a node) every gap, up to attempts. Any
+// other error returns immediately — a worker existed and the start failed
+// there, so retrying would re-run a broken start against a live worker.
+func startWithRetry(ctx context.Context, attempts int, gap time.Duration, start func() error) error {
+	for i := 0; ; i++ {
+		err := start()
+		if err == nil || !errors.Is(err, fleet.ErrNoWorker) || i >= attempts-1 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(gap):
+		}
+	}
 }
 
 func (q *Queue) buildDeploy(ctx context.Context, row db.DeployRow, rebuild bool) error {

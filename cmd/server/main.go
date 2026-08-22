@@ -513,7 +513,7 @@ func run(opts serveOptions) error {
 					Region:    opts.awsRegion,
 					ASGName:   opts.asgName,
 					Namespace: opts.metricsNamespace,
-					Interval:  fleetSignalInterval,
+					Interval:  cloudPublishInterval,
 				})
 				if err != nil {
 					log.Printf("cloudscale: disabled (%v)", err)
@@ -870,6 +870,12 @@ const (
 	fleetHeartbeatInterval = 10 * time.Second
 	fleetStaleAfter        = 30 * time.Second
 	fleetSignalInterval    = time.Minute
+	// cloudPublishInterval is half the CloudWatch alarms' 60s period: two
+	// datapoints per period means a tick that drifts across a minute boundary
+	// can't leave a period empty (missing data reads as notBreaching, which
+	// would sit on real demand for an extra minute), and demand is seen up to
+	// 30s sooner on the coldest path — a user staring at a fleet of zero.
+	cloudPublishInterval = 30 * time.Second
 	// workerRegisterInterval is how often a self-registering worker re-announces
 	// itself. Registration is idempotent; re-announcing lets a restarted control
 	// node re-learn a worker that is already up (registrations aren't persisted).

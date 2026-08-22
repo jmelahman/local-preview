@@ -2,8 +2,9 @@
 // the fleet's live state into the two signals an EC2 Auto Scaling group needs to
 // run the worker tier on demand from zero:
 //
-//   - UnservedDemand — the count of placement attempts that found no worker
-//     (fleet.Registry.DrainDemand). This is the scale-OUT-from-zero signal:
+//   - UnservedDemand — the count of distinct previews whose placement found no
+//     worker (fleet.Registry.DrainDemand; deduplicated per interval, so retries
+//     of one preview read as demand 1). This is the scale-OUT-from-zero signal:
 //     LoadRatio can't distinguish "idle at zero" from "saturated" (both score
 //     1), so capacity is added when a request arrives with nowhere to run.
 //   - FleetLoad — fleet utilization as a percentage (fleet.Registry.LoadSample),
@@ -15,9 +16,10 @@
 // per-instance busy map, so an ASG scale-in drains an idle node instead of
 // terminating one mid-preview.
 //
-// This runs on the control node only. It needs cloudwatch:PutMetricData plus
-// autoscaling:SetInstanceProtection/DescribeAutoScalingInstances on the
-// instance role; a node without those (or without an ASG name) simply doesn't
+// This runs on the control node only. It needs exactly cloudwatch:PutMetricData
+// and autoscaling:SetInstanceProtection on the instance role — busy-ness comes
+// from the live fleet registry, never a Describe call, so don't widen the role
+// with one. A node without those grants (or without an ASG name) simply doesn't
 // start the publisher.
 package cloudscale
 
@@ -36,8 +38,8 @@ import (
 // Fleet is the slice of the fleet registry the publisher reads. fleet.Registry
 // satisfies it; a fake satisfies it in tests.
 type Fleet interface {
-	// DrainDemand returns unserved-placement events since the last call and
-	// resets the counter.
+	// DrainDemand returns the count of distinct previews that went unserved
+	// since the last call and resets the set.
 	DrainDemand() int64
 	// LoadSample returns fleet utilization percent and the count of fresh
 	// workers (0 workers => don't publish load).

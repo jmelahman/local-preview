@@ -130,6 +130,31 @@ func TestNoWorkersOrAllStale(t *testing.T) {
 	}
 }
 
+// Unserved demand counts previews waiting for capacity, not raw request
+// retries: N retries of one preview must read as demand 1 or the scale-out
+// policy launches nodes for phantom load, while a frontend co-placed with its
+// backend shares the backend's placement key (one preview, one demand).
+func TestDrainDemandDedupes(t *testing.T) {
+	r := New(time.Minute)
+	ctx := context.Background()
+	for range 5 {
+		r.EnsureRunning(ctx, supervise.BackendKey(1, "beA"), "demo") //nolint:errcheck // ErrNoWorker is the point
+	}
+	r.EnsureRunning(ctx, supervise.FrontendKey(1, "feA", "beA"), "demo") //nolint:errcheck // co-placed: same key as beA
+	r.EnsureRunning(ctx, supervise.BackendKey(1, "beB"), "demo")        //nolint:errcheck // a second waiting preview
+	if got := r.DrainDemand(); got != 2 {
+		t.Fatalf("DrainDemand = %d, want 2 (distinct previews, retries and co-placed sides deduped)", got)
+	}
+	// Drain resets: quiet interval reads 0, and a fresh miss counts anew.
+	if got := r.DrainDemand(); got != 0 {
+		t.Fatalf("DrainDemand after drain = %d, want 0", got)
+	}
+	r.EnsureRunning(ctx, supervise.BackendKey(1, "beA"), "demo") //nolint:errcheck // still unserved next interval
+	if got := r.DrainDemand(); got != 1 {
+		t.Fatalf("DrainDemand re-registered = %d, want 1", got)
+	}
+}
+
 func TestCapacityAndLoad(t *testing.T) {
 	r, _ := regFresh(t, map[string]workerapi.Heartbeat{
 		"a": {Running: 3, MaxWarm: 10},

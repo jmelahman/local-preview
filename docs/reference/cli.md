@@ -56,11 +56,14 @@ address. Both paths join a worker to the same fleet by the same internal
 transport, and both are shared-secret authenticated on private listeners only.
 
 With `--worker-asg-name` set, the control node closes the autoscaling loop: it
-publishes `UnservedDemand` (a request that found no worker — the scale-from-zero
-signal) and `FleetLoad` (utilization, published only once a worker exists) to
+publishes `UnservedDemand` (the count of distinct previews that found no worker
+— the scale-from-zero signal, deduplicated so retries of one preview read as
+one) and `FleetLoad` (utilization, published only once a worker exists) to
 CloudWatch, and reconciles EC2 scale-in protection so an ASG scale-in drains an
 idle node instead of terminating one mid-preview. A worker passes its
-`--worker-instance-id` so the control node knows which instance to protect. The
+`--worker-instance-id` so the control node knows which instance to protect.
+A freshly built deploy's pre-warm retries while the fleet is at zero — the
+demand it registers is what launches the worker it then lands on. The
 scaling policies and alarms themselves live in your infrastructure (see the
 [Terraform example](https://github.com/jmelahman/local-preview/tree/master/examples/terraform)).
 

@@ -660,8 +660,8 @@ utilization, but utilization is **degenerate at zero workers**: with no capacity
 fleet that is genuinely full. So it cannot tell "idle at zero" from "slammed",
 and cannot launch the first node.
 
-The keystone is therefore **`UnservedDemand`** — the count of `EnsureRunning`
-calls that found no fresh worker (`ErrNoWorker`, tracked via
+The keystone is therefore **`UnservedDemand`** — the count of **distinct
+placement keys** that found no fresh worker (`ErrNoWorker`, tracked via
 `unservedDemand`/`DrainDemand`). A request arriving with nowhere to run is the
 unambiguous "someone wants a preview and there are zero workers" signal, and
 `place()` only returns `ErrNoWorker` when there are zero *fresh* workers (it
@@ -669,6 +669,34 @@ falls back to `leastLoaded` when workers are merely full), so demand ≥ 1 means
 exactly that. This metric is published **every interval, including 0**, so a gap
 means the control node is down — the demand alarm treats missing data as
 `notBreaching`.
+
+Two lessons from the first production night, both of the same shape — **demand
+is a boolean per preview, not a request counter, and the response to it is one
+node, not a proportional fleet**:
+
+- **Dedupe demand by placement key, and scale out by exactly +1.** The first
+  cut counted raw `EnsureRunning` calls and fed a proportional step ladder
+  (+1/+2/+3 by demand value). Within minutes of going live it launched three
+  nodes for one deploy's worth of pre-warm traffic, then drained two of them
+  idle. Both halves were wrong: retries of one preview (a refresh loop, a
+  pre-warm retry, the be+fe sides of one deploy — the frontend co-places on its
+  backend's key) inflate a raw counter with phantom load, and once *any* worker
+  registers, `place()` stops returning `ErrNoWorker` at all, so every waiting
+  preview lands on the first node to arrive — the extra nodes the ladder bought
+  boot into a fleet that no longer reports demand. Distinct keys per drain
+  interval; a single +1 step (`estimated_instance_warmup` covering worst-case
+  boot-to-registration so the still-breaching alarm doesn't stack a second
+  node); genuine breadth is `load_high`'s job, which has real utilization to
+  act on.
+- **Whatever registers demand must retry until the node it summoned arrives.**
+  The post-build pre-warm (`autoStartDeploy`) was fire-once: at zero workers it
+  registered demand, failed, and never came back — so the node its demand
+  launched booted to nothing, idled, and was reclaimed ~15 minutes later,
+  a pure-waste cycle on every push that landed while the fleet was at zero.
+  It now retries `ErrNoWorker` (only that error — anything else means a worker
+  existed and the start itself is broken) every 30s for ~8 min, which is also
+  what keeps the demand signal alive while the node boots. Proxy-driven demand
+  needs no such loop — the human refreshes.
 
 `FleetLoad` (utilization %) drives scale-out-under-load and scale-in-when-idle,
 but it must be **published only when at least one worker is fresh**
