@@ -393,6 +393,76 @@ func TestInterimPoll(t *testing.T) {
 	}
 }
 
+// The building page narrates the build: polls stream the frontend build log
+// (attempt 1), switch to the backend log (attempt 2 — the bump clears the
+// pane) once the frontend publishes, and report the persist phase once both
+// sides are on disk.
+func TestBuildingPageStreamsBuildLogs(t *testing.T) {
+	e := newTestEnv(t)
+	d, err := e.db.CreateDeploy(e.repoID, shaOne, db.DeployMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	feLog := filepath.Join(dir, "fe.log")
+	beLog := filepath.Join(dir, "be.log")
+	if err := os.WriteFile(feLog, []byte("vite building\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(beLog, []byte("pip installing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.SetDeployHashes(d.ID, "feBUILD01", "beBUILD01", feLog, beLog); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.SetDeployBuilding(d.ID); err != nil {
+		t.Fatal(err)
+	}
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+
+	// Frontend phase: the fe build log streams as attempt 1.
+	code, body, hdr := doPoll(t, e.router, host, "/", 0, 0)
+	if code != 503 || hdr.Get("X-Preview-Interim") != "building" {
+		t.Fatalf("fe phase: %d %v", code, hdr)
+	}
+	if !strings.Contains(body, "frontend") || !strings.Contains(body, "vite building") ||
+		!strings.Contains(body, `"attempt":1`) {
+		t.Fatalf("fe phase body: %q", body)
+	}
+
+	// Frontend published → backend phase: attempt bumps to 2, be log streams.
+	scratch, _, err := e.files.NewScratchDir("fe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "index.html"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.files.PublishFrontend("demo", "feBUILD01", scratch, false); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ = doPoll(t, e.router, host, "/", 1, 14)
+	if !strings.Contains(body, "backend") || !strings.Contains(body, "pip installing") ||
+		!strings.Contains(body, `"attempt":2`) {
+		t.Fatalf("be phase body: %q", body)
+	}
+
+	// Cursor echo on the same attempt yields only appended bytes.
+	if err := os.WriteFile(beLog, []byte("pip installing\ncollecting deps\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ = doPoll(t, e.router, host, "/", 2, 15)
+	if !strings.Contains(body, "collecting deps") || strings.Contains(body, "pip installing") {
+		t.Fatalf("incremental chunk: %q", body)
+	}
+
+	// Browser gets the poller page with the phase title.
+	_, body, _ = doReq(t, e.router, host, "/", true)
+	if !strings.Contains(body, "Building preview backend") || !strings.Contains(body, "X-Preview-Poll") {
+		t.Fatalf("building page: %q", body)
+	}
+}
+
 // The browser-facing "starting" page is the poller, not a meta refresh.
 func TestColdStartBrowserGetsPollerPage(t *testing.T) {
 	e := newTestEnv(t)

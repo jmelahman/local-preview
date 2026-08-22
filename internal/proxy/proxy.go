@@ -557,10 +557,7 @@ func (rt *Router) servePreview(w http.ResponseWriter, r *http.Request, e cacheEn
 	repoName := e.repoName
 	switch d.Status {
 	case db.DeployQueued, db.DeployBuilding:
-		rt.interimResponse(w, r, http.StatusServiceUnavailable, interim{
-			state: "building", title: "Building preview…",
-			detail: fmt.Sprintf("Deploy %s of %s is %s.", d.ShortSHA, repoName, d.Status),
-		})
+		rt.interimResponse(w, r, http.StatusServiceUnavailable, rt.buildingInterim(d, repoName))
 	case db.DeployFailed:
 		rt.errorPage(w, r, http.StatusBadGateway, "Build failed",
 			fmt.Sprintf("Deploy %s failed: %s (full logs: preview deploy logs %d)", d.ShortSHA, d.Error, d.ID))
@@ -580,6 +577,42 @@ func (rt *Router) servePreview(w http.ResponseWriter, r *http.Request, e cacheEn
 	default:
 		rt.errorPage(w, r, http.StatusInternalServerError, "Unknown state", d.Status)
 	}
+}
+
+// buildingInterim describes a queued/building deploy's current phase, chosen
+// fresh on every poll (servePreview re-runs per poll), so the page narrates
+// the build as it moves: resolving → frontend build (streaming its log) →
+// backend build (its log) → persisting. Builds run on this node even in a
+// fleet — the control node builds, workers serve — so the log paths in the
+// deploy row are local files. The fe log streams as poll attempt 1 and the be
+// log as attempt 2: the attempt bump is what tells the page to clear the pane
+// between phases.
+func (rt *Router) buildingInterim(d db.Deploy, repoName string) interim {
+	it := interim{
+		state: "building", title: "Building preview…",
+		detail: fmt.Sprintf("Deploy %s of %s is %s.", d.ShortSHA, repoName, d.Status),
+	}
+	if d.Status == db.DeployQueued || d.FeHash == "" {
+		// Queued, or still resolving the manifest and partition hashes — there
+		// is no build log to stream yet.
+		return it
+	}
+	switch {
+	case !rt.files.HasFrontend(repoName, d.FeHash):
+		it.title = "Building preview frontend…"
+		it.detail = fmt.Sprintf("Deploy %s of %s is building its frontend.", d.ShortSHA, repoName)
+		it.logPath, it.logAttempt = d.FeBuildLogPath, 1
+	case d.BeHash != "" && !rt.files.HasBackend(repoName, d.BeHash):
+		it.title = "Building preview backend…"
+		it.detail = fmt.Sprintf("Deploy %s of %s is building its backend.", d.ShortSHA, repoName)
+		it.logPath, it.logAttempt = d.BeBuildLogPath, 2
+	default:
+		// Both sides published but the deploy hasn't flipped ready: the
+		// synchronous durable-tier persist is running (see SetDeployReady's
+		// gate) — previously an invisible phase.
+		it.detail = fmt.Sprintf("Deploy %s of %s built; persisting artifacts.", d.ShortSHA, repoName)
+	}
+	return it
 }
 
 // proxyAPI routes backend traffic, stripping the /api prefix when the

@@ -63,6 +63,13 @@ the process's startup log and loads the preview as soon as it answers) and
 later requests hit the warm process. Backends bind loopback-only;
 the only exposed listener is the orchestrator's own address.
 
+Every waiting state narrates itself the same way: a deploy still building
+shows which phase it's in — resolving, frontend build, backend build (each
+streaming its build log live), then persisting — a fleet scaled to zero
+shows a "waking" page while its demand launches a worker, and each page
+carries an elapsed-time counter and loads the preview the moment it
+answers.
+
 A process that exits on its own with a non-zero status — or a start attempt
 that never becomes healthy — leaves the side reading `crashed` instead of
 `idle`, with the exit status or failure alongside it, so a preview that

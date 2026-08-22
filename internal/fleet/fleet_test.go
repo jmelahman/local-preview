@@ -141,7 +141,7 @@ func TestDrainDemandDedupes(t *testing.T) {
 		r.EnsureRunning(ctx, supervise.BackendKey(1, "beA"), "demo") //nolint:errcheck // ErrNoWorker is the point
 	}
 	r.EnsureRunning(ctx, supervise.FrontendKey(1, "feA", "beA"), "demo") //nolint:errcheck // co-placed: same key as beA
-	r.EnsureRunning(ctx, supervise.BackendKey(1, "beB"), "demo")        //nolint:errcheck // a second waiting preview
+	r.EnsureRunning(ctx, supervise.BackendKey(1, "beB"), "demo")         //nolint:errcheck // a second waiting preview
 	if got := r.DrainDemand(); got != 2 {
 		t.Fatalf("DrainDemand = %d, want 2 (distinct previews, retries and co-placed sides deduped)", got)
 	}

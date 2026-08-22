@@ -18,7 +18,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/jmelahman/local-preview/internal/supervise"
@@ -54,6 +56,12 @@ type interim struct {
 	detail string
 	// Non-empty hash: polls include the run log of this artifact side.
 	repo, side, hash string
+	// Non-empty logPath: polls stream this local file instead (the build logs
+	// — builds run on this node even in a fleet). logAttempt is the poll
+	// protocol's attempt number for the file: advancing it (fe log = 1, be log
+	// = 2) is what tells the page to clear the pane between build phases.
+	logPath    string
+	logAttempt int
 }
 
 func isPoll(r *http.Request) bool { return r.Header.Get(pollHeader) != "" }
@@ -97,21 +105,70 @@ type pollPayload struct {
 
 func (rt *Router) pollJSON(w http.ResponseWriter, r *http.Request, status int, it interim) {
 	p := pollPayload{State: it.state, Title: it.title, Detail: it.detail}
+	attempt, _ := strconv.Atoi(r.Header.Get(pollAttemptHeader))
+	offset, _ := strconv.ParseInt(r.Header.Get(pollOffsetHeader), 10, 64)
 	if rt.runLogs != nil && it.hash != "" {
-		attempt, _ := strconv.Atoi(r.Header.Get(pollAttemptHeader))
-		offset, _ := strconv.ParseInt(r.Header.Get(pollOffsetHeader), 10, 64)
 		if chunk, err := rt.runLogs.RunLog(it.repo, it.side, it.hash, attempt, offset); err == nil {
 			p.Attempt = chunk.Attempt
 			p.Offset = chunk.Offset
 			p.Content = chunk.Content
 			p.Truncated = chunk.Truncated
 		}
+	} else if it.logPath != "" {
+		chunk := tailFile(it.logPath, it.logAttempt, attempt, offset)
+		p.Attempt = chunk.Attempt
+		p.Offset = chunk.Offset
+		p.Content = chunk.Content
+		p.Truncated = chunk.Truncated
 	}
 	w.Header().Set(interimHeader, it.state)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(p)
+}
+
+const (
+	// A fresh view of a build log starts at its last 16 KiB — enough context
+	// without dumping a whole verbose build into the page at once.
+	buildLogTailBytes  = 16 << 10
+	buildLogChunkBytes = 64 << 10
+)
+
+// tailFile is the build-log analogue of supervise.RunLog over one plain local
+// file: echoing (attempt, offset) yields only appended bytes, and any cursor
+// from a different attempt (a different file — the fe→be phase switch) resets
+// the view to the file's tail. A missing file is an empty view, not an error:
+// the build simply hasn't opened its log yet.
+func tailFile(path string, viewAttempt, reqAttempt int, offset int64) supervise.RunLog {
+	chunk := supervise.RunLog{Attempt: viewAttempt}
+	f, err := os.Open(path)
+	if err != nil {
+		return chunk
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return chunk
+	}
+	size := info.Size()
+
+	start := int64(0)
+	if reqAttempt == viewAttempt && offset >= 0 && offset <= size {
+		start = offset
+	} else if size > buildLogTailBytes {
+		start = size - buildLogTailBytes
+		chunk.Truncated = true
+	}
+
+	buf := make([]byte, min(size-start, buildLogChunkBytes))
+	n, err := f.ReadAt(buf, start)
+	if err != nil && err != io.EOF {
+		return chunk
+	}
+	chunk.Content = string(buf[:n])
+	chunk.Offset = start + int64(n)
+	return chunk
 }
 
 // interimHTML takes (title, title, detail), pre-escaped. The script is fully
@@ -132,13 +189,20 @@ pre{background:#000;border:1px solid #333;border-radius:6px;padding:1rem;max-hei
 <p id=detail>%s</p>
 <pre id=log hidden></pre>
 <p id=err hidden></p>
-<p class=muted id=hint>This page will load the preview automatically when it's ready.</p>
+<p class=muted id=hint>This page will load the preview automatically when it's ready.<span id=elapsed></span></p>
+<p class=muted id=slow hidden>Still waiting for a server to join the fleet — it may be at its node cap, or cloud capacity is tight right now.</p>
 </main>
 <script>
 (() => {
   const $ = id => document.getElementById(id);
   let attempt = 0, offset = 0;
+  const t0 = Date.now();
+  const fmtElapsed = ms => {
+    const s = Math.floor(ms / 1000), m = Math.floor(s / 60);
+    return m > 0 ? m + 'm ' + (s - m * 60) + 's' : s + 's';
+  };
   const tick = async () => {
+    $('elapsed').textContent = ' Waiting ' + fmtElapsed(Date.now() - t0) + '.';
     let res;
     try {
       res = await fetch(location.href, {
@@ -172,11 +236,14 @@ pre{background:#000;border:1px solid #333;border-radius:6px;padding:1rem;max-hei
         $('spin').hidden = true;
         $('detail').hidden = true;
         $('hint').hidden = true;
+        $('slow').hidden = true;
         $('err').textContent = s.detail + ' Reload the page to retry.';
         $('err').hidden = false;
         return; // terminal: keep the captured logs on screen
       }
       if (s.detail) $('detail').textContent = s.detail;
+      // A node boot is 2-4 minutes; past that, say why it might be stuck.
+      if (s.state === 'waking' && Date.now() - t0 > 240000) $('slow').hidden = false;
     }
     setTimeout(tick, 1000);
   };
