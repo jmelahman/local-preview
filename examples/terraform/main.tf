@@ -837,21 +837,12 @@ resource "aws_launch_template" "worker" {
     }
   }
 
-  dynamic "instance_market_options" {
-    for_each = var.workers.spot ? [1] : []
-
-    content {
-      market_type = "spot"
-
-      spot_options {
-        # Ordinary (non-persistent) spot that terminates on interruption: the
-        # ASG relaunches to hold desired capacity, and there is no pinned
-        # address or stopped instance to preserve (unlike the static tier's
-        # persistent/stop request).
-        instance_interruption_behavior = "terminate"
-      }
-    }
-  }
+  # No instance_market_options here: a launch template used by a mixed-instances
+  # policy may not request spot itself (AWS rejects it). Spot is driven by the
+  # ASG's instances_distribution instead (on_demand_percentage_above_base = 0),
+  # which yields ordinary spot that terminates on interruption — the ASG
+  # relaunches to hold desired capacity, and there is no pinned address to
+  # preserve (unlike the static tier's persistent/stop request).
 
   user_data = base64gzip(templatefile("${path.module}/worker-data.sh.tftpl", {
     aws_region  = data.aws_region.current.name
