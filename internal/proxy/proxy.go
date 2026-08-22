@@ -112,6 +112,11 @@ type Router struct {
 	// process's run log while it boots. See SetRunLogs.
 	runLogs RunLogs
 
+	// procStatus, when set, lets the interim "starting" pages narrate the side
+	// actually doing the work (a frontend cold start runs inside its backend's
+	// init). See SetProcStatus.
+	procStatus ProcStatus
+
 	// reserved maps a preview-domain label (the part before ".<domain>") to a
 	// fixed upstream "host:port". A matching host is reverse-proxied wholesale
 	// to that upstream — behind the same SSO gate as previews, but outside the
@@ -640,10 +645,21 @@ func (rt *Router) ensureAndProxy(w http.ResponseWriter, r *http.Request, e cache
 	if err != nil {
 		if ctx.Err() != nil && r.Context().Err() == nil {
 			// Still starting — an interim page whose polls stream the run log.
+			// A process-mode frontend starts by first ensuring its backend:
+			// the whole backend init runs INSIDE the frontend's start attempt
+			// (supervise: "start backend for {backend_url}"), so while that
+			// backend isn't running yet, IT is the story — narrate and stream
+			// the backend, not a frontend that hasn't opened its log. The
+			// page flips to the frontend on the poll after the backend is up.
+			side, hash, subject := string(k.Side), k.Hash, what
+			if k.Side == supervise.SideFrontend && k.Peer != "" && rt.procStatus != nil &&
+				rt.procStatus.Status(supervise.BackendKey(k.RepoID, k.Peer)) != supervise.StatusRunning {
+				side, hash, subject = string(supervise.SideBackend), k.Peer, "backend"
+			}
 			rt.interimResponse(w, r, http.StatusServiceUnavailable, interim{
-				state: "starting", title: "Starting " + what + "…",
-				detail: "The preview " + what + " is starting.",
-				repo:   repoName, side: string(k.Side), hash: k.Hash,
+				state: "starting", title: "Starting " + subject + "…",
+				detail: "The preview " + subject + " is starting.",
+				repo:   repoName, side: side, hash: hash,
 			})
 			return
 		}

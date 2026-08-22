@@ -49,6 +49,18 @@ type RunLogs interface {
 // from. Optional: without it the pages still poll for readiness.
 func (rt *Router) SetRunLogs(logs RunLogs) { rt.runLogs = logs }
 
+// ProcStatus is the slice of the runtime view the interim pages use to pick
+// which side to narrate: a process-mode frontend spends its cold start inside
+// its backend's init, and the page should say so.
+type ProcStatus interface {
+	Status(k supervise.Key) string
+}
+
+// SetProcStatus wires the process-status source. Optional: without it a
+// starting frontend is narrated as the frontend even while its backend is the
+// side doing the work.
+func (rt *Router) SetProcStatus(ps ProcStatus) { rt.procStatus = ps }
+
 // interim describes one interim state of a preview address.
 type interim struct {
 	state  string // "building" | "waking" | "starting" | "hydrating" | "failed"

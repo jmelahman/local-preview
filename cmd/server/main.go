@@ -585,8 +585,11 @@ func run(opts serveOptions) error {
 	apex := api.AuthMiddleware(deps, api.NewMux(deps))
 	router := proxy.New(database, files, backends, cfg.Preview.Domain, apex)
 	// Interim "starting" pages stream the run log from wherever the process
-	// runs — the local manager, or the fleet view on a control node.
+	// runs — the local manager, or the fleet view on a control node — and
+	// consult process status so a frontend blocked on its backend's init is
+	// narrated as the backend (the side actually doing the work).
 	router.SetRunLogs(runtime)
+	router.SetProcStatus(runtime)
 	if sso != nil {
 		router.SetPreviewAuth(true, dashboardOrigin, cookiesSecure)
 		startSessionGC(workCtx, database)

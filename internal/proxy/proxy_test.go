@@ -478,6 +478,61 @@ func TestColdStartBrowserGetsPollerPage(t *testing.T) {
 	}
 }
 
+// fakeProcStatus reports one backend key's status; everything else is idle.
+type fakeProcStatus struct {
+	running map[supervise.Key]bool
+}
+
+func (f *fakeProcStatus) Status(k supervise.Key) string {
+	if f.running[k] {
+		return supervise.StatusRunning
+	}
+	return supervise.StatusIdle
+}
+
+// A process-mode frontend's cold start runs its backend's whole init inside
+// its own start attempt, so while the backend isn't running the page must
+// narrate (and stream) the backend — "Starting frontend" with an empty log
+// pane was hiding minutes of backend init. Once the backend is up, the same
+// page flips to the frontend.
+func TestStartingFrontendNarratesBlockingBackend(t *testing.T) {
+	e := newTestEnv(t)
+	d := e.readyDeploy(t, shaOne)
+	// Make the frontend a supervised process so page requests take the
+	// frontend key path (a frontend_artifacts row is what marks process mode).
+	if err := e.db.CreateFrontendArtifact(db.FrontendArtifact{RepoID: e.repoID, FeHash: d.FeHash, RunConfig: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	host := d.ShortSHA + "-demo.preview.localhost:8080"
+	ps := &fakeProcStatus{running: map[supervise.Key]bool{}}
+	e.router.SetProcStatus(ps)
+	logs := &fakeRunLogs{}
+	e.router.SetRunLogs(logs)
+	e.fake.slow = true
+
+	// Backend not running: the frontend's cold start is narrated as the
+	// backend, and the poll streams the backend's run log.
+	_, body, hdr := doReq(t, e.router, host, "/page", true)
+	if hdr.Get("X-Preview-Interim") != "starting" || !strings.Contains(body, "Starting backend") {
+		t.Fatalf("blocked-on-backend page: %v %q", hdr, body)
+	}
+	doPoll(t, e.router, host, "/page", 0, 0)
+	if logs.side != "be" || logs.hash != d.BeHash {
+		t.Fatalf("streamed side = %s %s, want be %s", logs.side, logs.hash, d.BeHash)
+	}
+
+	// Backend up: the same request now narrates the frontend and streams its log.
+	ps.running[supervise.BackendKey(e.repoID, d.BeHash)] = true
+	_, body, _ = doReq(t, e.router, host, "/page", true)
+	if !strings.Contains(body, "Starting frontend") {
+		t.Fatalf("post-backend page: %q", body)
+	}
+	doPoll(t, e.router, host, "/page", 0, 0)
+	if logs.side != "fe" || logs.hash != d.FeHash {
+		t.Fatalf("streamed side = %s %s, want fe %s", logs.side, logs.hash, d.FeHash)
+	}
+}
+
 func TestNonReadyStatuses(t *testing.T) {
 	e := newTestEnv(t)
 	d, err := e.db.CreateDeploy(e.repoID, shaOne, db.DeployMeta{})

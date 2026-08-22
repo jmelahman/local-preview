@@ -60,7 +60,10 @@ running — stopped by the idle timeout or warm cap, or after a server
 restart — starts on demand instead: the first `/api/*` request boots the
 backend (the proxy waits briefly, then shows a "starting" page that streams
 the process's startup log and loads the preview as soon as it answers) and
-later requests hit the warm process. Backends bind loopback-only;
+later requests hit the warm process. A process-mode frontend spends its cold
+start inside its backend's init, so while that backend isn't up yet the page
+narrates and streams the backend — the side actually doing the work — and
+flips to the frontend once it is. Backends bind loopback-only;
 the only exposed listener is the orchestrator's own address.
 
 Every waiting state narrates itself the same way: a deploy still building
