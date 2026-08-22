@@ -341,11 +341,20 @@ variable "secret_env_ssm_parameters" {
 
 variable "workers" {
   description = <<-EOT
-    Elastic worker tier: instances running the same image with --role=worker,
-    serving preview processes the control node routes to. Setting this flips
-    the server to --role=control with static --worker-endpoints derived from
-    private_ips (one instance per entry — literals, so user_data stays known
-    at plan time and instance replacement still triggers).
+    Worker tier: instances running the same image with --role=worker, serving
+    preview processes the control node routes to. Setting this flips the server
+    to --role=control. Choose exactly one tier shape:
+
+      - Static (private_ips): one instance per literal address, and the control
+        node gets --worker-endpoints derived from them. Literals keep user_data
+        known at plan time so instance replacement still triggers.
+
+      - Elastic (autoscale): an EC2 Auto Scaling group behind a launch template.
+        Workers have no fixed address — they read their own private IP from IMDS
+        at boot and self-register with the control node's --control-listen API,
+        so nothing about a worker reaches anyone's user_data. desired_capacity
+        may be 0 (scale-from-zero); a scaling policy / scheduled actions drive it
+        at runtime. Requires private_ip (workers register to that address).
 
     The worker API starts arbitrary preview processes — remote code execution
     by design. The module binds it to the worker's private IP and admits only
@@ -356,35 +365,52 @@ variable "workers" {
     publishes ports on the server's private IP.
 
     secret_ssm_parameter names a SecureString holding the shared secret that
-    authenticates both directions of the worker API.
+    authenticates both directions of the worker API (and, for the elastic tier,
+    worker self-registration).
   EOT
   type = object({
-    private_ips          = list(string)
     secret_ssm_parameter = string
-    instance_type        = optional(string, "r7i.large")
-    api_port             = optional(number, 9100)
-    max_warm             = optional(number, 12)
-    root_volume_size_gb  = optional(number, 60)
-    extra_server_args    = optional(list(string), [])
-    stack_ingress_ports  = optional(list(number), [])
-    # Run workers as persistent spot instances (interruption behavior:
-    # stop). Workers are stateless by design — run specs arrive on the wire,
-    # artifact files hydrate from S3 — so an interruption only makes previews
-    # unavailable until capacity returns and AWS restarts the instance. A
-    # persistent request is what keeps user-initiated stop/start (the
-    # business-hours schedule) working and the pinned private IP stable.
+    # Static tier: one worker instance per literal private IP. Mutually
+    # exclusive with autoscale.
+    private_ips   = optional(list(string), [])
+    instance_type = optional(string, "r7i.large")
+    api_port      = optional(number, 9100)
+    # Elastic tier only: the control node's worker-registration listener port.
+    control_port        = optional(number, 9101)
+    max_warm            = optional(number, 12)
+    root_volume_size_gb = optional(number, 60)
+    extra_server_args   = optional(list(string), [])
+    stack_ingress_ports = optional(list(number), [])
+    # Static tier runs persistent spot instances (interruption behavior: stop),
+    # so a user-initiated stop (the business-hours schedule) and the pinned
+    # private IP both survive. The elastic tier runs ordinary spot instances
+    # that terminate on interruption — the ASG relaunches them, and there is no
+    # fixed address to preserve. Either way workers are stateless: run specs
+    # arrive on the wire and artifact files hydrate from S3, so an interruption
+    # only makes previews unavailable until capacity returns.
     spot = optional(bool, false)
     # Images pre-pulled (best-effort, in the background) at worker boot, so
     # the first preview on a fresh worker doesn't pay the multi-GB
     # devcontainer pull. Digest-pinned manifests still pull what they name;
     # a tag listed here warms the shared layers.
     warm_images = optional(list(string), [])
+    # Elastic tier: the Auto Scaling group's bounds. desired_capacity is the
+    # initial value only — Terraform stops managing it after create (a scaling
+    # policy or scheduled actions own it at runtime), so leaving it at 0 boots
+    # a truly on-demand-from-zero fleet. max_size is the hard node cap.
+    autoscale = optional(object({
+      max_size         = number
+      min_size         = optional(number, 0)
+      desired_capacity = optional(number, 0)
+    }))
   })
   default = null
 
   validation {
-    condition     = var.workers == null || try(length(var.workers.private_ips) > 0, false)
-    error_message = "workers.private_ips must name at least one address — a control node with an empty fleet serves nothing."
+    # Exactly one tier shape. Neither would give a control node with nothing to
+    # route to; both would be ambiguous.
+    condition     = var.workers == null || ((var.workers.autoscale != null) != (length(var.workers.private_ips) > 0))
+    error_message = "workers needs exactly one of autoscale (elastic tier) or a non-empty private_ips (static tier) — not both, not neither."
   }
 }
 

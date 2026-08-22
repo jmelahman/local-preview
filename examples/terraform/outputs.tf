@@ -62,6 +62,11 @@ output "worker_role_name" {
 }
 
 output "worker_instance_ids" {
-  description = "EC2 instance ids of the worker tier — include them in any start/stop schedule that covers the server, or the control node routes to stopped workers."
-  value       = var.workers == null ? [] : aws_instance.worker[*].id
+  description = "EC2 instance ids of the STATIC worker tier — include them in any start/stop schedule that covers the server, or the control node routes to stopped workers. Empty for the elastic (autoscale) tier, which the ASG owns; drive that fleet with worker_asg_name instead."
+  value       = aws_instance.worker[*].id
+}
+
+output "worker_asg_name" {
+  description = "Name of the elastic worker Auto Scaling group, or null for a static (private_ips) tier. Attach scaling policies and scheduled actions here to drive the fleet's desired capacity."
+  value       = local.worker_autoscale ? aws_autoscaling_group.worker[0].name : null
 }

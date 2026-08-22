@@ -85,15 +85,27 @@ locals {
   ]
 
   # With a worker tier, the server becomes the control node: builds stay here,
-  # serving is routed to the workers. Endpoints are rendered from the literal
-  # private_ips so user_data stays known at plan time.
-  worker_endpoints = var.workers == null ? [] : [
+  # serving is routed to the workers.
+  worker_autoscale = var.workers != null && var.workers.autoscale != null
+  worker_static    = var.workers != null && var.workers.autoscale == null
+
+  # Static tier: endpoints rendered from the literal private_ips, so user_data
+  # stays known at plan time. Elastic workers aren't listed anywhere — they
+  # self-register at runtime, which is the whole point (nothing dynamic reaches
+  # user_data to defeat user_data_replace_on_change).
+  worker_endpoints = local.worker_static ? [
     for ip in var.workers.private_ips : "http://${ip}:${var.workers.api_port}"
-  ]
-  worker_args = var.workers == null ? [] : [
-    "--role", "control",
-    "--worker-endpoints", join(",", local.worker_endpoints),
-  ]
+  ] : []
+  worker_args = var.workers == null ? [] : concat(
+    ["--role", "control"],
+    local.worker_autoscale ? [
+      # Accept worker self-registrations on the control node's pinned private
+      # address; workers dial it to join and leave the fleet.
+      "--control-listen", "${var.private_ip}:${var.workers.control_port}",
+      ] : [
+      "--worker-endpoints", join(",", local.worker_endpoints),
+    ],
+  )
 
   server_args = concat(local.base_url_args, local.sso_args, local.oidc_upload_args, local.worker_args, var.extra_server_args)
 
@@ -245,7 +257,7 @@ resource "aws_instance" "server" {
   private_ip                  = var.private_ip
   key_name                    = var.key_pair_name
   iam_instance_profile        = aws_iam_instance_profile.instance.name
-  vpc_security_group_ids      = concat([aws_security_group.server.id], aws_security_group.stack_ingress[*].id)
+  vpc_security_group_ids      = concat([aws_security_group.server.id], aws_security_group.stack_ingress[*].id, aws_security_group.worker_registration[*].id)
   associate_public_ip_address = true
 
   # Gzipped, which cloud-init unpacks itself: EC2 caps user data at 16 KiB and
@@ -627,6 +639,32 @@ resource "aws_security_group" "stack_ingress" {
   tags = merge(local.tags, { Name = "${var.name}-stack-ingress" })
 }
 
+# Elastic tier only: the control node's worker-registration listener, admitting
+# the worker security group and nothing else. A dedicated group (attached to the
+# control instance) rather than an inline rule on aws_security_group.server —
+# that group's rules are inline, and Terraform treats an inline-rule group as
+# owning every rule on it, so mixing in a standalone rule (or referencing the
+# worker group inline both ways) would either be wiped on the next update or
+# form a dependency cycle. This group references the worker group one-way
+# (registration → worker → server), so there is no cycle.
+resource "aws_security_group" "worker_registration" {
+  count = local.worker_autoscale ? 1 : 0
+
+  name        = "${var.name}-worker-registration"
+  description = "Worker self-registration to the control node (${var.name} elastic tier)"
+  vpc_id      = data.aws_subnet.instance.vpc_id
+
+  ingress {
+    description     = "Worker registration API, from workers only"
+    from_port       = var.workers.control_port
+    to_port         = var.workers.control_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.worker[0].id]
+  }
+
+  tags = merge(local.tags, { Name = "${var.name}-worker-registration" })
+}
+
 resource "aws_iam_role" "worker" {
   count = var.workers == null ? 0 : 1
 
@@ -713,6 +751,9 @@ resource "aws_instance" "worker" {
     worker_ssm  = var.workers.secret_ssm_parameter
     secret_env  = var.secret_env_ssm_parameters
     warm_images = var.workers.warm_images
+    # Static workers are hand-listed on the control node via --worker-endpoints,
+    # so they don't self-register. Only the elastic tier sets this.
+    control_endpoint = ""
   }))
   user_data_replace_on_change = true
 
@@ -736,4 +777,161 @@ resource "aws_instance" "worker" {
   }
 
   tags = merge(local.tags, { Name = "${var.name}-worker-${count.index}" })
+}
+
+# ---------------------------------------------------------------------------
+# Elastic worker tier. Same image and --role=worker as the static instances
+# above, but with no fixed address: the launch template's user_data carries no
+# per-instance value (which keeps user_data_replace_on_change honest), and each
+# worker reads its own private IP from IMDS at boot and self-registers with the
+# control node's --control-listen API. The Auto Scaling group's desired count
+# is owned at runtime — by a scaling policy and/or the caller's scheduled
+# actions — so it can sit at 0 and scale up on demand.
+# ---------------------------------------------------------------------------
+
+resource "aws_launch_template" "worker" {
+  count = local.worker_autoscale ? 1 : 0
+
+  name_prefix   = "${var.name}-worker-"
+  image_id      = local.ami_id
+  instance_type = var.workers.instance_type
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.worker[0].name
+  }
+
+  # Public IP for egress only (image pulls, S3 hydration): the default VPC has
+  # no NAT, and the security group admits nothing inbound but the control node.
+  network_interfaces {
+    associate_public_ip_address = true
+    security_groups             = [aws_security_group.worker[0].id]
+    delete_on_termination       = true
+  }
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+    # Hop limit 1: IMDS reachable from the host and host-network containers (the
+    # worker orchestrator runs --network host and reads its own private IP here
+    # at boot) but NOT from preview containers on the docker bridge, one hop
+    # further out. See the static instance for the full rationale.
+    http_put_response_hop_limit = 1
+  }
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+
+    ebs {
+      volume_size           = var.workers.root_volume_size_gb
+      volume_type           = "gp3"
+      encrypted             = true
+      delete_on_termination = true
+    }
+  }
+
+  dynamic "instance_market_options" {
+    for_each = var.workers.spot ? [1] : []
+
+    content {
+      market_type = "spot"
+
+      spot_options {
+        # Ordinary (non-persistent) spot that terminates on interruption: the
+        # ASG relaunches to hold desired capacity, and there is no pinned
+        # address or stopped instance to preserve (unlike the static tier's
+        # persistent/stop request).
+        instance_interruption_behavior = "terminate"
+      }
+    }
+  }
+
+  user_data = base64gzip(templatefile("${path.module}/worker-data.sh.tftpl", {
+    aws_region  = data.aws_region.current.name
+    image       = var.image
+    data_dir    = var.data_dir
+    api_port    = var.workers.api_port
+    max_warm    = var.workers.max_warm
+    server_args = join(" ", var.workers.extra_server_args)
+    worker_ssm  = var.workers.secret_ssm_parameter
+    secret_env  = var.secret_env_ssm_parameters
+    warm_images = var.workers.warm_images
+    # No fixed address — the worker reads its private IP from IMDS at boot.
+    private_ip = ""
+    # Self-register with the control node's pinned private address.
+    control_endpoint = "http://${var.private_ip}:${var.workers.control_port}"
+  }))
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = merge(local.tags, { Name = "${var.name}-worker" })
+  }
+
+  # A launch-template change publishes a new version; the ASG tracks $Latest.
+  update_default_version = true
+
+  lifecycle {
+    precondition {
+      condition     = var.private_ip != null
+      error_message = "workers.autoscale requires private_ip: elastic workers self-register to the control node's pinned private address."
+    }
+  }
+
+  tags = local.tags
+}
+
+resource "aws_autoscaling_group" "worker" {
+  count = local.worker_autoscale ? 1 : 0
+
+  name = "${var.name}-worker"
+
+  min_size         = var.workers.autoscale.min_size
+  max_size         = var.workers.autoscale.max_size
+  desired_capacity = var.workers.autoscale.desired_capacity
+
+  # Same subnet (hence AZ) as the control node: workers reach the shared
+  # dependency stack on its private IP, and a co-located AZ keeps that hop
+  # in-zone.
+  vpc_zone_identifier = [local.subnet_id]
+
+  # Workers aren't behind the ALB; the control node health-checks them over the
+  # worker API itself. EC2 status is all the ASG should act on.
+  health_check_type = "EC2"
+
+  # Spot: proactively replace an instance AWS is about to reclaim.
+  capacity_rebalance = var.workers.spot ? true : null
+
+  launch_template {
+    id      = aws_launch_template.worker[0].id
+    version = "$Latest"
+  }
+
+  # desired_capacity may be 0, so don't block apply waiting for an instance
+  # that isn't coming.
+  wait_for_capacity_timeout = "0"
+
+  # desired_capacity is owned at runtime by the scaling policy and the caller's
+  # scheduled actions; Terraform sets only the initial value and then stops
+  # managing it, or every apply would snap a live-scaled fleet back to the
+  # static number.
+  lifecycle {
+    ignore_changes = [desired_capacity]
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${var.name}-worker"
+    propagate_at_launch = true
+  }
+
+  dynamic "tag" {
+    # local.tags already carries Name = var.name; the explicit tag above wins
+    # for workers, so drop it here to avoid a duplicate-key error.
+    for_each = { for k, v in local.tags : k => v if k != "Name" }
+
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
 }
