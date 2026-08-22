@@ -89,6 +89,14 @@ locals {
   worker_autoscale = var.workers != null && var.workers.autoscale != null
   worker_static    = var.workers != null && var.workers.autoscale == null
 
+  # The instance types the elastic tier's mixed-instances policy draws from:
+  # the explicit list when given, else the single instance_type. The launch
+  # template still names instance_type as its own default, but the ASG's
+  # overrides below are what actually launch, so this drives the spot pool set.
+  worker_instance_types = var.workers == null ? [] : (
+    length(var.workers.instance_types) > 0 ? var.workers.instance_types : [var.workers.instance_type]
+  )
+
   # Static tier: endpoints rendered from the literal private_ips, so user_data
   # stays known at plan time. Elastic workers aren't listed anywhere — they
   # self-register at runtime, which is the whole point (nothing dynamic reaches
@@ -900,9 +908,37 @@ resource "aws_autoscaling_group" "worker" {
   # Spot: proactively replace an instance AWS is about to reclaim.
   capacity_rebalance = var.workers.spot ? true : null
 
-  launch_template {
-    id      = aws_launch_template.worker[0].id
-    version = "$Latest"
+  # Mixed instances over several types, not a single-type launch_template: one
+  # spot pool (one type × one AZ) goes thin and AWS floods the group with
+  # rebalance recommendations, so capacity_rebalance churns instances every
+  # few minutes. Spreading across comparable types gives price-capacity-
+  # optimized several pools to choose from — it launches into the deepest,
+  # cheapest one and rebalances far less. The launch template (below) still
+  # carries all the per-instance config; only the type is overridden here.
+  mixed_instances_policy {
+    launch_template {
+      launch_template_specification {
+        launch_template_id = aws_launch_template.worker[0].id
+        version            = "$Latest"
+      }
+
+      dynamic "override" {
+        for_each = local.worker_instance_types
+        content {
+          instance_type = override.value
+        }
+      }
+    }
+
+    instances_distribution {
+      # 100% spot when spot is asked for (base 0, 0% on-demand above base),
+      # else 100% on-demand. price-capacity-optimized weighs both spot price
+      # and pool depth, which is what actually reduces interruptions/churn
+      # versus lowest-price alone.
+      on_demand_base_capacity                  = 0
+      on_demand_percentage_above_base_capacity = var.workers.spot ? 0 : 100
+      spot_allocation_strategy                 = "price-capacity-optimized"
+    }
   }
 
   # desired_capacity may be 0, so don't block apply waiting for an instance

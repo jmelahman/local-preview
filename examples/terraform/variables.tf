@@ -374,7 +374,17 @@ variable "workers" {
     # exclusive with autoscale.
     private_ips   = optional(list(string), [])
     instance_type = optional(string, "r7i.large")
-    api_port      = optional(number, 9100)
+    # Elastic tier: the candidate instance types the mixed-instances policy
+    # draws spot capacity from. More types means more spot capacity pools, so
+    # price-capacity-optimized allocation lands in a deep, cheap pool and stops
+    # the churn a single-type spot request suffers when its one pool is thin
+    # (constant rebalance recommendations). Leave empty to fall back to the
+    # single instance_type above. Keep the list to comparable memory sizes
+    # unless warm_per_gb is set — max_warm is a fixed per-worker cap otherwise,
+    # so a smaller instance would over-commit warm slots. The static tier
+    # ignores this and always uses instance_type.
+    instance_types = optional(list(string), [])
+    api_port       = optional(number, 9100)
     # Elastic tier only: the control node's worker-registration listener port.
     control_port        = optional(number, 9101)
     max_warm            = optional(number, 12)
