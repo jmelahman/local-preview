@@ -18,6 +18,7 @@ Start the orchestrator.
 | `--preview-base-url` | (derived) | Public base URL of previews, e.g. `https://preview.example.com` — sets the scheme, domain, and port of generated preview URLs when the server sits behind a proxy |
 | `--build-concurrency` | `2` | Number of deploys built in parallel |
 | `--poll-interval` | `1m` | How often watched repos are fetched for new commits (`0` disables watching) |
+| `--min-warm-window` | (always active) | Active hours for the [min-warm floor](/reference/api#get-apiwarm), e.g. `"Mon-Fri 08:00-18:00 America/Chicago"` (tz optional, default UTC). Outside the window the floor is `0`, so idle previews drain and the worker fleet can scale to zero; demand-driven scale-out is unaffected (default: `$PREVIEW_MIN_WARM_WINDOW`) |
 | `--github-webhook-secret` | `$PREVIEW_GITHUB_WEBHOOK_SECRET` | Shared secret validating GitHub webhook deliveries (empty disables the endpoint) |
 | `--max-upload-bytes` | `$PREVIEW_MAX_UPLOAD_BYTES` (`2147483648`, 2 GiB) | Maximum bytes a CI [upload](/reference/api#uploads) may stream: the compressed request body is rejected with `413` above it, and extraction aborts if the decompressed tar exceeds it (guards against a gzip bomb filling the disk). Raise it for larger legitimate artifacts; `0` disables both caps |
 | `--sso-github-client-id` | `$PREVIEW_SSO_GITHUB_CLIENT_ID` | GitHub OAuth App client ID; setting it turns on [SSO login](/guide/sso) for the dashboard, API, and previews |

@@ -60,6 +60,15 @@ Two details of the wire spec are load-bearing:
   `true` from then on — a fresh worker skips init instead of re-running it.
   The worker's spec cache also keeps `init_done` sticky per node, as the
   backstop for offers that race that write.
+- **The `min_warm` floor is fleet-wide; `max_warm` is per worker.** The
+  heartbeat loop ranks the fleet's processes by recency (`last_touch` rides
+  each worker's report) and pushes every worker its share of the floor, so
+  "min 12" protects the 12 most-recent processes total — not 12 per worker,
+  which would multiply with fleet size and, since floor-protected processes
+  never idle out, silently pin every worker against ASG scale-in. An
+  optional `--min-warm-window` ("Mon-Fri 08:00-18:00 America/Chicago")
+  zeroes the floor outside working hours so the fleet drains to zero;
+  demand-driven scale-out is unaffected.
 
 ## Placement
 

@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"hash/fnv"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -94,6 +95,12 @@ type Registry struct {
 	desiredMinWarm atomic.Int64
 	desiredIdleSec atomic.Int64
 
+	// minWarmActive gates the min-warm floor by wall clock (nil = always
+	// active). Outside the window every worker is pushed a floor of 0, so
+	// idle previews drain, workers empty, and the ASG can return to zero.
+	// Set once before StartHeartbeats; not safe to change after.
+	minWarmActive func(time.Time) bool
+
 	// eventSink, when set, receives the process-event batches workers ship in
 	// their heartbeats (SetEventSink). Events are recorded where a process
 	// RUNS — a worker's own ephemeral database — so without shipping them the
@@ -140,10 +147,60 @@ func (r *Registry) SetMaxWarm(n int) {
 	r.desiredMaxWarm.Store(int64(max(n, 0)))
 }
 
-// SetMinWarm sets the fleet-wide warm floor, reconciled onto workers like
-// SetMaxWarm.
+// SetMinWarm sets the fleet-wide warm floor: the n most-recently-touched
+// processes ACROSS THE FLEET never idle out. Unlike SetMaxWarm's per-worker
+// cap, the floor is not applied verbatim to every worker — the heartbeat loop
+// ranks the fleet's processes by recency and pushes each worker only its
+// share (minWarmQuotas), so "min 12" protects 12 processes total, however
+// many workers exist.
 func (r *Registry) SetMinWarm(n int) {
 	r.desiredMinWarm.Store(int64(max(n, 0)))
+}
+
+// SetMinWarmWindow gates the min-warm floor by wall clock: outside active
+// hours the floor is 0 (idle previews drain and the fleet can scale to zero);
+// scale-out from demand is unaffected. nil restores always-active. Call
+// before StartHeartbeats.
+func (r *Registry) SetMinWarmWindow(active func(time.Time) bool) {
+	r.minWarmActive = active
+}
+
+// minWarmQuotas splits the fleet-wide floor into per-worker shares: the
+// desiredMinWarm most-recently-touched processes fleet-wide, counted per
+// worker. A worker's local reaper protects ITS most-recent quota-many
+// processes, and local recency order agrees with fleet order restricted to
+// that worker, so the pushed count protects exactly the fleet's top-N.
+// Returns ok=false when the floor is unset (-1): workers then keep their
+// boot-flag values, matching the other settings' unset semantics. Workers
+// absent from the map get 0.
+func (r *Registry) minWarmQuotas(ctx context.Context) (map[string]int, bool) {
+	want := int(r.desiredMinWarm.Load())
+	if want < 0 {
+		return nil, false
+	}
+	quotas := map[string]int{}
+	if want == 0 || (r.minWarmActive != nil && !r.minWarmActive(time.Now())) {
+		return quotas, true
+	}
+	type cand struct {
+		touch    time.Time
+		workerID string
+	}
+	var cands []cand
+	for _, e := range r.report(ctx) {
+		// Only live processes hold a floor slot; a crashed record protects
+		// nothing. LastTouch is zero from workers that predate the field,
+		// which ranks them least-recent — the conservative end.
+		if e.rep.Status != supervise.StatusRunning && e.rep.Status != supervise.StatusStarting {
+			continue
+		}
+		cands = append(cands, cand{touch: e.rep.LastTouch, workerID: e.worker.id})
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].touch.After(cands[j].touch) })
+	for i := 0; i < len(cands) && i < want; i++ {
+		quotas[cands[i].workerID]++
+	}
+	return quotas, true
 }
 
 // SetIdleOverride sets the fleet-wide idle-timeout override (0 = restore
@@ -228,6 +285,9 @@ func (r *Registry) recordHeartbeat(id string, hb workerapi.Heartbeat, at time.Ti
 // interval, until ctx is cancelled. Returns after launching the loop.
 func (r *Registry) StartHeartbeats(ctx context.Context, interval time.Duration) {
 	poll := func() {
+		// One fleet-wide ranking per sweep: every worker's push below reads
+		// the same recency snapshot, so the quotas sum to the floor.
+		minQuota, haveMinQuota := r.minWarmQuotas(ctx)
 		var wg sync.WaitGroup
 		for _, w := range r.list() {
 			wg.Add(1)
@@ -254,9 +314,11 @@ func (r *Registry) StartHeartbeats(ctx context.Context, interval time.Duration) 
 						n := int(want)
 						cfg.MaxWarm = &n
 					}
-					if want := r.desiredMinWarm.Load(); want >= 0 && hb.MinWarm != int(want) {
-						n := int(want)
-						cfg.MinWarm = &n
+					if haveMinQuota {
+						if want := minQuota[w.id]; hb.MinWarm != want {
+							n := want
+							cfg.MinWarm = &n
+						}
 					}
 					if want := r.desiredIdleSec.Load(); want >= 0 && hb.IdleTimeoutSeconds != int(want) {
 						n := int(want)

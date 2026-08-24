@@ -121,6 +121,7 @@ for lookup order and caching semantics.
 | `PREVIEW_BASE_URL` | `preview serve` | Public base URL of previews (an explicit `--preview-base-url` flag wins). Not to be confused with `PREVIEW_URL`, which is a client setting |
 | `PREVIEW_GITHUB_WEBHOOK_SECRET` | `preview serve` | GitHub webhook shared secret (an explicit `--github-webhook-secret` flag wins) |
 | `PREVIEW_MAX_UPLOAD_BYTES` | `preview serve` | Maximum bytes a CI upload may stream, both compressed on the wire and decompressed on disk (an explicit `--max-upload-bytes` flag wins). Defaults to 2 GiB; `0` disables both caps |
+| `PREVIEW_MIN_WARM_WINDOW` | `preview serve` | Active hours for the min-warm floor, e.g. `Mon-Fri 08:00-18:00 America/Chicago` (an explicit `--min-warm-window` flag wins). Outside the window the floor is 0 and the worker fleet can drain to zero |
 | `PREVIEW_GITHUB_OIDC_AUDIENCE` | `preview serve`, `preview upload` | The OIDC audience: on the server it's the expected `aud` (an explicit `--github-oidc-audience` flag wins); on the client it's the audience requested for the token when `--oidc-audience` is unset |
 | `PREVIEW_GITHUB_OIDC_ISSUER` | `preview serve` | OIDC issuer override for GitHub Enterprise Server (an explicit `--github-oidc-issuer` flag wins) |
 | `PREVIEW_UPLOAD_TOKEN` | `preview upload` | A pre-fetched bearer token sent as-is; wins over `--oidc` and needs no runner |
@@ -178,7 +179,12 @@ footprint:
   *processes*: a deploy with a frontend process occupies two slots.
 - **Warm floor** — `min_warm` (dashboard/API only) exempts that many
   most-recently-used processes from the idle timeout, keeping the previews a
-  developer is most likely to revisit hot indefinitely.
+  developer is most likely to revisit hot indefinitely. On a fleet the floor
+  is **fleet-wide**: the control node ranks every worker's processes by
+  recency and hands each worker its share, so the number means the same
+  thing at one worker or four. A floor-protected process never idles out,
+  which also keeps its worker from scaling in — use `--min-warm-window` to
+  zero the floor outside working hours so the fleet can drain.
 
 All three knobs are editable at runtime from the dashboard (Storage &
 retention → Warm previews) or via

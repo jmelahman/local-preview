@@ -16,6 +16,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// The container image (alpine) ships no zoneinfo; embed Go's so a
+	// --min-warm-window naming an IANA zone resolves everywhere the binary
+	// runs.
+	_ "time/tzdata"
 
 	"github.com/spf13/cobra"
 
@@ -91,6 +95,7 @@ type serveOptions struct {
 	maxWarm          int
 	maxWarmPerGB     float64
 	maxWarmReserveGB float64
+	minWarmWindow    string
 	pollInterval     time.Duration
 	githubSecret     string
 	githubOIDCAud    string
@@ -158,6 +163,7 @@ func Root() *cobra.Command {
 	serve.Flags().IntVar(&opts.maxWarm, "max-warm", 8, "Maximum concurrently running preview processes; the least-recently-used are stopped beyond it (0 = unlimited)")
 	serve.Flags().Float64Var(&opts.maxWarmPerGB, "max-warm-per-gb", 0, "Derive --max-warm from this machine's RAM instead of a fixed number: (total GiB - --max-warm-reserve-gb) × this, floored at 1. Lets one launch template drive a mixed-instances fleet where each worker sizes its warm cap to the instance it landed on (default: $PREVIEW_MAX_WARM_PER_GB; 0 disables, keeping --max-warm)")
 	serve.Flags().Float64Var(&opts.maxWarmReserveGB, "max-warm-reserve-gb", 1, "GiB of RAM held back for the OS, orchestrator, and cache when --max-warm-per-gb derives the cap (default: $PREVIEW_MAX_WARM_RESERVE_GB)")
+	serve.Flags().StringVar(&opts.minWarmWindow, "min-warm-window", "", "Active hours for the fleet's min-warm floor, e.g. \"Mon-Fri 08:00-18:00 America/Chicago\" (tz optional, default UTC). Outside the window the floor is 0, so idle previews drain and the worker fleet can scale to zero; demand-driven scale-out is unaffected. Empty keeps the floor always active (default: $PREVIEW_MIN_WARM_WINDOW)")
 	serve.Flags().DurationVar(&opts.pollInterval, "poll-interval", watch.DefaultInterval, "How often watched repos are fetched for new commits (0 disables watching)")
 	serve.Flags().StringVar(&opts.githubSecret, "github-webhook-secret", "", "Shared secret validating GitHub webhook deliveries (default: $PREVIEW_GITHUB_WEBHOOK_SECRET; empty disables the endpoint)")
 	serve.Flags().StringVar(&opts.githubOIDCAud, "github-oidc-audience", "", "Expected audience of GitHub Actions OIDC tokens (default: $PREVIEW_GITHUB_OIDC_AUDIENCE); setting it requires uploads to authenticate with a valid token bound to the target repo")
@@ -270,6 +276,7 @@ func run(opts serveOptions) error {
 	envDefault(&opts.s3SecretKey, "PREVIEW_S3_SECRET_KEY")
 	envDefaultInt64(&opts.cacheMaxArtifactBytes, "PREVIEW_CACHE_MAX_ARTIFACT_BYTES")
 	envOverrideInt64(&opts.maxUploadBytes, "PREVIEW_MAX_UPLOAD_BYTES", defaultMaxUploadBytes)
+	envDefault(&opts.minWarmWindow, "PREVIEW_MIN_WARM_WINDOW")
 	envDefault(&opts.workerSecret, "PREVIEW_WORKER_SECRET")
 	envDefault(&opts.workerEndpoint, "PREVIEW_WORKER_ENDPOINT")
 	envDefault(&opts.workerEndpoints, "PREVIEW_WORKER_ENDPOINTS")
@@ -488,6 +495,14 @@ func run(opts serveOptions) error {
 		endpoints := workerEndpoints(opts)
 		if len(endpoints) > 0 || opts.controlListen != "" {
 			reg = fleet.New(fleetStaleAfter)
+			if opts.minWarmWindow != "" {
+				active, werr := fleet.ParseMinWarmWindow(opts.minWarmWindow)
+				if werr != nil {
+					return werr
+				}
+				reg.SetMinWarmWindow(active)
+				log.Printf("min-warm floor active %s; outside it the floor is 0 and the fleet drains", opts.minWarmWindow)
+			}
 			registrar = workerRegistrar{reg: reg, super: super, secret: opts.workerSecret}
 			for _, ep := range endpoints {
 				host := opts.workerHost

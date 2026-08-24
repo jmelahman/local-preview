@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,13 +12,33 @@ import (
 )
 
 type fakeBackend struct {
-	id         string
-	hb         workerapi.Heartbeat // returned by Heartbeat (zero by default)
-	ensured    []supervise.Key
-	report     []supervise.ProcReport
-	logs       map[string]supervise.RunLog // keyed side+"-"+hash
-	stopped    []supervise.Key
-	configured []int
+	id      string
+	hb      workerapi.Heartbeat // returned by Heartbeat (zero by default)
+	ensured []supervise.Key
+	report  []supervise.ProcReport
+	logs    map[string]supervise.RunLog // keyed side+"-"+hash
+	stopped []supervise.Key
+
+	// Configure records, mutex-guarded: the heartbeat loop pushes from its
+	// own goroutines.
+	cfgMu         sync.Mutex
+	configured    []int
+	configuredMin []int
+}
+
+// lastConfigured returns the most recent MaxWarm and MinWarm pushes (-1 =
+// never pushed).
+func (f *fakeBackend) lastConfigured() (maxWarm, minWarm int) {
+	f.cfgMu.Lock()
+	defer f.cfgMu.Unlock()
+	maxWarm, minWarm = -1, -1
+	if n := len(f.configured); n > 0 {
+		maxWarm = f.configured[n-1]
+	}
+	if n := len(f.configuredMin); n > 0 {
+		minWarm = f.configuredMin[n-1]
+	}
+	return maxWarm, minWarm
 }
 
 func (f *fakeBackend) EnsureRunning(_ context.Context, k supervise.Key, _ string) (string, error) {
@@ -38,8 +59,13 @@ func (f *fakeBackend) Stop(_ context.Context, k supervise.Key, _ string) error {
 	return nil
 }
 func (f *fakeBackend) Configure(_ context.Context, cfg workerapi.WorkerConfig) error {
+	f.cfgMu.Lock()
+	defer f.cfgMu.Unlock()
 	if cfg.MaxWarm != nil {
 		f.configured = append(f.configured, *cfg.MaxWarm)
+	}
+	if cfg.MinWarm != nil {
+		f.configuredMin = append(f.configuredMin, *cfg.MinWarm)
 	}
 	return nil
 }
@@ -311,5 +337,102 @@ func TestHeartbeatShipsEventsToSink(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("event sink never received the heartbeat batch")
+	}
+}
+
+// TestMinWarmQuotasAreFleetWide asserts the floor protects the N most-recent
+// processes ACROSS workers, not N per worker: quotas follow where the fleet's
+// freshest processes live and sum to the floor.
+func TestMinWarmQuotasAreFleetWide(t *testing.T) {
+	base := time.Now()
+	r, bes := regFresh(t, map[string]workerapi.Heartbeat{
+		"w1": {}, "w2": {},
+	})
+	bes["w1"].report = []supervise.ProcReport{
+		{Key: supervise.BackendKey(1, "a"), Status: supervise.StatusRunning, LastTouch: base.Add(-1 * time.Hour)},
+		{Key: supervise.BackendKey(1, "b"), Status: supervise.StatusRunning, LastTouch: base.Add(-3 * time.Hour)},
+		// Crashed holds no floor slot, however fresh.
+		{Key: supervise.BackendKey(1, "x"), Status: supervise.StatusCrashed, LastTouch: base},
+	}
+	bes["w2"].report = []supervise.ProcReport{
+		{Key: supervise.BackendKey(2, "c"), Status: supervise.StatusRunning, LastTouch: base},
+		{Key: supervise.BackendKey(2, "d"), Status: supervise.StatusStarting, LastTouch: base.Add(-2 * time.Hour)},
+		{Key: supervise.BackendKey(2, "e"), Status: supervise.StatusRunning, LastTouch: base.Add(-4 * time.Hour)},
+	}
+
+	r.SetMinWarm(3)
+	quotas, ok := r.minWarmQuotas(context.Background())
+	if !ok {
+		t.Fatal("floor set but quotas reported unset")
+	}
+	// Top 3 by recency: c (base, w2), a (-1h, w1), d (-2h, w2).
+	if quotas["w1"] != 1 || quotas["w2"] != 2 {
+		t.Fatalf("quotas = %v, want w1:1 w2:2", quotas)
+	}
+
+	// A floor larger than the fleet's processes protects them all.
+	r.SetMinWarm(50)
+	r.reportAt = time.Time{} // bust the report cache
+	if quotas, _ = r.minWarmQuotas(context.Background()); quotas["w1"]+quotas["w2"] != 5 {
+		t.Fatalf("oversized floor quotas = %v, want 5 total", quotas)
+	}
+}
+
+// TestMinWarmQuotasUnsetAndWindow asserts the two off states: an unset floor
+// leaves workers alone entirely, and a set floor outside its active window
+// pushes 0 everywhere (so the fleet drains).
+func TestMinWarmQuotasUnsetAndWindow(t *testing.T) {
+	r, bes := regFresh(t, map[string]workerapi.Heartbeat{"w1": {}})
+	bes["w1"].report = []supervise.ProcReport{
+		{Key: supervise.BackendKey(1, "a"), Status: supervise.StatusRunning, LastTouch: time.Now()},
+	}
+
+	if _, ok := r.minWarmQuotas(context.Background()); ok {
+		t.Fatal("unset floor must report ok=false (workers keep boot values)")
+	}
+
+	r.SetMinWarm(12)
+	r.SetMinWarmWindow(func(time.Time) bool { return false })
+	quotas, ok := r.minWarmQuotas(context.Background())
+	if !ok || quotas["w1"] != 0 {
+		t.Fatalf("outside the window: quotas = %v, ok = %v, want 0/true", quotas, ok)
+	}
+}
+
+// TestHeartbeatLoopPushesMinWarmQuotas asserts the plumbing: the poll pushes
+// each worker its own share, and outside the window it pushes 0 over a
+// worker's nonzero boot value.
+func TestHeartbeatLoopPushesMinWarmQuotas(t *testing.T) {
+	base := time.Now()
+	r, bes := regFresh(t, map[string]workerapi.Heartbeat{
+		"w1": {MinWarm: 5}, "w2": {MinWarm: 5},
+	})
+	bes["w1"].hb = workerapi.Heartbeat{MinWarm: 5}
+	bes["w2"].hb = workerapi.Heartbeat{MinWarm: 5}
+	bes["w1"].report = []supervise.ProcReport{
+		{Key: supervise.BackendKey(1, "a"), Status: supervise.StatusRunning, LastTouch: base},
+	}
+	bes["w2"].report = []supervise.ProcReport{
+		{Key: supervise.BackendKey(2, "b"), Status: supervise.StatusRunning, LastTouch: base.Add(-time.Hour)},
+		{Key: supervise.BackendKey(2, "c"), Status: supervise.StatusRunning, LastTouch: base.Add(-2 * time.Hour)},
+	}
+	r.SetMinWarm(2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.StartHeartbeats(ctx, 10*time.Millisecond)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		_, w1Min := bes["w1"].lastConfigured()
+		_, w2Min := bes["w2"].lastConfigured()
+		if w1Min == 1 && w2Min == 1 { // top-2: a (w1), b (w2)
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("quotas never pushed: w1=%d w2=%d, want 1/1", w1Min, w2Min)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

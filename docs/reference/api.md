@@ -563,8 +563,13 @@ Returns the [warm-process policy](/guide/configuration#warm-previews):
 served in full; only genuinely idle least-recently-used processes are pruned
 back (`0` = unlimited; a process-mode deploy counts as two — frontend +
 backend). `min_warm` is the floor: that many most-recent processes never
-idle out. `idle_timeout_seconds` overrides every manifest's `idle_timeout`
-when `> 0` (`0` = per-manifest values, default 30m).
+idle out — **fleet-wide** on a control node (the heartbeat loop ranks the
+fleet's processes by recency and hands each worker its share, so `12`
+protects 12 processes total however many workers exist), and simply local
+on a single node. A `--min-warm-window` gates the floor by wall clock:
+outside active hours it is `0` and the fleet can drain to zero.
+`idle_timeout_seconds` overrides every manifest's `idle_timeout` when `> 0`
+(`0` = per-manifest values, default 30m).
 
 ```json
 { "max_warm": 12, "min_warm": 0, "idle_timeout_seconds": 0 }

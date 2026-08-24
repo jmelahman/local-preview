@@ -169,10 +169,11 @@ func TestStatusCarriesFailureDetail(t *testing.T) {
 // wire intact — keys, stats, and chunk fields alike.
 func TestReportAndRunLogRoundTrip(t *testing.T) {
 	cpu := 12.5
+	touch := time.Now().Add(-3 * time.Minute).Truncate(time.Second)
 	k := supervise.FrontendKey(7, "feHASH", "beHASH")
 	sup := &fakeSup{
 		report: []supervise.ProcReport{{
-			Key: k, Repo: "demo", Status: supervise.StatusRunning,
+			Key: k, Repo: "demo", Status: supervise.StatusRunning, LastTouch: touch,
 			Stats: &supervise.ProcessStats{Runtime: "container", CPUPercent: &cpu, MemoryBytes: 42, MemoryLimitBytes: 100},
 		}, {
 			Key: supervise.BackendKey(7, "beHASH"), Status: supervise.StatusCrashed, Error: "boom",
@@ -189,8 +190,16 @@ func TestReportAndRunLogRoundTrip(t *testing.T) {
 	if procs[0].Key != k || procs[0].Repo != "demo" || procs[0].Stats == nil || *procs[0].Stats.CPUPercent != cpu {
 		t.Fatalf("proc[0] = %+v", procs[0])
 	}
+	// Recency survives the wire — the control node's fleet-wide min-warm
+	// ranking depends on it.
+	if !procs[0].LastTouch.Equal(touch) {
+		t.Fatalf("proc[0].LastTouch = %v, want %v", procs[0].LastTouch, touch)
+	}
 	if procs[1].Status != supervise.StatusCrashed || procs[1].Error != "boom" {
 		t.Fatalf("proc[1] = %+v", procs[1])
+	}
+	if !procs[1].LastTouch.IsZero() {
+		t.Fatalf("crashed record LastTouch = %v, want zero (omitted on the wire)", procs[1].LastTouch)
 	}
 
 	chunk, err := c.RunLog(context.Background(), "demo", "fe", "feHASH", 0, 0)

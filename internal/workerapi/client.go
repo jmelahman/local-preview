@@ -116,6 +116,7 @@ func (c *Client) Report(ctx context.Context) ([]supervise.ProcReport, error) {
 	for _, p := range resp.Procs {
 		out = append(out, supervise.ProcReport{
 			Key: p.Key.toKey(), Repo: p.Repo, Status: p.Status, Error: p.Error, Stats: p.Stats,
+			LastTouch: p.LastTouch,
 		})
 	}
 	return out, nil

@@ -140,6 +140,7 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	for _, p := range procs {
 		resp.Procs = append(resp.Procs, wireProc{
 			Key: fromKey(p.Key), Repo: p.Repo, Status: p.Status, Error: p.Error, Stats: p.Stats,
+			LastTouch: p.LastTouch,
 		})
 	}
 	writeJSON(w, resp)

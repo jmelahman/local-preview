@@ -14,6 +14,8 @@
 package workerapi
 
 import (
+	"time"
+
 	"github.com/jmelahman/local-preview/internal/supervise"
 )
 
@@ -124,6 +126,10 @@ type wireProc struct {
 	Status string                  `json:"status"`
 	Error  string                  `json:"error,omitempty"`
 	Stats  *supervise.ProcessStats `json:"stats,omitempty"`
+	// LastTouch feeds the control node's fleet-wide min-warm ranking. An
+	// optional v1 addition: a worker that predates it omits the field and its
+	// processes rank least-recent.
+	LastTouch time.Time `json:"last_touch,omitzero"`
 }
 
 // runlog: an incremental slice of a run log on the worker's disk. Logs are

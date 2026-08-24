@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 	"strings"
 )
 
@@ -96,6 +97,11 @@ type ProcReport struct {
 	Status string        `json:"status"`
 	Error  string        `json:"error,omitempty"` // failure detail behind a "crashed" status
 	Stats  *ProcessStats `json:"stats,omitempty"`
+	// LastTouch is the process's recency (when a request last hit it) — what
+	// the control node ranks fleet-wide to hand each worker its share of the
+	// min-warm floor. Zero for crashed records and from workers that predate
+	// the field, which ranks them least-recent.
+	LastTouch time.Time `json:"last_touch,omitempty"`
 }
 
 // Report returns every key with live state on this node: tracked processes
@@ -104,13 +110,14 @@ type ProcReport struct {
 // is the default the reader assumes for anything unlisted.
 func (m *Manager) Report(ctx context.Context) []ProcReport {
 	type live struct {
-		k Key
-		p *process
+		k     Key
+		p     *process
+		touch time.Time // captured under the lock; lastTouch is mu-guarded
 	}
 	m.mu.Lock()
 	procs := make([]live, 0, len(m.procs))
 	for k, p := range m.procs {
-		procs = append(procs, live{k, p})
+		procs = append(procs, live{k, p, p.lastTouch})
 	}
 	crashed := make([]ProcReport, 0, len(m.failures))
 	for k, f := range m.failures {
@@ -122,7 +129,7 @@ func (m *Manager) Report(ctx context.Context) []ProcReport {
 
 	out := crashed
 	for _, l := range procs {
-		rep := ProcReport{Key: l.k, Repo: l.p.repoName, Status: m.Status(l.k)}
+		rep := ProcReport{Key: l.k, Repo: l.p.repoName, Status: m.Status(l.k), LastTouch: l.touch}
 		if rep.Status == StatusIdle {
 			continue // exited between the snapshot and now; idle is the default
 		}
