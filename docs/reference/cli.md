@@ -11,7 +11,7 @@ Start the orchestrator.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--addr` | `:8080` | HTTP listen address |
+| `--addr` | `:8080` | HTTP listen address (`$PREVIEW_ADDR` sets the default; prefer the env in the container image — its healthcheck derives the probe port from it) |
 | `--data-dir` | (XDG) | Override the data directory |
 | `--in-memory` | `false` | Ephemeral in-memory SQLite |
 | `--preview-domain` | `preview.localhost` | Base domain previews are served under |

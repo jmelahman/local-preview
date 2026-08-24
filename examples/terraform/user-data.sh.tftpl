@@ -173,6 +173,11 @@ systemctl start 'local-preview-stack@${name}.service' || true
 # The data dir is bind-mounted at the same absolute path it has on the host,
 # because build containers are started through the host daemon and it
 # resolves bind sources against its own filesystem.
+#
+# The listen address rides in twice on purpose: PREVIEW_ADDR is what the
+# image's HEALTHCHECK derives its probe port from, and the --addr flag keeps
+# an older image (which predates the env) listening on the right port. Both
+# render from the same http_port, so they cannot drift.
 cat >/etc/systemd/system/local-preview.service <<EOF
 [Unit]
 Description=local-preview orchestrator
@@ -199,6 +204,7 @@ ExecStart=/usr/bin/docker run --rm --name local-preview \\
   -e PREVIEW_DATA_DIR=${data_dir} \\
   -e PREVIEW_CONFIG_DIR=${config_dir} \\
   -e PREVIEW_DOMAIN=${preview_domain} \\
+  -e PREVIEW_ADDR=0.0.0.0:${http_port} \\
   -v /var/run/docker.sock:/var/run/docker.sock \\
   -v ${data_dir}:${data_dir} \\
   -v ${config_dir}:${config_dir}:ro \\

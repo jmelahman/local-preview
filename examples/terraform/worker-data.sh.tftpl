@@ -52,7 +52,9 @@ set -x
 # processes publish ports in the host namespace. The public HTTP listener is
 # bound to loopback — nothing routes previews through a worker directly — and
 # the worker API binds the private IP, reachable only from the control node's
-# security group.
+# security group. The loopback address rides in twice like on the control
+# node: PREVIEW_ADDR drives the image HEALTHCHECK's probe port, --addr keeps
+# an older image listening right.
 cat >/etc/systemd/system/local-preview-worker.service <<EOF
 [Unit]
 Description=local-preview worker
@@ -70,6 +72,7 @@ ExecStart=/usr/bin/docker run --rm --name local-preview-worker \\
   --user 0:0 \\
   --env-file /etc/local-preview.env \\
   -e PREVIEW_DATA_DIR=${data_dir} \\
+  -e PREVIEW_ADDR=127.0.0.1:8081 \\
   -v /var/run/docker.sock:/var/run/docker.sock \\
   -v ${data_dir}:${data_dir} \\
   ${image} \\

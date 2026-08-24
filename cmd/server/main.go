@@ -149,7 +149,7 @@ func Root() *cobra.Command {
 			return run(opts)
 		},
 	}
-	serve.Flags().StringVar(&opts.addr, "addr", ":8080", "HTTP listen address")
+	serve.Flags().StringVar(&opts.addr, "addr", ":8080", "HTTP listen address (default: $PREVIEW_ADDR or :8080). In the container image, prefer setting $PREVIEW_ADDR: its HEALTHCHECK derives the probe port from that env, so a flag-only override leaves the probe on 8080")
 	serve.Flags().StringVar(&opts.dataDir, "data-dir", "", "Override data directory (default: $PREVIEW_DATA_DIR or XDG)")
 	serve.Flags().BoolVar(&opts.inMemory, "in-memory", false, "Use an ephemeral in-memory SQLite database; all data is discarded on shutdown")
 	serve.Flags().StringVar(&opts.previewDomain, "preview-domain", "", "Base domain previews are served under (default: $PREVIEW_DOMAIN or preview.localhost)")
@@ -211,6 +211,11 @@ const (
 )
 
 func run(opts serveOptions) error {
+	if opts.addr == ":8080" { // still the compiled default
+		if v := os.Getenv("PREVIEW_ADDR"); v != "" {
+			opts.addr = v
+		}
+	}
 	if opts.githubSecret == "" {
 		opts.githubSecret = os.Getenv("PREVIEW_GITHUB_WEBHOOK_SECRET")
 	}

@@ -38,8 +38,15 @@ RUN apk add --no-cache ca-certificates busybox-extras \
 COPY --from=go --chown=nonroot:nonroot /out/preview /preview
 USER nonroot
 ENV HOME=/home/nonroot \
-    PREVIEW_DATA_DIR=/data
+    PREVIEW_DATA_DIR=/data \
+    PREVIEW_ADDR=:8080
 EXPOSE 8080
+# Shell form on purpose: the probe port comes from the same env the server
+# listens on, so a deployment that overrides PREVIEW_ADDR (e.g. `-e
+# PREVIEW_ADDR=0.0.0.0:80`) moves the healthcheck with it. A hardcoded 8080
+# here reported "unhealthy" forever on any other port — invisible in
+# production because nothing consumes docker's health status, but it made
+# every real probe of the container lie.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD wget -q --spider http://127.0.0.1:8080/api/health || exit 1
+    CMD wget -q --spider "http://127.0.0.1:${PREVIEW_ADDR##*:}/api/health" || exit 1
 ENTRYPOINT ["/preview", "serve"]

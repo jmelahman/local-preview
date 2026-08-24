@@ -114,6 +114,7 @@ for lookup order and caching semantics.
 
 | Variable | Used by | Description |
 | --- | --- | --- |
+| `PREVIEW_ADDR` | `preview serve` | HTTP listen address (an explicit `--addr` flag wins). The container image's healthcheck derives its probe port from this env, so set it — not just `--addr` — when moving the port |
 | `PREVIEW_DATA_DIR` | `preview serve` | Data directory override |
 | `PREVIEW_CONFIG_DIR` | `preview serve`, CLI subcommands | Config directory override (`config.toml` sits directly under it, local manifests in `manifests/`) |
 | `PREVIEW_DOMAIN` | `preview serve` | Preview base domain (an explicit `--preview-domain` flag wins) |
