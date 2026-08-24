@@ -1164,3 +1164,30 @@ resource "aws_cloudwatch_metric_alarm" "load_low" {
   alarm_actions      = [aws_autoscaling_policy.scale_in[0].arn]
   tags               = local.tags
 }
+
+# Reclaim an EMPTY worker during working hours. The load-low alarm cannot: the
+# min-warm floor keeps 10+ processes running, so with two workers utilization
+# sits near 37% — above any scale-in threshold that would not oscillate against
+# the 70% scale-out line once the fleet is back to one node (12/16 = 75%). A
+# worker with zero running processes is a different fact entirely: its
+# scale-in protection is already released, so the shared -1 policy can only
+# ever take exactly that node, disturbing no preview. 15 sustained minutes so
+# a worker that just went idle gets a grace window to be re-placed onto first.
+resource "aws_cloudwatch_metric_alarm" "idle_worker" {
+  count = local.worker_autoscale ? 1 : 0
+
+  alarm_name          = "${var.name}-worker-idle"
+  alarm_description   = "A worker is serving nothing — reclaim it without waiting for fleet load to collapse."
+  namespace           = local.metrics_namespace
+  metric_name         = "IdleWorkers"
+  dimensions          = { AutoScalingGroupName = aws_autoscaling_group.worker[0].name }
+  statistic           = "Average"
+  period              = 60
+  evaluation_periods  = 15
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  # Not published at zero workers (nothing to reclaim) — a gap must not breach.
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_autoscaling_policy.scale_in[0].arn]
+  tags               = local.tags
+}

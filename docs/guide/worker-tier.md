@@ -68,7 +68,11 @@ Two details of the wire spec are load-bearing:
   never idle out, silently pin every worker against ASG scale-in. An
   optional `--min-warm-window` ("Mon-Fri 08:00-18:00 America/Chicago")
   zeroes the floor outside working hours so the fleet drains to zero;
-  demand-driven scale-out is unaffected.
+  demand-driven scale-out is unaffected. Because the floor keeps fleet
+  utilization above any sane load threshold, the control node also publishes
+  `IdleWorkers` — fresh, non-draining workers serving nothing — so an alarm
+  can reclaim an empty node mid-day without waiting for load to collapse
+  (the example terraform wires this to the shared scale-in policy).
 
 ## Placement
 

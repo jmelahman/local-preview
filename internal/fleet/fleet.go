@@ -520,6 +520,31 @@ func (r *Registry) BusyByInstance() map[string]bool {
 	return out
 }
 
+// IdleWorkers counts fresh, autoscaled (instance-id'd) workers serving
+// nothing. It backs the IdleWorkers metric, whose alarm reclaims exactly such
+// a node — a load-ratio threshold can't express "an empty worker exists"
+// while the min-warm floor props the numerator up (12 floor-protected
+// processes on a 32-slot fleet is 37.5% load forever). Draining workers are
+// excluded: one mid-termination via the lifecycle hook is already being
+// reclaimed, and counting it would decrement the group twice.
+func (r *Registry) IdleWorkers() int {
+	now := time.Now()
+	idle := 0
+	for _, w := range r.list() {
+		if w.instanceID == "" {
+			continue
+		}
+		hb, last, reachable := w.snapshot()
+		if !r.fresh(last, reachable, now) || hb.Draining {
+			continue
+		}
+		if hb.Running == 0 {
+			idle++
+		}
+	}
+	return idle
+}
+
 func (r *Registry) fresh(last time.Time, reachable bool, now time.Time) bool {
 	return reachable && !last.IsZero() && now.Sub(last) < r.staleAfter
 }

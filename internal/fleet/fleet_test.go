@@ -436,3 +436,24 @@ func TestHeartbeatLoopPushesMinWarmQuotas(t *testing.T) {
 		}
 	}
 }
+
+// TestIdleWorkers counts only reclaimable nodes: fresh, autoscaled, serving
+// nothing — draining workers (already mid-termination) and hand-wired ones
+// (no instance to reclaim) are excluded.
+func TestIdleWorkers(t *testing.T) {
+	r := New(time.Minute)
+	add := func(id, instanceID string, hb workerapi.Heartbeat, at time.Time) {
+		r.Add(id, instanceID, &fakeBackend{id: id})
+		r.recordHeartbeat(id, hb, at, true)
+	}
+	now := time.Now()
+	add("idle", "i-idle", workerapi.Heartbeat{Running: 0}, now)
+	add("busy", "i-busy", workerapi.Heartbeat{Running: 3}, now)
+	add("draining", "i-drain", workerapi.Heartbeat{Running: 0, Draining: true}, now)
+	add("handwired", "", workerapi.Heartbeat{Running: 0}, now)
+	add("stale", "i-stale", workerapi.Heartbeat{Running: 0}, now.Add(-time.Hour))
+
+	if got := r.IdleWorkers(); got != 1 {
+		t.Fatalf("IdleWorkers = %d, want 1 (only the fresh, non-draining, autoscaled idle one)", got)
+	}
+}

@@ -11,6 +11,11 @@
 //     published ONLY when at least one worker is fresh. It drives scale-out
 //     under load and scale-in when idle. Suppressing it at zero workers keeps
 //     the scale-in alarm from seeing phantom data before the fleet exists.
+//   - IdleWorkers — fresh, non-draining workers serving nothing
+//     (fleet.Registry.IdleWorkers), published under the same guard. Its alarm
+//     reclaims an empty node during working hours, when the min-warm floor
+//     keeps FleetLoad above the scale-in threshold no matter how much spare
+//     capacity sits idle.
 //
 // It also reconciles EC2 instance scale-in protection from the fleet's
 // per-instance busy map, so an ASG scale-in drains an idle node instead of
@@ -47,6 +52,9 @@ type Fleet interface {
 	// BusyByInstance maps each fresh worker's instance-id to whether it is
 	// serving a preview.
 	BusyByInstance() map[string]bool
+	// IdleWorkers counts fresh, non-draining autoscaled workers serving
+	// nothing — nodes the ASG can reclaim without disturbing any preview.
+	IdleWorkers() int
 }
 
 // Config parameterizes the publisher. ASGName is required (it is the CloudWatch
@@ -156,6 +164,20 @@ func (p *Publisher) publishMetrics(ctx context.Context) {
 			Timestamp:  aws.Time(now),
 			Value:      aws.Float64(loadPct),
 			Unit:       cwtypes.StandardUnitPercent,
+		})
+		// IdleWorkers rides the same at-least-one-worker guard: at zero there
+		// is nothing to reclaim, and its alarm treats missing data as fine.
+		// This is the reclaim signal a load ratio can't be: the min-warm
+		// floor keeps utilization comfortably above any sane scale-in
+		// threshold, so an EMPTY worker (protection already released) would
+		// otherwise idle until the floor's off-hours window lets load
+		// collapse.
+		data = append(data, cwtypes.MetricDatum{
+			MetricName: aws.String("IdleWorkers"),
+			Dimensions: dims,
+			Timestamp:  aws.Time(now),
+			Value:      aws.Float64(float64(p.fleet.IdleWorkers())),
+			Unit:       cwtypes.StandardUnitCount,
 		})
 	}
 	if _, err := p.cw.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{

@@ -15,11 +15,13 @@ type fakeFleet struct {
 	loadPct float64
 	workers int
 	busy    map[string]bool
+	idle    int
 }
 
 func (f *fakeFleet) DrainDemand() int64              { return f.demand }
 func (f *fakeFleet) LoadSample() (float64, int)      { return f.loadPct, f.workers }
 func (f *fakeFleet) BusyByInstance() map[string]bool { return f.busy }
+func (f *fakeFleet) IdleWorkers() int                { return f.idle }
 
 type fakeCW struct {
 	puts [][]cwtypes.MetricDatum
@@ -70,10 +72,11 @@ func TestPublishSuppressesLoadAtZeroWorkers(t *testing.T) {
 	}
 }
 
-// With workers present both metrics go out.
+// With workers present all three metrics go out — including IdleWorkers, the
+// reclaim signal for an empty node the floor-propped load ratio can't expose.
 func TestPublishReportsLoadWithWorkers(t *testing.T) {
 	cw := &fakeCW{}
-	p := newWith(&fakeFleet{demand: 0, loadPct: 42, workers: 2}, cw, &fakeAS{}, Config{ASGName: "asg"})
+	p := newWith(&fakeFleet{demand: 0, loadPct: 42, workers: 2, idle: 1}, cw, &fakeAS{}, Config{ASGName: "asg"})
 	p.publishMetrics(context.Background())
 
 	m := metricNames(cw.puts[0])
@@ -82,6 +85,21 @@ func TestPublishReportsLoadWithWorkers(t *testing.T) {
 	}
 	if m["FleetLoad"] != 42 {
 		t.Fatalf("FleetLoad = %v, want 42", m["FleetLoad"])
+	}
+	if m["IdleWorkers"] != 1 {
+		t.Fatalf("IdleWorkers = %v, want 1", m["IdleWorkers"])
+	}
+}
+
+// IdleWorkers rides FleetLoad's zero-workers suppression: an empty fleet has
+// nothing to reclaim, and its alarm must see missing data, not a zero.
+func TestPublishSuppressesIdleWorkersAtZeroWorkers(t *testing.T) {
+	cw := &fakeCW{}
+	p := newWith(&fakeFleet{workers: 0, idle: 0}, cw, &fakeAS{}, Config{ASGName: "asg"})
+	p.publishMetrics(context.Background())
+
+	if _, ok := metricNames(cw.puts[0])["IdleWorkers"]; ok {
+		t.Fatalf("IdleWorkers published at zero workers: %v", cw.puts[0])
 	}
 }
 
