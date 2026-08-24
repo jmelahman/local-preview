@@ -792,3 +792,38 @@ fleet cold start as ~0s.
 control-DB table that fleet-mode writes on workers (the warm/cold hit
 counters already ride the heartbeat for the same reason) — and any replay
 path that lets the database default a timestamp the metric depends on.
+
+## A worker's init result must flow back to the control DB, or init re-runs on every fresh worker
+
+**Symptom.** On the fleet deployment (onyx previews), the manifest's backend
+`init` steps re-ran on nearly every idle→starting wake — visible as an init
+phase on the starting page and needless cold-start latency. The heavy work
+was skipped (the per-artifact database already existed, alembic no-op'd), so
+it looked like "the seed restores more than it should" rather than a bug.
+
+**Root cause.** `init_done_at` lives in the control node's DB, but
+`markInitDone` only writes the DB when the init ran on the node that owns the
+row (`!spec.fromWire`). On a worker, completion went into the in-memory
+`wireSpecs` cache alone, and nothing carried it back — `ensureResp` was
+port-only and the fleet path never marked. On a control node that only
+routes (the production shape), `init_done_at` was never set for any
+artifact, every ensure shipped `InitDone=false`, and only `OfferWireSpec`'s
+per-node stickiness masked it. A fleet resting at zero workers made fresh
+workers the common case, so the mask almost never applied.
+
+**Fix.** No wire change: a successful backend ensure already proves init
+succeeded (the worker 502s the ensure otherwise), so `workerapi.Client`
+gained an `InitMarker` hook — `supervise.AdoptRemoteInitDone`, wired where
+`SpecResolver` is — invoked when a backend ensure succeeds and the shipped
+spec had `InitDone=false`. Works against old workers too. Frontend ensures
+never mark: they only start the co-placed backend when `{backend_url}` is
+referenced, and the proxy ensures the backend directly on API routes anyway.
+Adoption is sound because init is once per ARTIFACT, not per node — its
+effects live in external services keyed on `{hash}`; `{state_dir}` in init
+on workers is already loudly unsupported.
+
+**What would reintroduce it.** Any new per-artifact fact recorded where the
+work happens (a worker) but consulted where placement happens (the control
+DB) — same family as "fleet statistics must ship from where the data is
+born". And any init semantics change that makes init effects node-local:
+adoption then skips work node B genuinely needs.

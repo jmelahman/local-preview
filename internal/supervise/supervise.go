@@ -554,9 +554,11 @@ func (m *Manager) ResolveWireSpec(k Key) (WireSpec, error) {
 
 // OfferWireSpec caches a control-resolved run spec for k. The DB stays the
 // authority — spec lookup consults it first — so offering a spec on a node
-// that also builds changes nothing. InitDone is sticky: the control node has
-// no record of an init that ran on this node, so a later offer with
-// InitDone=false must not make every cold start here re-run init.
+// that also builds changes nothing. InitDone is sticky: a later offer with
+// InitDone=false must not make every cold start here re-run init. The control
+// node normally adopts a worker's init result off the ensure response
+// (AdoptRemoteInitDone), so this is the backstop for the offers that race
+// that write, not the only guard.
 func (m *Manager) OfferWireSpec(k Key, s WireSpec) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -571,6 +573,18 @@ func (m *Manager) wireSpec(k Key) (WireSpec, bool) {
 	defer m.mu.Unlock()
 	s, ok := m.wireSpecs[k]
 	return s, ok
+}
+
+// AdoptRemoteInitDone records in this node's DB a backend init that completed
+// on a worker. The caller (workerapi.Client) proves it from a successful
+// backend ensure — the worker fails the ensure on init failure — and init is
+// once per ARTIFACT, not per node: its effects live in external services
+// keyed on {hash}, never in worker-local state ({state_dir} on workers is
+// loudly unsupported — see ResolveWireSpec). Without adoption, init_done_at
+// stays false forever on a control node that never serves locally, and every
+// fresh worker re-runs init.
+func (m *Manager) AdoptRemoteInitDone(k Key) error {
+	return m.db.MarkBackendInitDone(k.RepoID, k.Hash)
 }
 
 // markInitDone records a completed init where the spec came from: the DB row

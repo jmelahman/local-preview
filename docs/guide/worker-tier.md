@@ -54,10 +54,12 @@ Two details of the wire spec are load-bearing:
 - **State dirs travel as identity, not paths.** Each node recomputes the path
   against its own store root — and a worker's state dir starts fresh (see
   [limitations](#limitations)).
-- **`init_done` is sticky per node.** The control node has no record of an
-  init that ran on a worker, so it re-sends `false` forever; the worker's
-  spec cache keeps a completed init from re-running on its own later cold
-  starts.
+- **`init_done` flows back by inference, not by wire.** A successful backend
+  ensure proves the init steps succeeded (the worker fails the ensure
+  otherwise), so the control node records it in its own database and ships
+  `true` from then on — a fresh worker skips init instead of re-running it.
+  The worker's spec cache also keeps `init_done` sticky per node, as the
+  backstop for offers that race that write.
 
 ## Placement
 

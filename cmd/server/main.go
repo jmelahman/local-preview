@@ -1015,6 +1015,11 @@ func (wr workerRegistrar) Register(endpoint, host, instanceID string) error {
 	// The worker has no artifact rows: every ensure carries the control-DB
 	// resolved run spec.
 	wc.SpecResolver = wr.super.ResolveWireSpec
+	// And init results flow back: a successful backend ensure proves the
+	// worker ran (or already had) the artifact's init, so record it here —
+	// otherwise init_done_at never gets set on a control node that only
+	// routes, and every fresh worker re-runs init on cold placement.
+	wc.InitMarker = wr.super.AdoptRemoteInitDone
 	// Add is idempotent for a known worker (they re-announce every ~20s);
 	// only a genuinely new one is worth a log line.
 	if wr.reg.Add(endpoint, instanceID, wc) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -30,6 +31,16 @@ type Client struct {
 	// which only serves against a worker whose own DB knows the artifact;
 	// outside tests that means every ensure fails "not provisioned".
 	SpecResolver func(k supervise.Key) (supervise.WireSpec, error)
+
+	// InitMarker records a backend init proven complete on the worker —
+	// supervise.(*Manager).AdoptRemoteInitDone in production. A successful
+	// backend ensure implies the init steps succeeded (the worker fails the
+	// ensure otherwise), so the control DB can adopt the result without any
+	// wire change, old workers included. Without it, init_done_at never
+	// leaves the worker's in-memory spec cache, and every cold placement on
+	// a fresh worker re-runs init — a fleet resting at zero workers re-ran
+	// it on nearly every wake. Nil skips the write.
+	InitMarker func(k supervise.Key) error
 }
 
 // NewClient dials a worker. baseURL is its private worker-API URL; host is the
@@ -64,6 +75,17 @@ func (c *Client) EnsureRunning(ctx context.Context, k supervise.Key, repoName st
 	var resp ensureResp
 	if err := c.post(ctx, pathEnsure, req, &resp); err != nil {
 		return "", err
+	}
+	// Backend ensures only: a frontend ensure may or may not have started the
+	// co-placed backend (only when its config references {backend_url}), so
+	// nothing about the peer is proven here. The proxy ensures the backend
+	// directly on every API route, which is where its init gets adopted.
+	if c.InitMarker != nil && k.Side == supervise.SideBackend && req.Spec != nil && !req.Spec.InitDone {
+		if err := c.InitMarker(k); err != nil {
+			// The preview is serving; failing the ensure over a bookkeeping
+			// write would take it down. The next un-adopted ensure retries.
+			log.Printf("worker ensure: recording init done for %s/%s: %v", repoName, k.Hash, err)
+		}
 	}
 	return c.host + ":" + strconv.Itoa(resp.Port), nil
 }

@@ -317,6 +317,100 @@ func TestEnsureCarriesSpecs(t *testing.T) {
 	}
 }
 
+// TestEnsureAdoptsRemoteInitDone asserts the control side records a worker's
+// init result: a successful backend ensure whose shipped spec had
+// InitDone=false invokes InitMarker exactly once. An already-done spec, a
+// frontend ensure (which proves nothing about the peer backend — it only
+// starts one when {backend_url} is referenced), and a failed ensure must not.
+// Without adoption, init_done_at never reached a routing-only control node's
+// DB and every cold placement on a fresh worker re-ran init.
+func TestEnsureAdoptsRemoteInitDone(t *testing.T) {
+	sup := &fakeSup{ensurePort: 1}
+	c, done := testServer(t, sup)
+	defer done()
+
+	var marked []supervise.Key
+	c.InitMarker = func(k supervise.Key) error {
+		marked = append(marked, k)
+		return nil
+	}
+	initDone := false
+	c.SpecResolver = func(k supervise.Key) (supervise.WireSpec, error) {
+		return supervise.WireSpec{RunConfig: "{}", InitDone: initDone}, nil
+	}
+
+	be := supervise.BackendKey(3, "beHASH")
+	if _, err := c.EnsureRunning(context.Background(), be, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if len(marked) != 1 || marked[0] != be {
+		t.Fatalf("marked = %v, want exactly [%v]", marked, be)
+	}
+
+	// Shipped spec already done: no redundant write on every warm hit.
+	marked, initDone = nil, true
+	if _, err := c.EnsureRunning(context.Background(), be, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if len(marked) != 0 {
+		t.Fatalf("marked on an already-done spec: %v", marked)
+	}
+
+	marked, initDone = nil, false
+	fe := supervise.FrontendKey(3, "feHASH", "beHASH")
+	if _, err := c.EnsureRunning(context.Background(), fe, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if len(marked) != 0 {
+		t.Fatalf("marked off a frontend ensure: %v", marked)
+	}
+
+	marked = nil
+	sup.ensureErr = errors.New("init failed on the worker")
+	if _, err := c.EnsureRunning(context.Background(), be, "demo"); err == nil {
+		t.Fatal("expected the ensure to fail")
+	}
+	if len(marked) != 0 {
+		t.Fatalf("marked off a failed ensure: %v", marked)
+	}
+}
+
+// TestAdoptRemoteInitDoneReachesTheWire closes the loop against a real
+// control-side Manager and DB: adopting a worker's init flips what the next
+// ensure ships, so a fresh worker skips init instead of re-running it.
+func TestAdoptRemoteInitDoneReachesTheWire(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	root := t.TempDir()
+	files := store.New(
+		filepath.Join(root, "artifacts"),
+		filepath.Join(root, "state"),
+		filepath.Join(root, "tmp"),
+	)
+	m := supervise.New(database, files, filepath.Join(root, "logs"))
+	t.Cleanup(m.StopAll)
+
+	k := supervise.BackendKey(1, "behashadopt00001")
+	if err := database.CreateBackendArtifact(db.BackendArtifact{
+		RepoID: k.RepoID, BeHash: k.Hash, StateDir: filepath.Join(root, "state", "x"), RunConfig: "{}",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if ws, err := m.ResolveWireSpec(k); err != nil || ws.InitDone {
+		t.Fatalf("fresh artifact: spec = %+v, %v (want InitDone=false)", ws, err)
+	}
+	if err := m.AdoptRemoteInitDone(k); err != nil {
+		t.Fatal(err)
+	}
+	if ws, err := m.ResolveWireSpec(k); err != nil || !ws.InitDone {
+		t.Fatalf("after adoption: spec = %+v, %v (want InitDone=true)", ws, err)
+	}
+}
+
 func TestAuthRequired(t *testing.T) {
 	sup := &fakeSup{}
 	srv := httptest.NewServer(NewServer(sup, secret).Handler())
