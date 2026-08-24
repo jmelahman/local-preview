@@ -333,11 +333,16 @@ resource "aws_instance" "server" {
     image           = var.image
     local_manifests = var.local_manifests
     preview_domain  = var.preview_domain
-    server_args     = join(" ", local.server_args)
-    webhook_ssm     = var.github_webhook_secret_ssm_parameter == null ? "" : var.github_webhook_secret_ssm_parameter
-    sso_secret_ssm  = var.sso == null ? "" : var.sso.client_secret_ssm_parameter
-    worker_ssm      = var.workers == null ? "" : var.workers.secret_ssm_parameter
-    secret_env      = var.secret_env_ssm_parameters
+    # Each arg is double-quoted for systemd's ExecStart parser: unquoted, a
+    # value with spaces ("--min-warm-window Mon-Fri 08:00-18:00 ...")
+    # word-splits into stray args and crash-loops the service. Args must not
+    # themselves contain double quotes or dollar signs (the unit is written
+    # through an unquoted heredoc).
+    server_args    = join(" ", [for a in local.server_args : "\"${a}\""])
+    webhook_ssm    = var.github_webhook_secret_ssm_parameter == null ? "" : var.github_webhook_secret_ssm_parameter
+    sso_secret_ssm = var.sso == null ? "" : var.sso.client_secret_ssm_parameter
+    worker_ssm     = var.workers == null ? "" : var.workers.secret_ssm_parameter
+    secret_env     = var.secret_env_ssm_parameters
   }))
 
   # The image is baked into the unit file that user_data writes, so an image
@@ -808,7 +813,7 @@ resource "aws_instance" "worker" {
     max_warm        = var.workers.max_warm
     warm_per_gb     = var.workers.warm_per_gb
     warm_reserve_gb = var.workers.warm_reserve_gb
-    server_args     = join(" ", var.workers.extra_server_args)
+    server_args     = join(" ", [for a in var.workers.extra_server_args : "\"${a}\""]) # systemd-quoted, like the control node's
     worker_ssm      = var.workers.secret_ssm_parameter
     secret_env      = var.secret_env_ssm_parameters
     warm_images     = var.workers.warm_images
@@ -905,7 +910,7 @@ resource "aws_launch_template" "worker" {
     max_warm        = var.workers.max_warm
     warm_per_gb     = var.workers.warm_per_gb
     warm_reserve_gb = var.workers.warm_reserve_gb
-    server_args     = join(" ", var.workers.extra_server_args)
+    server_args     = join(" ", [for a in var.workers.extra_server_args : "\"${a}\""]) # systemd-quoted, like the control node's
     worker_ssm      = var.workers.secret_ssm_parameter
     secret_env      = var.secret_env_ssm_parameters
     warm_images     = var.workers.warm_images

@@ -827,3 +827,25 @@ work happens (a worker) but consulted where placement happens (the control
 DB) — same family as "fleet statistics must ship from where the data is
 born". And any init semantics change that makes init effects node-local:
 adoption then skips work node B genuinely needs.
+
+## server_args render unquoted into systemd ExecStart — a spaced value crash-loops the service
+
+**Symptom.** Deploying 0.30.0 with `--min-warm-window "Mon-Fri 08:00-18:00
+America/Los_Angeles"` in `extra_server_args` took the whole control plane
+down: the orchestrator container exited on unknown positional args and
+systemd restart-looped it (~5 minutes of dashboard + preview outage until a
+hand-edit of the unit).
+
+**Root cause.** The terraform module joined `server_args` with spaces into
+the unit's `ExecStart` line. systemd word-splits that line, so a flag value
+containing spaces became one flag and two stray positional args.
+
+**Fix.** Every arg is double-quoted at the three `join(" ", ...)` sites
+(control unit, static and elastic worker units) — systemd's ExecStart
+parser honors double quotes. The trade documented in place: args must not
+themselves contain double quotes or `$` (the unit travels through an
+unquoted heredoc).
+
+**What would reintroduce it.** Any new template that splices a joined arg
+list into a shell or systemd line without per-arg quoting — the next
+multi-word flag value hits the same split.
