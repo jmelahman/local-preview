@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"io"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
 
+	"github.com/jmelahman/local-preview/internal/execstream"
 	"github.com/jmelahman/local-preview/internal/supervise"
 )
 
@@ -22,6 +25,7 @@ type Supervisor interface {
 	LastFailure(k supervise.Key) (supervise.Failure, bool)
 	Report(ctx context.Context) []supervise.ProcReport
 	RunLog(repoName, side, hash string, attempt int, offset int64) (supervise.RunLog, error)
+	Exec(ctx context.Context, k supervise.Key, opts supervise.ExecOptions, stream io.ReadWriter) error
 	Running() int
 	MaxWarm() int
 	SetMaxWarm(n int)
@@ -63,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(pathReport, s.handleReport)
 	mux.HandleFunc(pathRunLog, s.handleRunLog)
 	mux.HandleFunc(pathConfigure, s.handleConfigure)
+	mux.HandleFunc(pathExec, s.handleExec)
 	return s.authed(mux)
 }
 
@@ -199,6 +204,45 @@ func (s *Server) handleDrain(w http.ResponseWriter, r *http.Request) {
 	}
 	s.draining.Store(req.Draining)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleExec upgrades the request to an execstream WebSocket and runs one
+// exec session against the local supervisor. The key and session options
+// arrive as query parameters; failures after the upgrade arrive as FrameError
+// on the stream, exactly as the apex endpoint reports them.
+func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	repoID, err := strconv.ParseInt(q.Get("repo_id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad repo_id", http.StatusBadRequest)
+		return
+	}
+	k := supervise.Key{
+		RepoID: repoID,
+		Side:   supervise.Side(q.Get("side")),
+		Hash:   q.Get("hash"),
+		Peer:   q.Get("peer"),
+	}
+	opts := supervise.ExecOptions{
+		Cmd:   q["cmd"],
+		TTY:   q.Get("tty") == "1",
+		Stdin: q.Get("stdin") == "1",
+		Term:  q.Get("term"),
+	}
+	if len(opts.Cmd) == 0 {
+		http.Error(w, "missing cmd parameter", http.StatusBadRequest)
+		return
+	}
+	conn, err := execstream.Accept(w, r)
+	if err != nil {
+		return // Accept wrote the handshake failure
+	}
+	defer conn.Close()
+	// The request context dies with the hijacked request; the session's
+	// lifetime is the connection itself.
+	if err := s.sup.Exec(context.Background(), k, opts, conn); err != nil {
+		execstream.NewWriter(conn).WriteFrame(execstream.FrameError, []byte(err.Error())) //nolint:errcheck // conn may already be gone
+	}
 }
 
 // maxWorkerBody caps request bodies before decoding. The largest request is

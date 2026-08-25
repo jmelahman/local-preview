@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"net/http"
@@ -52,6 +53,10 @@ type RuntimeView interface {
 	RunLog(repoName, side, hash string, attempt int, offset int64) (supervise.RunLog, error)
 	Stop(k supervise.Key, reason string)
 	StopRepo(repoID int64, reason string)
+	// Exec bridges an interactive exec session (execstream frames on stream)
+	// into the container backing k — directly on a single node, forwarded to
+	// the worker holding the process on a control node.
+	Exec(ctx context.Context, k supervise.Key, opts supervise.ExecOptions, stream io.ReadWriter) error
 }
 
 // Deps carries the dependencies handlers need.
@@ -178,6 +183,7 @@ func NewMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("GET /api/deploys/{id}/logs", d.handleDeployLogs)
 	mux.HandleFunc("GET /api/deploys/{id}/logs/run", d.handleDeployRunLog)
 	mux.HandleFunc("GET /api/deploys/{id}/stats", d.handleDeployStats)
+	mux.HandleFunc("GET /api/deploys/{id}/exec", d.handleDeployExec)
 	mux.HandleFunc("GET /api/deploys/{id}/artifacts/{name}/{file}", d.handleArtifactDownload)
 	mux.HandleFunc("GET /api/storage", d.handleStorage)
 	mux.HandleFunc("GET /api/retention", d.handleGetRetention)

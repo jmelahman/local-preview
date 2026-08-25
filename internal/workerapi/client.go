@@ -8,9 +8,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
+	"github.com/jmelahman/local-preview/internal/execstream"
 	"github.com/jmelahman/local-preview/internal/supervise"
 )
 
@@ -127,6 +129,48 @@ func (c *Client) RunLog(ctx context.Context, repo, side, hash string, attempt in
 	var chunk supervise.RunLog
 	err := c.post(ctx, pathRunLog, runLogReq{Repo: repo, Side: side, Hash: hash, Attempt: attempt, Offset: offset}, &chunk)
 	return chunk, err
+}
+
+// Exec forwards one `preview exec` session to the worker: it dials the
+// worker's exec endpoint (WebSocket upgrade) and copies execstream frames
+// blindly in both directions — the frames need no re-framing per hop. It
+// returns when the worker ends the session (normally after FrameExit) or the
+// transport fails; ctx bounds only the handshake.
+func (c *Client) Exec(ctx context.Context, k supervise.Key, opts supervise.ExecOptions, stream io.ReadWriter) error {
+	q := url.Values{
+		"repo_id": {strconv.FormatInt(k.RepoID, 10)},
+		"side":    {string(k.Side)},
+		"hash":    {k.Hash},
+		"peer":    {k.Peer},
+		"cmd":     opts.Cmd,
+	}
+	if opts.TTY {
+		q.Set("tty", "1")
+	}
+	if opts.Stdin {
+		q.Set("stdin", "1")
+	}
+	if opts.Term != "" {
+		q.Set("term", opts.Term)
+	}
+	hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	hdr := http.Header{}
+	hdr.Set(AuthHeader, "Bearer "+c.secret)
+	conn, err := execstream.Dial(hctx, c.base+pathExec+"?"+q.Encode(), hdr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	// Client → worker: ends when the caller's stream closes; closing conn
+	// then tears the worker side down too.
+	go func() {
+		defer conn.Close()
+		io.Copy(conn, stream) //nolint:errcheck // either side closing ends the session
+	}()
+	// Worker → client: EOF here is the end of the session.
+	_, err = io.Copy(stream, conn)
+	return err
 }
 
 // Drain marks the worker draining (or clears it) — used by a control-node

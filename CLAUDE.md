@@ -215,6 +215,10 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   backend ensure proves init succeeded (the client's `InitMarker` adopts it);
   a per-artifact fact recorded only worker-side means every fresh worker
   re-runs the work, and a scale-to-zero fleet makes fresh workers the norm.
+- A response-writer wrapper must forward Flush/Hijack and expose Unwrap —
+  embedding `http.ResponseWriter` erases those capabilities (the logging
+  recorder broke WebSocket upgrades and SSE flushes through the apex), and
+  `http.ResponseController` only reaches past a wrapper via `Unwrap`.
 - Joined arg lists spliced into systemd/shell lines need per-arg quoting —
   `server_args` rendered unquoted into `ExecStart` word-split the first
   multi-word flag value and crash-looped the orchestrator on deploy.

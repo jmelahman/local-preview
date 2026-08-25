@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"hash/fnv"
+	"io"
 	"sort"
 	"strconv"
 	"sync"
@@ -40,6 +41,7 @@ type Backend interface {
 	Heartbeat(ctx context.Context) (workerapi.Heartbeat, error)
 	Report(ctx context.Context) ([]supervise.ProcReport, error)
 	RunLog(ctx context.Context, repo, side, hash string, attempt int, offset int64) (supervise.RunLog, error)
+	Exec(ctx context.Context, k supervise.Key, opts supervise.ExecOptions, stream io.ReadWriter) error
 	Stop(ctx context.Context, k supervise.Key, reason string) error
 	Configure(ctx context.Context, cfg workerapi.WorkerConfig) error
 }

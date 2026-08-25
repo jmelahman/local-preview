@@ -36,6 +36,11 @@ const (
 	pathReport    = "/internal/worker/v1/report"
 	pathRunLog    = "/internal/worker/v1/runlog"
 	pathConfigure = "/internal/worker/v1/configure"
+	// pathExec upgrades to a WebSocket carrying execstream frames — the
+	// control node forwards a `preview exec` session to the worker holding
+	// the process. Session parameters ride the query string (an upgrade
+	// request has no usable body).
+	pathExec = "/internal/worker/v1/exec"
 
 	pathRegister   = "/internal/control/v1/register"
 	pathDeregister = "/internal/control/v1/deregister"

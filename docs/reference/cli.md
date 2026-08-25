@@ -190,6 +190,34 @@ Both `preview logs` and `preview stats` exit non-zero when the matched deploy
 has no live process to inspect — still building, failed, or evicted — with a
 hint at the follow-up command.
 
+## `preview exec`
+
+Run a command inside the container backing a preview, docker-exec style,
+addressed by ref like `preview open`. The command goes after `--`; without
+one you get `/bin/sh`, and when run from a terminal that bare form defaults
+to an interactive TTY session (`-it`). The exec's exit status becomes
+`preview exec`'s own, so it scripts like `docker exec`.
+
+```bash
+preview exec                       # interactive shell in HEAD's preview
+preview exec my-branch -- ls -la   # one-shot command, output streamed
+preview exec -it my-branch -- bash # interactive shell in a specific deploy
+```
+
+| Flag | Description |
+| --- | --- |
+| `--repo` | Registered repo name; by default the current directory is matched against registered repos (same matching as `preview logs`) |
+| `--side` | Which process: `be` (backend, default) or `fe` (process-mode frontend) |
+| `-i`, `--interactive` | Attach this terminal's stdin to the command |
+| `-t`, `--tty` | Allocate a pseudo-terminal (for shells and TUIs; requires stdin to be a terminal) |
+
+The preview's process must be running — open the preview (or `curl` it) to
+start it, then retry. It must also be containered: a manifest `run_image` or
+a devcontainer runtime. Host-process previews have no container to exec
+into and report exactly that. The session works against a remote server and
+a worker fleet alike — it rides a WebSocket from the CLI through the apex
+API to whichever node runs the process.
+
 ## `preview configure`
 
 Store which server the client subcommands talk to, so `preview open`,

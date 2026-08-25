@@ -402,6 +402,31 @@ processes, total system memory. `runtime` is `host` or `container`. Host
 processes are sampled from `/proc` (process-group-wide, so forked children
 count); on non-Linux hosts only container-mode processes report samples.
 
+### `GET /api/deploys/{id}/exec`
+
+Opens an interactive exec session inside the deploy's supervised container —
+the transport behind `preview exec`. The request is a WebSocket upgrade; the
+established socket carries a binary frame protocol multiplexing stdin,
+stdout, stderr, terminal resizes, and the final exit code (see
+`internal/execstream`). On a control node the session is forwarded to the
+worker running the process.
+
+Query parameters:
+
+| Param | Description |
+| --- | --- |
+| `side` | `be` (default) or `fe` (process-mode frontend) |
+| `cmd` | The argv, one repeated parameter per element (required) |
+| `tty` | `1` allocates a pseudo-terminal |
+| `stdin` | `1` attaches client input |
+| `term` | Client's `TERM`, exported into the session when `tty=1` |
+
+Everything checkable is rejected before the upgrade as a plain HTTP error:
+`400` for a missing `cmd`, `404` for an unknown deploy or side, `409` when
+the process isn't running (open the preview to start it, then retry).
+Failures after the upgrade — including "this preview runs as a host process,
+not a container" — arrive as an error frame on the socket.
+
 ### `GET /api/deploys/{id}/artifacts/{name}/{file}`
 
 Downloads one file of a ready deploy's named

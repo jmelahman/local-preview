@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"cmp"
 	"context"
 	"errors"
@@ -768,6 +769,25 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
 }
+
+// Flush, Hijack, and Unwrap forward the streaming/upgrade capabilities of the
+// underlying connection — without them this logging wrapper would sever SSE
+// flushes and WebSocket upgrades (the exec endpoint, or one proxied to a
+// preview) from every handler downstream.
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := s.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("hijack not supported")
+}
+
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 // recoverPanics is the outermost middleware. It catches panics from any
 // downstream handler so the process survives, logs the trace, and writes a

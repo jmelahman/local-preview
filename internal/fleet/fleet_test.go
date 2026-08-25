@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ type fakeBackend struct {
 	report  []supervise.ProcReport
 	logs    map[string]supervise.RunLog // keyed side+"-"+hash
 	stopped []supervise.Key
+	execed  []supervise.Key
 
 	// Configure records, mutex-guarded: the heartbeat loop pushes from its
 	// own goroutines.
@@ -53,6 +55,10 @@ func (f *fakeBackend) Report(context.Context) ([]supervise.ProcReport, error) {
 }
 func (f *fakeBackend) RunLog(_ context.Context, _, side, hash string, _ int, _ int64) (supervise.RunLog, error) {
 	return f.logs[side+"-"+hash], nil
+}
+func (f *fakeBackend) Exec(_ context.Context, k supervise.Key, _ supervise.ExecOptions, _ io.ReadWriter) error {
+	f.execed = append(f.execed, k)
+	return nil
 }
 func (f *fakeBackend) Stop(_ context.Context, k supervise.Key, _ string) error {
 	f.stopped = append(f.stopped, k)

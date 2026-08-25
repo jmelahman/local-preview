@@ -118,6 +118,12 @@ func (g *gzipWriter) shouldPassthrough() bool {
 	if g.status == http.StatusPartialContent {
 		return true
 	}
+	// A protocol switch (WebSocket upgrade — the exec endpoint, or one proxied
+	// to a preview) must hit the wire immediately; the connection is about to
+	// be hijacked.
+	if g.status == http.StatusSwitchingProtocols {
+		return true
+	}
 	h := g.ResponseWriter.Header()
 	if h.Get("Content-Encoding") != "" {
 		return true
@@ -201,3 +207,8 @@ func (g *gzipWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	}
 	return hj.Hijack()
 }
+
+// Unwrap lets http.ResponseController (and libraries following its Unwrap
+// convention) reach capabilities this wrapper doesn't intercept — deadline
+// control for hijacked exec sessions, notably.
+func (g *gzipWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }

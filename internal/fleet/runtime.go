@@ -10,6 +10,7 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -156,6 +157,17 @@ func (r *Registry) RunLog(repoName, side, hash string, attempt int, offset int64
 		}
 	}
 	return best, nil
+}
+
+// Exec forwards one exec session to the worker reporting the key's process.
+// Unlike run logs there is no fall-back sweep: exec needs the live process,
+// so a key nobody reports is simply not running.
+func (r *Registry) Exec(ctx context.Context, k supervise.Key, opts supervise.ExecOptions, stream io.ReadWriter) error {
+	e, ok := r.report(ctx)[k]
+	if !ok {
+		return fmt.Errorf("preview process is not running on any worker — open the preview to start it, then retry")
+	}
+	return e.worker.be.Exec(ctx, k, opts, stream)
 }
 
 // StartDeploy warm-starts a deploy's processes on the fleet — the same

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jmelahman/local-preview/internal/db"
+	"github.com/jmelahman/local-preview/internal/execstream"
 	"github.com/jmelahman/local-preview/internal/manifest"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
@@ -54,6 +57,7 @@ type fakeSup struct {
 	warmHits     int64
 	coldStarts   int64
 	events       []supervise.ProcEventRecord
+	execFn       func(supervise.Key, supervise.ExecOptions, io.ReadWriter) error
 }
 
 func (f *fakeSup) OfferWireSpec(k supervise.Key, s supervise.WireSpec) {
@@ -84,6 +88,12 @@ func (f *fakeSup) LastFailure(k supervise.Key) (supervise.Failure, bool) {
 func (f *fakeSup) Report(context.Context) []supervise.ProcReport { return f.report }
 func (f *fakeSup) RunLog(repo, side, hash string, attempt int, offset int64) (supervise.RunLog, error) {
 	return f.runLog, nil
+}
+func (f *fakeSup) Exec(_ context.Context, k supervise.Key, opts supervise.ExecOptions, stream io.ReadWriter) error {
+	if f.execFn != nil {
+		return f.execFn(k, opts, stream)
+	}
+	return nil
 }
 func (f *fakeSup) SetMaxWarm(n int)                { f.maxWarm = n }
 func (f *fakeSup) MinWarm() int                    { return f.minWarm }
@@ -461,5 +471,78 @@ func TestConfigureRoundTrip(t *testing.T) {
 	}
 	if sup.idleOverride != 90*time.Second {
 		t.Fatalf("idle changed by a push that didn't name it: %s", sup.idleOverride)
+	}
+}
+
+// TestExecRoundTrip: a full exec session over the wire — the WebSocket
+// upgrade, the key and options crossing as query parameters, stdin frames
+// reaching the supervisor, and output/exit frames coming back.
+func TestExecRoundTrip(t *testing.T) {
+	var mu sync.Mutex
+	var gotK supervise.Key
+	var gotOpts supervise.ExecOptions
+	sup := &fakeSup{execFn: func(k supervise.Key, opts supervise.ExecOptions, stream io.ReadWriter) error {
+		mu.Lock()
+		gotK, gotOpts = k, opts
+		mu.Unlock()
+		f, err := execstream.ReadFrame(stream)
+		if err != nil || f.Type != execstream.FrameStdin {
+			t.Errorf("supervisor read frame %+v, %v; want stdin", f, err)
+			return err
+		}
+		fw := execstream.NewWriter(stream)
+		if err := fw.WriteFrame(execstream.FrameStdout, f.Payload); err != nil {
+			return err
+		}
+		return fw.WriteFrame(execstream.FrameExit, []byte{7})
+	}}
+	c, done := testServer(t, sup)
+	defer done()
+
+	k := supervise.FrontendKey(7, "feHASH", "beHASH")
+	opts := supervise.ExecOptions{Cmd: []string{"sh", "-c", "echo hi"}, TTY: true, Stdin: true, Term: "xterm"}
+	caller, cli := net.Pipe()
+	sessionErr := make(chan error, 1)
+	go func() { sessionErr <- c.Exec(context.Background(), k, opts, cli) }()
+
+	fw := execstream.NewWriter(caller)
+	if err := fw.WriteFrame(execstream.FrameStdin, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	f, err := execstream.ReadFrame(caller)
+	if err != nil || f.Type != execstream.FrameStdout || string(f.Payload) != "hello" {
+		t.Fatalf("stdout frame = %+v, %v", f, err)
+	}
+	f, err = execstream.ReadFrame(caller)
+	if err != nil || f.Type != execstream.FrameExit || len(f.Payload) != 1 || f.Payload[0] != 7 {
+		t.Fatalf("exit frame = %+v, %v", f, err)
+	}
+	if err := <-sessionErr; err != nil {
+		t.Fatalf("Exec returned %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotK != k {
+		t.Fatalf("supervisor saw key %+v, want %+v", gotK, k)
+	}
+	if !slices.Equal(gotOpts.Cmd, opts.Cmd) || !gotOpts.TTY || !gotOpts.Stdin || gotOpts.Term != "xterm" {
+		t.Fatalf("supervisor saw opts %+v, want %+v", gotOpts, opts)
+	}
+}
+
+// TestExecErrorArrivesAsFrame: an orchestration failure after the upgrade
+// (nothing running for the key) reaches the caller as FrameError.
+func TestExecErrorArrivesAsFrame(t *testing.T) {
+	sup := &fakeSup{execFn: func(supervise.Key, supervise.ExecOptions, io.ReadWriter) error {
+		return errors.New("preview process is not running")
+	}}
+	c, done := testServer(t, sup)
+	defer done()
+
+	caller, cli := net.Pipe()
+	go c.Exec(context.Background(), supervise.BackendKey(1, "h"), supervise.ExecOptions{Cmd: []string{"sh"}}, cli) //nolint:errcheck
+	f, err := execstream.ReadFrame(caller)
+	if err != nil || f.Type != execstream.FrameError || string(f.Payload) != "preview process is not running" {
+		t.Fatalf("frame = %+v, %v; want FrameError with the detail", f, err)
 	}
 }

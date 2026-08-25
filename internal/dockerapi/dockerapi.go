@@ -25,6 +25,7 @@ import (
 // Client talks to one Docker daemon.
 type Client struct {
 	http     *http.Client
+	sock     string // daemon socket path, for hijacked (exec-attach) connections
 	rootless bool
 }
 
@@ -55,7 +56,7 @@ func Connect(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{http: &http.Client{
+	c := &Client{sock: sock, http: &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				var d net.Dialer

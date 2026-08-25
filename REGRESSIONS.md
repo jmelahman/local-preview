@@ -849,3 +849,34 @@ unquoted heredoc).
 **What would reintroduce it.** Any new template that splices a joined arg
 list into a shell or systemd line without per-arg quoting — the next
 multi-word flag value hits the same split.
+
+## Response-writer wrappers silently drop Flush/Hijack/deadline control
+
+**Symptom.** Found while building `preview exec` (a WebSocket endpoint on
+the apex): the upgrade handshake failed with "hijack not supported" even
+though the gzip middleware explicitly forwarded `Hijack`. The same wrapper
+chain was silently degrading SSE through the preview proxy — `Flush` calls
+never reached the real connection.
+
+**Root cause.** `logRequests`'s `statusRecorder` embeds only
+`http.ResponseWriter`. Embedding an interface promotes just that
+interface's methods, so the wrapper erased the underlying writer's
+`Flusher`/`Hijacker` capabilities, and — with no `Unwrap` method —
+`http.ResponseController` couldn't reach past it either. The gzip
+middleware's own `Hijack` asserted its inner writer directly and hit the
+recorder, not the connection. The chain looked correct because each layer
+compiled; the capability loss only shows at runtime.
+
+**Fix.** `statusRecorder` forwards `Flush` and `Hijack` and exposes
+`Unwrap() http.ResponseWriter`; `gzipWriter` gained `Unwrap` too, so
+`ResponseController` can walk the chain for what the wrappers don't
+intercept (per-request deadline clearing, which hijacked exec sessions need
+to survive the server's 60s `ReadTimeout`). `gzipWriter` also passes a 101
+through immediately — a protocol switch must hit the wire before the
+hijack.
+
+**What would reintroduce it.** Any new middleware that wraps
+`http.ResponseWriter` in a struct without `Flush`/`Hijack` passthroughs
+*and* an `Unwrap`. If it wraps, it must forward — and `Unwrap` is the
+future-proof half, because `ResponseController` discovers capabilities
+through it.
