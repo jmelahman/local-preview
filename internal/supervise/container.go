@@ -37,7 +37,7 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, rt runtimeEnv,
 
 	// The per-backend deploy network pairs a process-mode frontend with its
 	// backend by alias. Get-or-create on both sides keeps start order
-	// irrelevant.
+	// irrelevant; the last side out removes it (see the reaper below).
 	networkID := ""
 	alias := ""
 	labels := map[string]string{
@@ -55,6 +55,12 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, rt runtimeEnv,
 		deployNet = networkName(p.repoName, k.Peer)
 		alias = "frontend"
 	}
+	// Membership is settled under netMu, held from the lookup through
+	// StartContainer (when the endpoint actually attaches), so a peer's
+	// reaper can't release a just-resolved network before this container is
+	// on it. The image pull above stays outside the lock.
+	m.netMu.Lock()
+	defer m.netMu.Unlock()
 	if deployNet != "" {
 		networkID, err = cli.EnsureNetwork(ctx, deployNet, map[string]string{
 			dockerapi.ManagedLabel: "1",
@@ -63,6 +69,15 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, rt runtimeEnv,
 		if err != nil {
 			return err
 		}
+	}
+	// abort tears down a container that never started and gives the deploy
+	// network back (refused, harmlessly, while the peer still holds it).
+	abort := func(id string, err error) error {
+		cli.RemoveContainer(ctx, id, true) //nolint:errcheck
+		if networkID != "" {
+			cli.RemoveNetwork(ctx, networkID) //nolint:errcheck
+		}
+		return err
 	}
 
 	user := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
@@ -107,17 +122,14 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, rt runtimeEnv,
 			err = fmt.Errorf("network %q not found — is the dependency stack running?", netName)
 		}
 		if err != nil {
-			cli.RemoveContainer(ctx, id, true) //nolint:errcheck
-			return fmt.Errorf("join network %q: %w", netName, err)
+			return abort(id, fmt.Errorf("join network %q: %w", netName, err))
 		}
 		if err := cli.ConnectNetwork(ctx, netID, id, nil); err != nil {
-			cli.RemoveContainer(ctx, id, true) //nolint:errcheck
-			return fmt.Errorf("join network %q: %w", netName, err)
+			return abort(id, fmt.Errorf("join network %q: %w", netName, err))
 		}
 	}
 	if err := cli.StartContainer(ctx, id); err != nil {
-		cli.RemoveContainer(ctx, id, true) //nolint:errcheck
-		return fmt.Errorf("start container: %w", err)
+		return abort(id, fmt.Errorf("start container: %w", err))
 	}
 	p.containerID = id
 	p.startedAt = time.Now()
@@ -140,6 +152,9 @@ func (m *Manager) startContainer(k Key, p *process, spec runSpec, rt runtimeEnv,
 		logFile.Close()
 		rmCtx, rmCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cli.RemoveContainer(rmCtx, id, true) //nolint:errcheck
+		// Last one out: the peer side's endpoint, if still up, makes the
+		// daemon refuse and the network outlives this container instead.
+		m.releaseNetwork(rmCtx, cli, networkID)
 		rmCancel()
 		p.exit, p.exitOK = fmt.Sprintf("exit %d", code), waitErr == nil && code == 0
 		if waitErr != nil {

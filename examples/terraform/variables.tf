@@ -393,8 +393,11 @@ variable "workers" {
     # warm_per_gb, floored at 1 — instead of the fixed max_warm above. This is
     # what lets one launch template serve a mixed-instances fleet where a larger
     # node hosts proportionally more warm processes; 0 keeps the fixed max_warm.
-    warm_per_gb         = optional(number, 0)
-    warm_reserve_gb     = optional(number, 1)
+    warm_per_gb     = optional(number, 0)
+    warm_reserve_gb = optional(number, 1)
+    # The root disk holds the OS, the run images, and the hydrated-artifact
+    # cache. The worker caps that cache at half the disk by default (see
+    # --cache-max-artifact-bytes), so size for images + 2x the working set.
     root_volume_size_gb = optional(number, 60)
     extra_server_args   = optional(list(string), [])
     stack_ingress_ports = optional(list(number), [])

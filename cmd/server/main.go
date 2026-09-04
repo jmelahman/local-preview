@@ -461,6 +461,20 @@ func run(opts serveOptions) error {
 	cloner.Start(workCtx)
 	sweeper := retain.New(database, super, files)
 	sweeper.Start(workCtx)
+	// A worker's disk is a cache and nothing but — left uncapped it fills with
+	// one hydrated artifact per distinct preview ever served, none of them
+	// reclaimed, until hydration itself fails with ENOSPC. Default its cap
+	// from the data filesystem's size; an explicit flag still wins.
+	if opts.cacheMaxArtifactBytes == 0 && opts.role == "worker" && files.ArtifactTier() != nil {
+		capBytes, fsBytes, err := workerCacheCap(cfg.DataDir)
+		if err != nil {
+			log.Printf("artifact cache: worker default cap unavailable (%v); resident artifacts are uncapped — set --cache-max-artifact-bytes", err)
+		} else {
+			opts.cacheMaxArtifactBytes = capBytes
+			log.Printf("artifact cache: worker default cap is %.0f%% of the %d-byte filesystem under %s",
+				workerCacheFraction*100, fsBytes, cfg.DataDir)
+		}
+	}
 	// With a durable tier and a resident-cache cap set, sweep the coldest
 	// artifacts off local disk periodically; a swept artifact re-hydrates on
 	// next serve. Off by default (cap 0), so single-node instances keep every

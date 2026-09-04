@@ -222,6 +222,15 @@ full entry to `REGRESSIONS.md` and a one-line title here.
 - Joined arg lists spliced into systemd/shell lines need per-arg quoting —
   `server_args` rendered unquoted into `ExecStart` word-split the first
   multi-word flag value and crash-looped the orchestrator on deploy.
+- Every per-deploy docker network needs a release on container exit — the
+  daemon's stock address pools hold ~30 networks, so a create-only network
+  per backend hash exhausts them in a working day; the reaper removes it
+  last-one-out (docker refuses while the peer is attached) under `netMu`,
+  which must span lookup→`StartContainer` (endpoints attach at start).
+- A worker's disk is only a cache and must be capped by default — the cache
+  sweeper only runs with `--cache-max-artifact-bytes` set, and a worker left
+  at `0` hydrates every preview it ever serves until hydration itself dies
+  with ENOSPC; `--role worker` derives the cap from the data filesystem.
 
 ## Documentation upkeep
 

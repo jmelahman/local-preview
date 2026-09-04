@@ -133,7 +133,7 @@ for lookup order and caching semantics.
 | `PREVIEW_S3_BUCKET` | `preview serve` | Artifact-tier bucket (an explicit `--s3-bucket` flag wins) |
 | `PREVIEW_S3_PREFIX` / `PREVIEW_S3_REGION` | `preview serve` | Key prefix and region (the matching flag wins) |
 | `PREVIEW_S3_ACCESS_KEY` / `PREVIEW_S3_SECRET_KEY` | `preview serve` | Static artifact-tier keypair (the matching flag wins). Unset both to resolve credentials from the AWS environment or instance role instead |
-| `PREVIEW_CACHE_MAX_ARTIFACT_BYTES` | `preview serve` | Soft cap on resident (local-disk) artifact bytes; the coldest are swept to the durable tier above it (an explicit `--cache-max-artifact-bytes` flag wins). Requires the artifact tier; `0` (default) keeps every artifact resident |
+| `PREVIEW_CACHE_MAX_ARTIFACT_BYTES` | `preview serve` | Soft cap on resident (local-disk) artifact bytes; the coldest are swept to the durable tier above it (an explicit `--cache-max-artifact-bytes` flag wins). Requires the artifact tier; `0` (default) keeps every artifact resident, except on a `--role worker` node, where it means half the data filesystem |
 | `PREVIEW_RESERVED_UPSTREAMS` | `preview serve` | Comma-separated `<label>=host:port` reserved upstreams (repeated `--reserved-upstream` flags win). Each serves `<label>.<preview-domain>` by reverse-proxying wholesale to the upstream, behind the SSO gate but outside the deploy machinery — for an always-on companion service under the preview domain |
 | `PREVIEW_ONYX_AUTH_UPSTREAM` | `preview serve` | Reserved-upstream label of the canonical onyx host that owns the Google OAuth client (e.g. `app`). Turns on onyx SSO: previews bounce there to log in, and the shared-secret JWT is widened across the preview domain so every preview validates it locally (an explicit `--onyx-auth-upstream` flag wins). Must name an existing reserved upstream |
 | `PREVIEW_ONYX_AUTH_COOKIE` | `preview serve` | onyx session cookie the proxy watches for, if not the `fastapiusersauth` default (matches onyx's `AUTH_COOKIE_NAME`; an explicit `--onyx-auth-cookie` flag wins) |
@@ -313,7 +313,11 @@ upload. How it works:
   the data volume be sized to the *working* set rather than the whole retained
   set, with retention depth becoming a bucket-lifecycle question. A freshly
   built artifact is never swept before its background upload lands, and an
-  artifact with a running preview is never swept out from under it.
+  artifact with a running preview is never swept out from under it. A
+  `--role worker` node, whose disk is *only* a cache, defaults the cap to half
+  of the filesystem holding its data dir when the flag is left at `0` —
+  otherwise every distinct preview it ever served stays resident until the
+  disk fills and hydration itself fails with `no space left on device`.
 
 ## Split control / worker plane (experimental)
 

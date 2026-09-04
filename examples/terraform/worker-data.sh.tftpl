@@ -6,6 +6,18 @@
 set -euxo pipefail
 
 dnf install -y docker
+
+# Every preview pair gets its own bridge network, and docker's stock address
+# pools hand each one a /16 (or a /20 from 192.168/16) — about 30 networks in
+# all before "could not find an available, non-overlapping IPv4 address pool"
+# fails every start. Carve /24s instead: thousands of two-container networks,
+# so a burst (or a leak) runs the disk out long before the pool. 172.16/13
+# stops short of a default VPC's 172.31/16, which the daemon must never
+# overlap. The control node keeps docker's defaults; it runs no previews.
+mkdir -p /etc/docker
+cat >/etc/docker/daemon.json <<'EOF'
+{"default-address-pools":[{"base":"172.16.0.0/13","size":24},{"base":"192.168.0.0/16","size":24}]}
+EOF
 systemctl enable --now docker
 
 mkdir -p "${data_dir}"

@@ -149,6 +149,11 @@ func TestContainerBackendLifecycle(t *testing.T) {
 	if len(cs) != 0 {
 		t.Fatalf("container still present after stop: %v", cs)
 	}
+	// And so is its deploy network — a leaked bridge per backend hash ever
+	// served is what exhausted the daemon's address pools on a busy worker.
+	if _, ok, err := cli.FindNetworkByName(context.Background(), networkName("demo", beHash)); err != nil || ok {
+		t.Fatalf("deploy network still present after stop (ok=%v err=%v)", ok, err)
+	}
 }
 
 // TestContainerFrontendBackendPair proves the deploy network: starting a
@@ -157,7 +162,7 @@ func TestContainerBackendLifecycle(t *testing.T) {
 // {backend_url}.
 func TestContainerFrontendBackendPair(t *testing.T) {
 	f := newFixture(t)
-	dockerOrSkip(t, t.TempDir())
+	cli := dockerOrSkip(t, t.TempDir())
 
 	const beHash = "be-pair-000000"
 	const feHash = "fe-pair-000000"
@@ -208,6 +213,21 @@ func TestContainerFrontendBackendPair(t *testing.T) {
 	// The peer backend was started implicitly.
 	if got := f.m.Status(BackendKey(f.repoID, beHash)); got != "running" {
 		t.Fatalf("peer backend status = %q", got)
+	}
+
+	// The deploy network is last-one-out: the backend's exit leaves it to
+	// the frontend still attached; the frontend's exit reclaims it.
+	netName := networkName("demo", beHash)
+	if _, ok, err := cli.FindNetworkByName(ctx, netName); err != nil || !ok {
+		t.Fatalf("deploy network %s missing while the pair runs (ok=%v err=%v)", netName, ok, err)
+	}
+	f.m.Stop(BackendKey(f.repoID, beHash), "test")
+	if _, ok, err := cli.FindNetworkByName(ctx, netName); err != nil || !ok {
+		t.Fatalf("deploy network removed while the frontend still holds it (ok=%v err=%v)", ok, err)
+	}
+	f.m.Stop(FrontendKey(f.repoID, feHash, beHash), "test")
+	if _, ok, err := cli.FindNetworkByName(ctx, netName); err != nil || ok {
+		t.Fatalf("deploy network leaked after both sides stopped (ok=%v err=%v)", ok, err)
 	}
 }
 

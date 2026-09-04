@@ -43,7 +43,11 @@ to autoscale. Everything a process needs arrives through two channels:
 
 - **Artifact files** hydrate from the S3 artifact tier on demand. Local disk
   on every node is only a cache of the tier; the extractor verifies the
-  content-byte count recorded at upload time before publishing.
+  content-byte count recorded at upload time before publishing. A worker
+  sweeps its coldest resident artifacts once they exceed half its data
+  filesystem (override with `--cache-max-artifact-bytes`), so its root disk
+  only needs to hold the run images plus the *working* set, not every preview
+  it has ever served.
 - **The run contract** (argv, run image, env, health path, timeouts, init
   steps) travels *on the wire*: the control node resolves it from its own
   database and ships it inside every ensure request (`supervise.WireSpec`).
@@ -134,5 +138,6 @@ the content-addressed artifacts every node trusts.
   scale-in draining, and autoscaling signals are infrastructure concerns (the
   load ratio is logged as `fleet: load=…` for a policy to target-track).
 - **Retention runs on the control node.** Worker disks are caches — idle
-  processes reap themselves and artifacts re-hydrate — but a worker's state
-  dirs are only reclaimed by instance replacement.
+  processes reap themselves, cold artifacts are swept and re-hydrate, and
+  each preview's docker network goes away with its last container — but a
+  worker's state dirs are only reclaimed by instance replacement.

@@ -880,3 +880,67 @@ hijack.
 *and* an `Unwrap`. If it wraps, it must forward — and `Unwrap` is the
 future-proof half, because `ResponseController` discovers capabilities
 through it.
+
+## Per-deploy docker networks leaked until the daemon's address pools ran dry
+
+**Symptom.** After ~6 hours of normal traffic on a fresh worker, every
+containered start failed with `create network local-preview-onyx-<hash>:
+POST /networks/create: could not find an available, non-overlapping IPv4
+address pool among the defaults to assign to the network`. `docker network
+ls` on the worker showed 29 managed networks against 12 running containers.
+29 is exactly the daemon's stock budget: 172.17–172.31/16 (minus docker0's
+and the VPC's) plus sixteen /20s from 192.168/16.
+
+**Root cause.** `startContainer` get-or-creates a bridge network per backend
+hash (`local-preview-<repo>-<beHash[:12]>`) so a process-mode frontend can
+reach its backend by alias — and nothing ever removed it. The only removal
+sites were `ReclaimOrphans` (startup) and `PurgeRepoContainers` (repo
+delete). Every distinct preview served leaked one network for the life of
+the node; on a scale-to-zero fleet, "the life of the node" is a working day.
+
+**Fix.** The container reaper releases the deploy network right after it
+removes the container (`releaseNetwork`), and the create/join/start failure
+paths do the same. Docker refuses to delete a network with an endpoint
+attached, so this is last-one-out with no refcount: the backend's exit
+leaves the network to a frontend still on it, and the frontend's exit takes
+it. A `Manager.netMu` is held from `EnsureNetwork` through `StartContainer`
+(endpoints attach at *start*, not create) and around every removal, so a
+peer's reaper can't delete a just-resolved network before the new
+container is on it. The worker image also carves docker's default address
+pools into /24s (`worker-data.sh.tftpl` writes `daemon.json`), so a burst
+hits the disk long before the pool. Regression: the container tests now
+assert the network is gone after the last side stops and survives while the
+peer holds it.
+
+**What would reintroduce it.** A new path that creates a labeled network
+and hands the container off without a matching release on exit; or moving
+the network lookup outside `netMu` (a peer exiting in the lookup→start
+window deletes the network under the container that just resolved it).
+
+## Worker disks filled with hydrated artifacts nothing ever evicted
+
+**Symptom.** Backend starts on a worker failed with `be artifact files
+missing (evicted?): hydrate onyx be/<hash>: extract: mkdir
+/var/lib/local-preview/tmp/hydrate-…: no space left on device`. The 60 GB
+root disk sat at 99% — 47 GB of it hydrated artifacts (34 be + 14 fe for a
+dozen live previews), the rest run images.
+
+**Root cause.** Cache eviction only runs when `--cache-max-artifact-bytes`
+is set, and only the control node's `extra_server_args` set it. A worker
+hydrates every artifact it is ever asked to serve and, with no cap, keeps
+all of them: one ~1.5 GB venv per backend hash, forever, on a disk that
+also holds the docker data-root. The "evicted?" in the error is a red
+herring — nothing had been evicted; there was nowhere left to hydrate *to*.
+
+**Fix.** A `--role worker` node with a durable tier and no explicit cap
+defaults `--cache-max-artifact-bytes` to half the filesystem holding its
+data dir (`workerCacheCap`, statfs at startup, logged). The sweeper then
+keeps the coldest artifacts off disk exactly as on the control node; a
+live process's artifacts stay protected. The module's `root_volume_size_gb`
+comment now says what the disk has to hold (images + 2× working set).
+
+**What would reintroduce it.** Any new node role, or a deployment that
+overrides the cap to `0` on a worker, without an eviction path; or a change
+that makes the worker's data dir live on a different filesystem than the
+one statfs measures (the derivation assumes the bind mount preserves the
+host path).

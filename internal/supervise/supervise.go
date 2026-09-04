@@ -129,6 +129,14 @@ type Manager struct {
 	dockerProbed bool
 	dockerCli    *dockerapi.Client
 	dockerErr    error
+
+	// netMu serializes deploy-network membership changes: a container's
+	// resolve-or-create → start window against a peer's release. Docker only
+	// refuses to remove a network once an endpoint is attached, and endpoints
+	// attach at container *start*, not create — so without the lock a backend
+	// exiting between its frontend's EnsureNetwork and StartContainer would
+	// delete the network out from under the frontend.
+	netMu sync.Mutex
 }
 
 // New returns a Manager. logsDir is the root for per-process run logs.
@@ -1529,10 +1537,28 @@ func (m *Manager) removeLabeled(label, value string) {
 		}
 	}
 	if ns, err := cli.ListNetworksByLabel(ctx, label, value); err == nil {
+		m.netMu.Lock()
 		for _, n := range ns {
 			cli.RemoveNetwork(ctx, n.ID) //nolint:errcheck
 		}
+		m.netMu.Unlock()
 	}
+}
+
+// releaseNetwork removes a deploy network once its last member is gone —
+// last-one-out semantics without any refcount: the daemon refuses the
+// removal while an endpoint (the peer side's container) is still attached,
+// and whichever of the pair exits second takes the network with it. Errors
+// are ignored for that reason; the leak this guards against (one bridge
+// network per backend hash ever served, never reclaimed until restart) is
+// what exhausted the daemon's ~30 default address pools on a busy worker.
+func (m *Manager) releaseNetwork(ctx context.Context, cli *dockerapi.Client, id string) {
+	if id == "" {
+		return
+	}
+	m.netMu.Lock()
+	defer m.netMu.Unlock()
+	cli.RemoveNetwork(ctx, id) //nolint:errcheck
 }
 
 // ForkOrInitStateDir provisions the state directory for a newly built

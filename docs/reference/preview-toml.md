@@ -235,7 +235,8 @@ no `run_image` still defaults into the repo's devcontainer when the commit
 carries one — see [Devcontainer default](#devcontainer-default), which
 *does* fall back to the host.)
 
-A process-mode frontend and its backend share a per-deploy bridge network:
+A process-mode frontend and its backend share a per-deploy bridge network,
+created by whichever side starts first and removed when the last one exits:
 the backend is reachable from the frontend container by the DNS alias
 `backend`, which is what `{backend_url}` resolves to. Both containers also
 join every network listed in the top-level `networks` key:
