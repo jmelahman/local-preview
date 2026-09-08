@@ -119,6 +119,13 @@ state dir was forked from an older schema, and every later cold start skips
 them. Exclusive state-dir ownership is what makes the skip safe rather than
 an optimistic guess.
 
+"Once" is a default, not a guarantee: a start that skipped init and then
+failed to become healthy revokes the recorded success, so the next start
+re-runs init. That is the repair path for init effects living outside this
+system — a per-preview database on a shared server, say, that something else
+deleted — which is why [init steps must be
+idempotent](/reference/preview-toml#init-commands).
+
 ## Subdomain routing
 
 Every preview host is `<sha-prefix>-<repo>.<domain>`. Labels resolve by sha

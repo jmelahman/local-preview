@@ -27,7 +27,19 @@ import (
 // package's tests): re-executed with --helper-server it serves a health
 // endpoint, so the worker-over-empty-DB test starts a real process.
 func TestMain(m *testing.M) {
+	if i := slices.Index(os.Args, "--helper-init"); i >= 0 && i+1 < len(os.Args) {
+		// Stands in for an init step whose effect lives in an external
+		// service (the per-preview database): it creates the file the run
+		// command below refuses to start without.
+		os.WriteFile(os.Args[i+1], []byte("x"), 0o644) //nolint:errcheck
+		return
+	}
 	if i := slices.Index(os.Args, "--helper-server"); i >= 0 && i+1 < len(os.Args) {
+		if j := slices.Index(os.Args, "--needs-marker"); j >= 0 && j+1 < len(os.Args) {
+			if _, err := os.Stat(os.Args[j+1]); err != nil {
+				os.Exit(4)
+			}
+		}
 		http.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
@@ -544,5 +556,105 @@ func TestExecErrorArrivesAsFrame(t *testing.T) {
 	f, err := execstream.ReadFrame(caller)
 	if err != nil || f.Type != execstream.FrameError || string(f.Payload) != "preview process is not running" {
 		t.Fatalf("frame = %+v, %v; want FrameError with the detail", f, err)
+	}
+}
+
+// TestFailedStartRevokesInitOverTheWire drives a REAL supervise.Manager over
+// an empty DB (a worker resolves its run spec from the wire, so a fake
+// supervisor would prove nothing about the skip/revoke decision). The control
+// side keeps offering InitDone=true — its DB row may still say done — yet a
+// start that skipped init and failed must make the very next ensure re-run
+// init, and must tell the control node to withdraw the record. A transport
+// error, where the worker may never have run anything, must not.
+func TestFailedStartRevokesInitOverTheWire(t *testing.T) {
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	root := t.TempDir()
+	files := store.New(
+		filepath.Join(root, "artifacts"),
+		filepath.Join(root, "state"),
+		filepath.Join(root, "tmp"),
+	)
+	m := supervise.New(database, files, filepath.Join(root, "logs"))
+	t.Cleanup(m.StopAll)
+
+	const beHash = "behashrevoke0001"
+	scratch, _, err := files.NewScratchDir("be")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := files.PublishBackend("demo", beHash, scratch, false); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join("{state_dir}", "init-marker")
+	raw, err := json.Marshal(manifest.Backend{
+		Init:         [][]string{{exe, "--helper-init", marker}},
+		Run:          []string{exe, "--helper-server", "{port}", "--needs-marker", marker},
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(NewServer(m, secret).Handler())
+	defer srv.Close()
+	c := NewClient(srv.URL, "127.0.0.1", secret, srv.Client())
+	// The control node believes init is done — and keeps saying so.
+	c.SpecResolver = func(k supervise.Key) (supervise.WireSpec, error) {
+		return supervise.WireSpec{RunConfig: string(raw), InitDone: true}, nil
+	}
+	var revoked []supervise.Key
+	c.InitRevoker = func(k supervise.Key) error {
+		revoked = append(revoked, k)
+		return nil
+	}
+
+	k := supervise.BackendKey(1, beHash)
+	ctx := context.Background()
+	if _, err := c.EnsureRunning(ctx, k, "demo"); err == nil {
+		t.Fatal("expected the start to fail: init was skipped and its effect is missing")
+	}
+	if len(revoked) != 1 || revoked[0] != k {
+		t.Fatalf("revoked = %v, want exactly [%v] for a worker-reported start failure", revoked, k)
+	}
+
+	// Same offer (InitDone=true), but the worker's revocation outranks it.
+	addr, err := c.EnsureRunning(ctx, k, "demo")
+	if err != nil {
+		t.Fatalf("ensure after revocation: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(files.StateDirPath("demo", beHash), "init-marker")); err != nil {
+		t.Fatalf("init did not re-run on the worker: %v", err)
+	}
+	res, err := http.Get(fmt.Sprintf("http://%s/api/health", addr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("health = %d, want 200", res.StatusCode)
+	}
+
+	// A worker we cannot reach proves nothing: no revocation.
+	dead := NewClient("http://127.0.0.1:1", "127.0.0.1", secret, srv.Client())
+	dead.SpecResolver = c.SpecResolver
+	revoked = nil
+	dead.InitRevoker = func(k supervise.Key) error {
+		revoked = append(revoked, k)
+		return nil
+	}
+	if _, err := dead.EnsureRunning(ctx, k, "demo"); err == nil {
+		t.Fatal("expected a transport error")
+	}
+	if len(revoked) != 0 {
+		t.Fatalf("revoked off a transport error: %v", revoked)
 	}
 }

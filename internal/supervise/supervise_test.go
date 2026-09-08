@@ -27,6 +27,15 @@ import (
 // backend, so tests need no compiled fixture.
 func TestMain(m *testing.M) {
 	if i := slices.Index(os.Args, "--helper-server"); i >= 0 && i+2 < len(os.Args) {
+		// --needs-marker stands in for a backend that cannot run without the
+		// external effect its init created (the per-preview database): the
+		// process refuses to start once that effect is gone.
+		if j := slices.Index(os.Args, "--needs-marker"); j >= 0 && j+1 < len(os.Args) {
+			if _, err := os.Stat(os.Args[j+1]); err != nil {
+				fmt.Fprintln(os.Stderr, "helper: init effect missing:", err)
+				os.Exit(4)
+			}
+		}
 		runHelperServer(os.Args[i+1], os.Args[i+2])
 		return
 	}
@@ -42,13 +51,16 @@ func TestMain(m *testing.M) {
 
 // runHelperInit appends one marker per invocation to <stateDir>/init-runs so
 // tests can count executions, then behaves per mode: "ok" succeeds, "fail"
-// always exits nonzero, "fail-once" fails only the first invocation, and
-// "sleep" hangs to trip the init timeout.
+// always exits nonzero, "fail-once" fails only the first invocation, "sleep"
+// hangs to trip the init timeout, and "marker" writes <stateDir>/init-marker
+// — the external effect a --needs-marker run command depends on.
 func runHelperInit(stateDir, mode string) int {
 	runsFile := filepath.Join(stateDir, "init-runs")
 	prev, _ := os.ReadFile(runsFile)
 	os.WriteFile(runsFile, append(prev, 'x'), 0o644)
 	switch mode {
+	case "marker":
+		os.WriteFile(markerPath(stateDir), []byte("x"), 0o644)
 	case "fail":
 		return 3
 	case "fail-once":
@@ -209,6 +221,16 @@ func (f *fixture) initRuns(t *testing.T, beHash string) int {
 
 func initArgv(t *testing.T, mode string) []string {
 	return []string{testExe(t), "--helper-init", "{state_dir}", mode}
+}
+
+// markerPath is the file a "marker" init creates and a --needs-marker run
+// command requires — the test's stand-in for an init effect that lives
+// outside this system and can be deleted behind its back.
+func markerPath(stateDir string) string { return filepath.Join(stateDir, "init-marker") }
+
+// markerServerArgv is serverArgv that refuses to start without that effect.
+func markerServerArgv(t *testing.T) []string {
+	return append(serverArgv(t), "--needs-marker", filepath.Join("{state_dir}", "init-marker"))
 }
 
 func serverArgv(t *testing.T) []string {
@@ -937,5 +959,109 @@ func TestDrainEventsBuffersAndResets(t *testing.T) {
 	durs, err := f.db.StartupDurations(30)
 	if err != nil || len(durs) != 1 {
 		t.Fatalf("local trail durations = %v, %v", durs, err)
+	}
+}
+
+// drainedEvents collects the event names buffered since the last drain.
+func (f *fixture) drainedEvents(t *testing.T) []string {
+	t.Helper()
+	var names []string
+	for _, e := range f.m.DrainEvents() {
+		names = append(names, e.Event)
+	}
+	return names
+}
+
+// TestFailedStartRevokesSkippedInit: init's effects can live outside this
+// system (the per-preview Postgres database an onyx init creates), where a
+// reaper can delete them while init_done_at still says "done". A start that
+// skipped init and then failed revokes the record — in memory and in the
+// row — so the next start re-runs init and repairs the effect.
+func TestFailedStartRevokesSkippedInit(t *testing.T) {
+	f := newFixture(t)
+	const beHash = "be-revoke"
+	f.provisionCfg(t, beHash, manifest.Backend{
+		Init:         [][]string{initArgv(t, "marker")},
+		Run:          markerServerArgv(t),
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	})
+	ctx := context.Background()
+	k := BackendKey(f.repoID, beHash)
+	marker := markerPath(f.files.StateDirPath("demo", beHash))
+
+	if _, err := f.m.EnsureRunning(ctx, k, "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if runs := f.initRuns(t, beHash); runs != 1 {
+		t.Fatalf("init runs after first start = %d, want 1", runs)
+	}
+	if art, err := f.db.GetBackendArtifact(f.repoID, beHash); err != nil || art.InitDoneAt == "" {
+		t.Fatalf("artifact after init = %+v, %v", art, err)
+	}
+
+	// The effect vanishes out from under the flag.
+	f.m.Stop(k, "test")
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	f.drainedEvents(t)
+
+	if _, err := f.m.EnsureRunning(ctx, k, "demo"); err == nil {
+		t.Fatal("expected the start to fail with the init effect gone")
+	}
+	if runs := f.initRuns(t, beHash); runs != 1 {
+		t.Fatalf("init runs on the skipping start = %d, want still 1", runs)
+	}
+	if art, err := f.db.GetBackendArtifact(f.repoID, beHash); err != nil || art.InitDoneAt != "" {
+		t.Fatalf("init done after a failed start that skipped init = %+v, %v; want cleared", art, err)
+	}
+	if ev := f.drainedEvents(t); !slices.Contains(ev, "init_revoked") {
+		t.Fatalf("events = %v, want an init_revoked", ev)
+	}
+
+	// The next start re-runs init, which recreates the effect.
+	port, err := f.m.EnsureRunning(ctx, k, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := get(t, port, "/api/health"); code != 200 {
+		t.Fatalf("health after re-init = %d", code)
+	}
+	if runs := f.initRuns(t, beHash); runs != 2 {
+		t.Fatalf("init runs after revocation = %d, want 2", runs)
+	}
+	if art, _ := f.db.GetBackendArtifact(f.repoID, beHash); art.InitDoneAt == "" {
+		t.Fatal("re-run init success was not recorded")
+	}
+}
+
+// TestFailedStartAfterInitRanDoesNotRevoke: only a start that SKIPPED init is
+// evidence the recorded init is stale. One that just ran init and still failed
+// health has already paid for it — revoking there would re-run init on every
+// retry of a backend that simply cannot start.
+func TestFailedStartAfterInitRanDoesNotRevoke(t *testing.T) {
+	f := newFixture(t)
+	const beHash = "be-no-revoke"
+	f.provisionCfg(t, beHash, manifest.Backend{
+		// "ok" init never creates the marker the run command demands.
+		Init:         [][]string{initArgv(t, "ok")},
+		Run:          markerServerArgv(t),
+		HealthPath:   "/api/health",
+		StartTimeout: manifest.Duration(10 * time.Second),
+	})
+	k := BackendKey(f.repoID, beHash)
+
+	if _, err := f.m.EnsureRunning(context.Background(), k, "demo"); err == nil {
+		t.Fatal("expected the start to fail")
+	}
+	if runs := f.initRuns(t, beHash); runs != 1 {
+		t.Fatalf("init runs = %d, want 1", runs)
+	}
+	if art, err := f.db.GetBackendArtifact(f.repoID, beHash); err != nil || art.InitDoneAt == "" {
+		t.Fatalf("init that ran and succeeded must stay recorded: %+v, %v", art, err)
+	}
+	if ev := f.drainedEvents(t); slices.Contains(ev, "init_revoked") {
+		t.Fatalf("events = %v, want no init_revoked", ev)
 	}
 }

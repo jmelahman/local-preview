@@ -11,6 +11,9 @@ type BackendArtifact struct {
 	RunConfig  string
 	// InitDoneAt is empty until the manifest's init steps have succeeded
 	// against this artifact's state dir (or forever, if none are declared).
+	// It can go back to empty: a start that skipped init and then failed
+	// revokes it (ClearBackendInitDone), so init re-runs and repairs effects
+	// that vanished from an external service.
 	InitDoneAt string
 	CreatedAt  string
 }
@@ -56,6 +59,19 @@ func (s *Store) MarkBackendInitDone(repoID int64, beHash string) error {
 		`UPDATE backend_artifacts
 		 SET init_done_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
 		 WHERE repo_id = ? AND be_hash = ?`, repoID, beHash)
+	return err
+}
+
+// ClearBackendInitDone withdraws a recorded init: the next start runs the
+// manifest's init steps again. Unset is the empty string, exactly as a
+// never-inited row reads. The supervisor calls this when a start that
+// skipped init failed — init's effects can live in a service outside this
+// system (a per-preview database on shared Postgres), where they can be
+// deleted without the flag ever hearing about it.
+func (s *Store) ClearBackendInitDone(repoID int64, beHash string) error {
+	_, err := s.db.Exec(
+		`UPDATE backend_artifacts SET init_done_at = '' WHERE repo_id = ? AND be_hash = ?`,
+		repoID, beHash)
 	return err
 }
 

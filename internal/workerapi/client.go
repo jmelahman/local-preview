@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -43,6 +44,21 @@ type Client struct {
 	// a fresh worker re-runs init — a fleet resting at zero workers re-ran
 	// it on nearly every wake. Nil skips the write.
 	InitMarker func(k supervise.Key) error
+
+	// InitRevoker withdraws a backend init the control DB records as done —
+	// supervise.(*Manager).RevokeInitDone in production, the mirror image of
+	// InitMarker. It fires when an ensure that SHIPPED InitDone=true came
+	// back as a start failure the worker actually reported: the worker
+	// skipped init on our say-so and the process never went healthy, so the
+	// effects init owns (the per-preview database, say) may be gone. The
+	// next ensure then ships InitDone=false and the worker re-runs init.
+	//
+	// Only a worker-reported failure counts. A transport error, a timeout,
+	// or a cancelled context proves nothing — the worker may never have run
+	// a thing — and revoking on those would re-run init for every network
+	// blip. That distinction is why post returns a typed *HTTPError.
+	// Nil skips the write.
+	InitRevoker func(k supervise.Key) error
 }
 
 // NewClient dials a worker. baseURL is its private worker-API URL; host is the
@@ -76,6 +92,12 @@ func (c *Client) EnsureRunning(ctx context.Context, k supervise.Key, repoName st
 	}
 	var resp ensureResp
 	if err := c.post(ctx, pathEnsure, req, &resp); err != nil {
+		if c.InitRevoker != nil && k.Side == supervise.SideBackend &&
+			req.Spec != nil && req.Spec.InitDone && isStartFailure(err) {
+			if rerr := c.InitRevoker(k); rerr != nil {
+				log.Printf("worker ensure: revoking init done for %s/%s: %v", repoName, k.Hash, rerr)
+			}
+		}
 		return "", err
 	}
 	// Backend ensures only: a frontend ensure may or may not have started the
@@ -208,6 +230,27 @@ func (c *Client) Heartbeat(ctx context.Context) (Heartbeat, error) {
 	return hb, nil
 }
 
+// HTTPError is a response the peer actually produced: the request reached it
+// and it answered non-2xx. Callers that must tell "the far side ran something
+// and it failed" from "the far side was never reached" (EnsureRunning's init
+// revocation) match on this; a transport error, a timeout, or a cancelled
+// context is a plain error instead.
+type HTTPError struct {
+	Status int
+	Body   string
+}
+
+func (e *HTTPError) Error() string { return e.Body }
+
+// isStartFailure reports whether err is the worker's own "this start failed"
+// answer — the 502 handleEnsure returns for a crashed or unstartable process
+// (any other status is a protocol/auth problem, which says nothing about
+// init's effects).
+func isStartFailure(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.Status == http.StatusBadGateway
+}
+
 // post sends a JSON body to path and decodes an optional JSON response. A
 // non-2xx carries the worker's error text so the proxy renders the real reason.
 func (c *Client) post(ctx context.Context, path string, body, out any) error {
@@ -235,7 +278,7 @@ func postJSON(ctx context.Context, hc *http.Client, url, secret string, body, ou
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return fmt.Errorf("%s", bytes.TrimSpace(msg))
+		return &HTTPError{Status: res.StatusCode, Body: string(bytes.TrimSpace(msg))}
 	}
 	if out == nil {
 		return nil

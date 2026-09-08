@@ -69,7 +69,7 @@ must bind `{port}` — on all interfaces (`0.0.0.0`) when it runs containered
 | `path` | yes | Subtree that defines the backend hash (minus `frontend.path` and `exclude`); build cwd; the built subtree becomes the artifact |
 | `exclude` | no | Patterns removed from the backend hash: `dir/` prefixes, or globs matched against the full path and basename (`*.md`) |
 | `build` | yes | Build steps as argv arrays |
-| `init` | no | Steps run once per backend artifact before its first `run` (see [Init commands](#init-commands)) |
+| `init` | no | Idempotent steps run once per backend artifact before its first `run`, re-run after a failed start that skipped them (see [Init commands](#init-commands)) |
 | `run` | yes | Command that starts the server, executed with the artifact directory as cwd |
 | `health_path` | yes | Path polled until it returns 200 after start |
 | `start_timeout` | no | How long the process gets to become healthy (default `20s`) |
@@ -143,8 +143,8 @@ run  = ["uvicorn", "app:app", "--port", "{port}"]
 `init` steps run **once per backend artifact**, sequentially, with the
 artifact directory as cwd, after the artifact's state dir is provisioned and
 before its first `run`. Because artifacts are immutable and each one owns its
-state dir exclusively, a recorded success is final: later cold starts of the
-same artifact skip init entirely. A new backend hash is a new artifact, so
+state dir exclusively, later cold starts of the same artifact skip init
+entirely. A new backend hash is a new artifact, so
 its init runs again — against state [freshly forked](/guide/concepts#state-follows-git-lineage)
 from its ancestor, which is exactly when migrations have real work to do.
 
@@ -159,6 +159,23 @@ padding for worst-case migration time.
 With `run_image` set, each init step runs to completion in a one-shot
 container using the same image, mounts, and external `networks` as the
 server container, so migrations reach whatever the server will.
+
+**Init steps must be idempotent**, because "once" is not a promise: a start
+that skipped init and then failed — the process exited before it went
+healthy, or never answered its health check — *revokes* the recorded success,
+and the next start runs init again from the first step.
+
+The reason is that init's effects need not live in the state dir this system
+owns. A step that creates a per-preview database on a shared Postgres, a
+bucket prefix, or a queue has written to a service that can lose it —
+someone reaps old databases, an external environment is rebuilt — while the
+"done" flag keeps claiming the effect exists. Without revocation such a
+preview crash-loops forever, since nothing re-runs the step that would
+recreate it. Writing each step to check-then-create (`CREATE DATABASE` only
+if absent, `alembic upgrade head`, `mkdir -p`) makes the repair free, and
+costs at most one extra idempotent init per failed cold start. An init that
+already ran in the failing attempt is never revoked — the flag is only
+withdrawn when init was skipped.
 
 If a step fails or times out, the start attempt fails and the **next** start
 retries init from the first step — nothing is recorded until every step

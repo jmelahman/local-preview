@@ -112,6 +112,15 @@ type Manager struct {
 	wireSpecs map[Key]WireSpec // control-supplied run specs (worker serving)
 	stopping  bool             // set by StopAll; refuses new starts during shutdown
 
+	// initRevoked marks backend artifacts whose recorded init-done is no
+	// longer trusted on this node: a start that skipped init because the
+	// flag said "done" then failed, so the effects init owns (a per-preview
+	// database on a shared Postgres, say) may have been reaped out from
+	// under the flag. A revocation outranks BOTH the sticky wire cache and
+	// the control node's next offer — the control DB may legitimately still
+	// say done — until an init actually succeeds here again.
+	initRevoked map[Key]bool
+
 	// eventBuf holds process events since the last DrainEvents, shipped to
 	// the control node in the worker heartbeat. Events land in this node's
 	// own database too, but a worker's database is ephemeral — the control's
@@ -151,6 +160,7 @@ func New(database *db.Store, files *store.Store, logsDir string) *Manager {
 		locks:          make(map[Key]*sync.Mutex),
 		failures:       make(map[Key]Failure),
 		wireSpecs:      make(map[Key]WireSpec),
+		initRevoked:    make(map[Key]bool),
 	}
 }
 
@@ -566,12 +576,20 @@ func (m *Manager) ResolveWireSpec(k Key) (WireSpec, error) {
 // InitDone=false must not make every cold start here re-run init. The control
 // node normally adopts a worker's init result off the ensure response
 // (AdoptRemoteInitDone), so this is the backstop for the offers that race
-// that write, not the only guard.
+// that write, not the only guard. Stickiness stops at a revocation
+// (revokeInitDone): a failed start that skipped init must re-run it here even
+// while the offer still says done.
 func (m *Manager) OfferWireSpec(k Key, s WireSpec) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if prev, ok := m.wireSpecs[k]; ok && prev.InitDone {
 		s.InitDone = true
+	}
+	if m.initRevoked[k] {
+		// A revocation beats both the sticky cache and the offer: this node
+		// watched a start that skipped init fail, and the control DB (whose
+		// row this offer mirrors) can't know that yet.
+		s.InitDone = false
 	}
 	m.wireSpecs[k] = s
 }
@@ -600,16 +618,71 @@ func (m *Manager) AdoptRemoteInitDone(k Key) error {
 // to update — OfferWireSpec's stickiness is what keeps init from re-running
 // on this node's later cold starts).
 func (m *Manager) markInitDone(k Key, spec runSpec) error {
-	if !spec.fromWire {
-		return m.db.MarkBackendInitDone(k.RepoID, k.Hash)
-	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	delete(m.initRevoked, k)
 	if s, ok := m.wireSpecs[k]; ok {
 		s.InitDone = true
 		m.wireSpecs[k] = s
 	}
+	m.mu.Unlock()
+	if !spec.fromWire {
+		return m.db.MarkBackendInitDone(k.RepoID, k.Hash)
+	}
 	return nil
+}
+
+// initIsRevoked reports whether k's recorded init-done has been revoked here.
+func (m *Manager) initIsRevoked(k Key) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.initRevoked[k]
+}
+
+// revokeInitDone withdraws k's recorded init-done so the NEXT start re-runs
+// the manifest's init steps. It is the self-healing half of the once-per-
+// artifact rule: init_done_at records that init's effects exist, but those
+// effects can live in a service this node doesn't own (the per-preview
+// Postgres database an onyx init creates), and something out there can
+// delete them. A start that skipped init and then failed is the signal —
+// the flag is claiming an effect that may be gone.
+//
+// The revocation is in-memory (it must outrank the wire cache and every
+// later offer, which mirror a control DB that still says done) and, on a
+// node that owns the row, persisted by clearing init_done_at so it survives
+// a restart and reaches fresh workers through ResolveWireSpec.
+func (m *Manager) revokeInitDone(k Key, spec runSpec, reason string) {
+	m.mu.Lock()
+	m.initRevoked[k] = true
+	if s, ok := m.wireSpecs[k]; ok {
+		s.InitDone = false
+		m.wireSpecs[k] = s
+	}
+	m.mu.Unlock()
+	if !spec.fromWire {
+		if err := m.db.ClearBackendInitDone(k.RepoID, k.Hash); err != nil {
+			log.Printf("revoke init done for %s %s: %v", k.Side, shortHash(k.Hash), err)
+		}
+	}
+	m.recordEvent(k.RepoID, k.Hash, "init_revoked", reason)
+	log.Printf("init revoked for %s %s: %s; init re-runs on the next start", k.Side, shortHash(k.Hash), reason)
+}
+
+// RevokeInitDone is the control-side mirror of revokeInitDone: a worker
+// reported that a start which skipped init failed, so this node's record of
+// that init is withdrawn (row cleared, revocation cached) and the next
+// ensure ships InitDone=false. Symmetric to AdoptRemoteInitDone, and driven
+// by workerapi.Client's InitRevoker hook.
+func (m *Manager) RevokeInitDone(k Key) error {
+	m.mu.Lock()
+	m.initRevoked[k] = true
+	if s, ok := m.wireSpecs[k]; ok {
+		s.InitDone = false
+		m.wireSpecs[k] = s
+	}
+	m.mu.Unlock()
+	m.recordEvent(k.RepoID, k.Hash, "init_revoked", "worker start failed after skipping init")
+	log.Printf("init revoked for %s %s: worker start failed after skipping init; init re-runs on the next start", k.Side, shortHash(k.Hash))
+	return m.db.ClearBackendInitDone(k.RepoID, k.Hash)
 }
 
 // loadRunSpec resolves the artifact's run contract for either side: the DB
@@ -686,7 +759,7 @@ func (m *Manager) loadRunSpec(k Key, repoName string) (runSpec, error) {
 		networks:     cfg.Networks,
 		init:         cfg.Init,
 		initTimeout:  time.Duration(cfg.InitTimeout),
-		initDone:     ws.InitDone,
+		initDone:     ws.InitDone && !m.initIsRevoked(k),
 		fromWire:     fromWire,
 	}, nil
 }
@@ -871,6 +944,12 @@ func (m *Manager) start(k Key, p *process) {
 	// immutable and nothing else writes its state dir, so a recorded success
 	// holds for every later cold start. A failure leaves init_done_at unset
 	// and the next start attempt retries from the first step.
+	//
+	// skippedInit marks the other case — init was owed but the flag said
+	// done — because a start that skipped init and then never went healthy
+	// is the one signal that the flag may be describing an effect that no
+	// longer exists (see revokeInitDone).
+	skippedInit := k.Side == SideBackend && len(spec.init) > 0 && spec.initDone
 	if k.Side == SideBackend && len(spec.init) > 0 && !spec.initDone {
 		m.recordEvent(k.RepoID, k.Hash, "init_attempt", fmt.Sprintf("%d steps", len(spec.init)))
 		if err := m.runInit(k, p.repoName, spec, rt, logFile); err != nil {
@@ -957,6 +1036,12 @@ func (m *Manager) start(k Key, p *process) {
 		if died {
 			// The exit status is a better answer than "never went healthy".
 			event, err = "exited", fmt.Errorf("process exited during startup: %s (see run log)", p.exit)
+		}
+		if skippedInit {
+			// Never on an attempt whose init actually ran: that one has
+			// already paid for itself, and revoking there would re-run init
+			// on every retry of a backend that simply cannot start.
+			m.revokeInitDone(k, spec, event)
 		}
 		fail(event, err)
 		return

@@ -227,6 +227,10 @@ full entry to `REGRESSIONS.md` and a one-line title here.
   per backend hash exhausts them in a working day; the reaper removes it
   last-one-out (docker refuses while the peer is attached) under `netMu`,
   which must span lookup→`StartContainer` (endpoints attach at start).
+- An init-done flag may only record an effect this node owns — init that
+  writes an external service (the per-preview Postgres DB) must be revocable
+  and re-runnable; a reaped database behind a permanent `init_done_at`
+  crash-looped previews until the deploy was deleted.
 - A worker's disk is only a cache and must be capped by default — the cache
   sweeper only runs with `--cache-max-artifact-bytes` set, and a worker left
   at `0` hydrates every preview it ever serves until hydration itself dies

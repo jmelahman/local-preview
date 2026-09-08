@@ -1074,6 +1074,12 @@ func (wr workerRegistrar) Register(endpoint, host, instanceID string) error {
 	// otherwise init_done_at never gets set on a control node that only
 	// routes, and every fresh worker re-runs init on cold placement.
 	wc.InitMarker = wr.super.AdoptRemoteInitDone
+	// And the mirror: a worker-reported start failure on an ensure that
+	// skipped init (because we told it InitDone=true) withdraws that record,
+	// so the next ensure re-runs init. Init's effects can live in an external
+	// service — a per-preview database someone reaped — where "done" quietly
+	// stops being true.
+	wc.InitRevoker = wr.super.RevokeInitDone
 	// Add is idempotent for a known worker (they re-announce every ~20s);
 	// only a genuinely new one is worth a log line.
 	if wr.reg.Add(endpoint, instanceID, wc) {

@@ -944,3 +944,57 @@ overrides the cap to `0` on a worker, without an eviction path; or a change
 that makes the worker's data dir live on a different filesystem than the
 one statfs measures (the derivation assumes the bind mount preserves the
 host path).
+
+## A permanent `init_done_at` bricked previews whose external init effect was reaped
+
+**Symptom.** Onyx previews that had served fine for days crash-looped at
+startup, every request rendering the "failed to start" page over
+`psycopg2.OperationalError: connection to server ... FATAL: database
+"preview_<12-hex>" does not exist`. Restarting the process, rebooting the
+worker, and re-placing the preview on a fresh node all reproduced it
+identically. The only thing that fixed a bricked preview was deleting the
+deploy (which GCs the artifact row) and re-deploying the same sha.
+
+**Root cause.** Two correct-in-isolation decisions met. The manifest's `init`
+steps create the preview's own Postgres database (`preview_{hash}`, cloned
+from a template, then `alembic upgrade head`) on the shared deps host —
+an effect that lives in a service this system does not own. And init ran *at
+most once per artifact, ever*: `supervise.(*Manager).start` skipped it
+whenever `spec.initDone`, which was set permanently by
+`MarkBackendInitDone` and, in fleet mode, carried to workers as a
+`WireSpec.InitDone` that `OfferWireSpec` made sticky forever per node and
+`AdoptRemoteInitDone` wrote back into the control DB off any successful
+ensure. Nothing but `DeleteBackendArtifact` ever unset it. Meanwhile a daily
+reaper on the deps host drops every `preview_*` database beyond the newest
+20, on the premise that "a dropped one just re-clones on its next cold
+start." It never re-cloned: the flag said init was done, so the step that
+would have recreated the database was skipped on every start forever.
+
+**Fix.** Init-done became revocable. A backend start that *skipped* init
+(the flag said done) and then failed to go healthy — the process exited
+during startup, or the health wait timed out — calls
+`Manager.revokeInitDone`: it records an `init_revoked` process event, clears
+`init_done_at` on a node that owns the row (`Store.ClearBackendInitDone`),
+and sets an in-memory `initRevoked[Key]`, which outranks *both* the sticky
+wire cache and the control node's next offer (that offer mirrors a DB row
+that may still say done). `markInitDone` clears the revocation. The fleet
+mirror is `workerapi.Client.InitRevoker` → `Manager.RevokeInitDone`, fired
+when an ensure that shipped `InitDone=true` comes back as a failure the
+worker *itself* reported — a 502 from the ensure route, distinguished from a
+transport error by the typed `*workerapi.HTTPError` that `postJSON` now
+returns. So the next start re-runs init, which is idempotent, and the
+preview repairs itself in one cold start.
+
+The trigger is deliberately narrow. A start whose init actually ran in that
+attempt never revokes: it has already paid, and revoking there would re-run
+init on every retry of a backend that simply cannot start. The one unbounded
+path left is the intended one — init re-runs until a start succeeds, at the
+cost of one idempotent init per failed cold start.
+
+**What would reintroduce it.** Recording an init-done fact anywhere that
+only a GC can clear (a new per-node cache, another sticky wire field) without
+a revocation path; making `OfferWireSpec` or `AdoptRemoteInitDone`
+authoritative over a local revocation; or widening `InitRevoker` to fire on
+transport errors — a network blip would then re-run init for every preview on
+an unreachable worker. Documenting init as "runs exactly once" again would
+also invite non-idempotent steps, which this design cannot support.

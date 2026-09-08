@@ -63,7 +63,13 @@ Two details of the wire spec are load-bearing:
   otherwise), so the control node records it in its own database and ships
   `true` from then on — a fresh worker skips init instead of re-running it.
   The worker's spec cache also keeps `init_done` sticky per node, as the
-  backstop for offers that race that write.
+  backstop for offers that race that write. The reverse flows too: when an
+  ensure that shipped `init_done: true` comes back as a worker-reported start
+  failure (a 502 from the ensure route — not a transport error, which proves
+  nothing), the control node clears its `init_done_at` and the worker marks
+  the artifact revoked, so the next ensure re-runs init. A revocation
+  outranks both the sticky cache and the next offer until an init succeeds
+  again.
 - **The `min_warm` floor is fleet-wide; `max_warm` is per worker.** The
   heartbeat loop ranks the fleet's processes by recency (`last_touch` rides
   each worker's report) and pushes every worker its share of the floor, so
