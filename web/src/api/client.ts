@@ -312,6 +312,7 @@ export const api = {
     const total = res.headers.get("X-Total-Count");
     return { deploys, total: total === null ? deploys.length : Number(total) };
   },
+  getDeploy: (id: number) => request<Deploy>(`/api/deploys/${id}`),
   createDeploy: (repo: string, ref: string) =>
     request<Deploy>("/api/deploys", { method: "POST", body: JSON.stringify({ repo, ref }) }),
   stopDeploy: (id: number) => request<Deploy>(`/api/deploys/${id}/stop`, { method: "POST" }),

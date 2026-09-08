@@ -531,14 +531,133 @@ function DeployDialog({
   // disabled so a fresh registration is discoverable here.
   const [repo, setRepo] = useState(repos.find((r) => r.status === "ready")?.name ?? "");
   const [gitRef, setGitRef] = useState("");
+  // Once the POST is accepted the server builds in the background; the
+  // dialog tracks that deploy until it turns ready or failed rather than
+  // closing on an accepted request that has produced nothing yet.
+  const [deployId, setDeployId] = useState<number | null>(null);
   const chosen = repos.find((r) => r.name === repo);
   const createDeploy = useMutation({
     mutationFn: () => api.createDeploy(repo, gitRef.trim()),
-    onSuccess: () => {
+    onSuccess: (deploy) => {
       queryClient.invalidateQueries({ queryKey: ["deploys"] });
-      onClose();
+      queryClient.setQueryData(["deploy", deploy.id], deploy);
+      setDeployId(deploy.id);
     },
   });
+  const tracked = useQuery({
+    queryKey: ["deploy", deployId],
+    queryFn: () => api.getDeploy(deployId as number),
+    enabled: deployId != null,
+    refetchInterval: (query) => {
+      const s = query.state.data?.status;
+      return s === "queued" || s === "building" ? 750 : false;
+    },
+  });
+
+  const deploy = tracked.data;
+  const status = deploy?.status;
+  // Each transition (queued → building → ready/failed) is worth a list
+  // refresh: the row behind the dialog tracks the same build.
+  useEffect(() => {
+    if (status) queryClient.invalidateQueries({ queryKey: ["deploys"] });
+  }, [status, queryClient]);
+
+  if (deployId != null) {
+    const building = status === "queued" || status === "building";
+    const failed = status === "failed";
+    return (
+      <Modal
+        title={failed ? "Deploy failed" : status === "ready" ? "Deploy ready" : "Deploying"}
+        onClose={onClose}
+      >
+        <div className="flex flex-col gap-3 p-4 text-sm">
+          <div className="flex items-center gap-2.5">
+            {failed ? (
+              <span className="shrink-0 text-danger">
+                <IconX />
+              </span>
+            ) : status === "ready" ? (
+              <IconCheck className="h-4 w-4 shrink-0 text-success" />
+            ) : (
+              <span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-fg-muted border-t-transparent" />
+            )}
+            <p className="min-w-0">
+              {failed
+                ? "Build failed."
+                : status === "ready"
+                  ? "Deploy finished."
+                  : status === "building"
+                    ? "Building frontend and backend…"
+                    : "Queued for a build slot…"}{" "}
+              <span className="text-fg-muted">
+                {deploy?.repo ?? repo}
+                {deploy?.short_sha && (
+                  <>
+                    {" "}
+                    <code className="font-mono text-xs">{deploy.short_sha}</code>
+                  </>
+                )}
+              </span>
+            </p>
+          </div>
+          <DeployStep label="Commit resolved" state={deploy?.sha ? "done" : "active"} />
+          <DeployStep
+            label="Building content-addressed artifacts"
+            state={failed ? "failed" : status === "ready" ? "done" : "active"}
+          />
+          <DeployStep
+            label="Preview serving"
+            state={status === "ready" ? "done" : failed ? "skipped" : "pending"}
+          />
+          {failed && deploy?.error && (
+            <p className="break-words font-mono text-xs text-danger">{deploy.error}</p>
+          )}
+          <BuildLogPane deployId={deployId} building={building} />
+        </div>
+        <DialogFooter
+          hint={
+            building
+              ? "Closing this dialog won't interrupt the build."
+              : status === "ready"
+                ? (deploy?.preview_url ?? "")
+                : "Fix the ref or the repository's preview.toml and try again."
+          }
+        >
+          {failed && (
+            <button
+              type="button"
+              onClick={() => {
+                setDeployId(null);
+                createDeploy.reset();
+              }}
+              className={buttonClass}
+            >
+              Back
+            </button>
+          )}
+          {status === "ready" && deploy?.preview_url && (
+            <a
+              href={deploy.preview_url}
+              target="_blank"
+              rel="noreferrer"
+              className={`${accentButtonClass} gap-1 px-3 py-1 text-sm`}
+            >
+              Open preview
+              <IconArrowUpRight className="h-3 w-3" />
+            </a>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            className={`${neutralButtonClass} px-3 py-1 text-sm`}
+          >
+            Close
+          </button>
+        </DialogFooter>
+      </Modal>
+    );
+  }
+
   return (
     <Modal title="Deploy a commit" onClose={onClose}>
       <form
@@ -595,13 +714,47 @@ function DeployDialog({
           <button
             type="submit"
             disabled={!gitRef.trim() || chosen?.status !== "ready" || createDeploy.isPending}
-            className={buttonClass}
+            className={`${buttonClass} gap-2`}
           >
-            Deploy
+            {createDeploy.isPending && (
+              <span className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
+            )}
+            {createDeploy.isPending ? "Submitting…" : "Deploy"}
           </button>
         </DialogFooter>
       </form>
     </Modal>
+  );
+}
+
+// DeployStep is one line of the deploy progress checklist: a leading marker
+// (done / running / not yet / never ran) plus its label.
+function DeployStep({
+  label,
+  state,
+}: {
+  label: string;
+  state: "pending" | "active" | "done" | "failed" | "skipped";
+}) {
+  return (
+    <div
+      className={`flex items-center gap-2.5 text-xs ${state === "pending" || state === "skipped" ? "text-fg-muted/60" : "text-fg-muted"}`}
+    >
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+        {state === "done" ? (
+          <IconCheck className="h-3.5 w-3.5 text-success" />
+        ) : state === "failed" ? (
+          <span className="text-danger">
+            <IconX />
+          </span>
+        ) : state === "active" ? (
+          <span className="h-3 w-3 animate-spin rounded-full border-2 border-fg-muted border-t-transparent" />
+        ) : (
+          <span className="h-1.5 w-1.5 rounded-full bg-fg-muted/40" />
+        )}
+      </span>
+      {label}
+    </div>
   );
 }
 

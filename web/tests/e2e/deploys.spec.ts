@@ -356,3 +356,35 @@ test("register dialog surfaces a failed clone and offers a retry", async ({ page
   await expect(page.getByRole("dialog")).toBeHidden({ timeout: 60_000 });
   await waitRepoReady(page, "badclone");
 });
+
+test("deploy dialog tracks the build through to a servable preview", async ({ page }) => {
+  test.setTimeout(180_000);
+
+  const repoRes = await page.request.post("/api/repos", {
+    data: { name: "fixture", source: repoDir },
+  });
+  expect([202, 409]).toContain(repoRes.status());
+  await waitRepoReady(page, "fixture");
+  // A fresh commit: re-deploying a sha the suite already built conflicts.
+  writeFileSync(join(repoDir, "web", "src", "index.html"), "fixture frontend v4");
+  git(repoDir, "commit", "-qam", "v4");
+  const fresh = git(repoDir, "rev-parse", "HEAD");
+
+  await page.goto("/");
+  await page.locator("main").getByRole("button", { name: "Deploy", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("combobox", { name: "Repository" }).selectOption("fixture");
+  await dialog.getByRole("textbox", { name: "Ref" }).fill(fresh);
+  await dialog.getByRole("button", { name: "Deploy", exact: true }).click();
+
+  // The form is replaced by the progress view, which stays put — tailing the
+  // build log — until the preview is actually servable.
+  await expect(dialog.getByText(/Building content-addressed artifacts/)).toBeVisible();
+  await expect(dialog.getByText(/--- backend build ---/)).toBeVisible({ timeout: 120_000 });
+  await expect(dialog.getByText("Deploy finished.")).toBeVisible({ timeout: 120_000 });
+
+  const open = dialog.getByRole("link", { name: /Open preview/ });
+  await expect(open).toBeVisible();
+  await page.goto((await open.getAttribute("href")) ?? "");
+  await expect(page.getByText("fixture frontend v4")).toBeVisible();
+});

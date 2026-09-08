@@ -69,9 +69,12 @@ and click **Deploy**.
 <img class="light-only" src="/quickstart-03-deploy-light.png" alt="Deploy a commit" />
 <img class="dark-only" src="/quickstart-03-deploy-dark.png" alt="Deploy a commit" />
 
-The deployment appears in the list below and moves from `queued` through
-`building` to `idle` — built and served on demand. The dashboard polls
-while a build is running, so there's nothing to refresh.
+The dialog stays open and turns into a progress view: a checklist of the
+build's phases and a live tail of the build log. It finishes with an **Open
+preview** button. Closing the dialog doesn't interrupt anything — the
+deployment also appears in the list below, moving from `queued` through
+`building` to `idle` (built and served on demand). The dashboard polls while
+a build is running, so there's nothing to refresh.
 
 From inside the target repo, the CLI can do the same and waits for the
 result:
