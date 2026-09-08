@@ -225,6 +225,8 @@ const buttonClass =
   "inline-flex shrink-0 items-center rounded bg-accent-700 px-3 py-1 text-sm text-white transition-colors duration-150 hover:bg-accent-600 disabled:cursor-not-allowed disabled:opacity-50";
 const neutralButtonClass =
   "inline-flex shrink-0 items-center rounded bg-surface-2 px-2 py-1 text-xs text-fg transition-colors duration-150 hover:bg-surface-3";
+const accentButtonClass =
+  "inline-flex shrink-0 items-center rounded bg-accent-700 px-2 py-1 text-xs text-white transition-colors duration-150 hover:bg-accent-600";
 const dangerButtonClass =
   "inline-flex shrink-0 items-center rounded bg-accent-600 px-3 py-1 text-sm text-white transition-colors duration-150 hover:bg-accent-500 disabled:cursor-not-allowed disabled:opacity-50";
 
@@ -2102,7 +2104,7 @@ export default function App() {
                         href={d.preview_url}
                         target="_blank"
                         rel="noreferrer"
-                        className={`${neutralButtonClass} gap-1`}
+                        className={`${accentButtonClass} gap-1`}
                       >
                         open
                         <IconArrowUpRight className="h-3 w-3" />
