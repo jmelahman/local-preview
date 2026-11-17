@@ -342,7 +342,8 @@ resource "aws_instance" "server" {
     webhook_ssm    = var.github_webhook_secret_ssm_parameter == null ? "" : var.github_webhook_secret_ssm_parameter
     sso_secret_ssm = var.sso == null ? "" : var.sso.client_secret_ssm_parameter
     worker_ssm     = var.workers == null ? "" : var.workers.secret_ssm_parameter
-    secret_env     = merge(var.secret_env_ssm_parameters, local.ingestion_secret_env)
+    secret_env     = var.secret_env_ssm_parameters
+    ingestion_ssm  = var.ingestion_workers == null ? "" : var.ingestion_workers.secret_ssm_parameter
   }))
 
   # The image is baked into the unit file that user_data writes, so an image

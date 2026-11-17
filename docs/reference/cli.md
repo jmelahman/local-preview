@@ -37,7 +37,7 @@ Start the orchestrator.
 | `--ingestion-control-listen` | (disabled) | Private ingestion coordinator address, such as `10.0.1.10:9102`; requires an artifact tier and separate secret |
 | `--ingestion-asg-name` | (none) | Ingestion ASG name for queue metrics |
 | `--ingestion-secret` | `$PREVIEW_INGESTION_SECRET` | Separate secret for the private ingestion API |
-| `--ingestion-max-pending` | `100` | Maximum unfinished ingestion reservations; one extra slot permits an artifact continuation |
+| `--ingestion-max-pending` | `100` | Global unfinished job bound; each repo gets one quarter, rounded up, at least one. Internal continuations get one extra slot per bound |
 | `--role` | `all` | Serving role: `all` (single node), `control` (route previews to a worker tier), or `worker` (supervise processes for a control node) |
 | `--worker-secret` | `$PREVIEW_WORKER_SECRET` | Shared secret authenticating the internal worker API in both directions |
 | `--worker-listen` | — | Private address to expose the internal worker API on, e.g. `:9100` (roles `worker`/`all`). **Must not be internet/ALB-reachable.** Requires `--worker-secret` |
@@ -189,7 +189,8 @@ request obtains a fresh OIDC token when needed. The archive goes directly to
 the signed S3 URL without the control API's bearer token. The command waits
 for the job and exits non-zero on failure. Preview readiness can precede
 completion of downloadable artifacts. Servers with ingestion enabled reject
-synchronous uploads with `426`.
+synchronous uploads with `426`. Unsubmitted reservations expire after ten
+minutes. Submitted jobs retain their original 25-minute deadline.
 
 An upload primes the store independently of any deploy: order doesn't matter,
 and an uploaded side is shared by every commit with the same hash. Exits

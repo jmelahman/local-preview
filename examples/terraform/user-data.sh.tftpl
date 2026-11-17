@@ -72,6 +72,14 @@ set +x
 printf 'PREVIEW_WORKER_SECRET=%s\n' "$WORKER_SECRET" >>/etc/local-preview.env
 set -x
 %{ endif ~}
+%{ if ingestion_ssm != "" ~}
+set +x
+INGESTION_SECRET=$(aws ssm get-parameter --region ${aws_region} \
+  --name '${ingestion_ssm}' --with-decryption --query Parameter.Value --output text)
+printf 'PREVIEW_INGESTION_SECRET=%s\n' "$INGESTION_SECRET" >>/etc/local-preview.env
+unset INGESTION_SECRET
+set -x
+%{ endif ~}
 %{ for env_name, param in secret_env ~}
 VAL=$(aws ssm get-parameter --region ${aws_region} \
   --name '${param}' --with-decryption --query Parameter.Value --output text)

@@ -173,7 +173,10 @@ Publication survives control restarts. The deploy becomes ready in one database
 transaction. Downloadable artifacts run as a later job, so they do not delay
 preview readiness.
 
-Admission accepts 100 unfinished jobs by default. One extra slot permits a
+Admission accepts 100 unfinished jobs globally and 25 per repository by default.
+The repository quota is one quarter of the global bound, rounded up, with a
+minimum of one. This keeps one repository from occupying every slot.
+One extra slot in each bound permits a
 parent job to schedule its artifact continuation before it finishes. Each
 worker runs one job at a time. Leases last one minute and renew every 15 seconds.
 An expired lease can retry, up to three attempts within the 25-minute job
@@ -184,9 +187,10 @@ The Terraform example defaults to zero minimum workers and four maximum
 workers. Queued demand drives scale-out, including from zero. Each node has
 80 GiB of disk. The ingestion daemon has an 8 GiB memory limit and two CPUs.
 Each Docker build has a separate 2 GiB memory limit, no swap, and two CPUs.
-A worker needs 10 GiB of free scratch space before it claims a job. Builds
-that require Docker fail if Docker is unavailable. Plain host steps run inside
-the bounded ingestion daemon.
+A worker needs 10 GiB of free scratch space before it claims a job.
+Ingestion builds require an image in the manifest or devcontainer. They fail
+if Docker is unavailable. They mount only the job scratch tree, use `HOME=/tmp`,
+and receive no devcontainer volumes, worker secrets, or Docker socket.
 
 The coordinator uses private port 9102 and a separate ingestion secret. Keep
 this listener outside the public load balancer. Allow only ingestion nodes
@@ -195,6 +199,8 @@ to reach it. See [configuration](/guide/configuration#isolated-ingestion) and
 
 Staged uploads use an exact-size presigned S3 POST. The default archive limit
 is 2 GiB; worker extraction also has a 2 GiB limit. Signatures last ten minutes.
+Unsubmitted reservations expire ten minutes after creation. Submitted jobs
+retain their original 25-minute execution deadline.
 The example S3 lifecycle removes staging objects after one day. The server
 retains terminal job history for seven days.
 

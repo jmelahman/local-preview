@@ -84,11 +84,29 @@ func (s *Store) GetJobByRequest(repoID int64, key string) (Job, error) {
 func expireJobs(tx *sql.Tx, now int64) error {
 	_, err := tx.Exec(`UPDATE ingestion_jobs SET status = 'failed', error = 'job expired',
 		worker_id = '', lease_token = '', lease_until = 0, updated_at = ?
-		WHERE status IN ('uploading', 'queued', 'leased') AND expires_at <= ?`, now, now)
+		WHERE (status IN ('uploading', 'queued', 'leased') AND expires_at <= ?)
+		OR (status = 'uploading' AND created_at <= ?)`, now, now, now-int64(UploadReservationTimeout/time.Second))
 	return err
 }
 
+const UploadReservationTimeout = 10 * time.Minute
+
+func JobRepositoryLimit(maxPending int) int {
+	return max(1, (maxPending+3)/4)
+}
+
 func (s *Store) ReserveJob(spec JobSpec, maxPending int, now time.Time) (Job, bool, error) {
+	return s.reserveJob(spec, maxPending, JobRepositoryLimit(maxPending), now)
+}
+
+func (s *Store) ReserveContinuation(spec JobSpec, maxPending int, now time.Time) (Job, bool, error) {
+	if maxPending < 1 || spec.Kind != JobBuild {
+		return Job{}, false, errors.New("invalid ingestion continuation reservation")
+	}
+	return s.reserveJob(spec, maxPending+1, JobRepositoryLimit(maxPending)+1, now)
+}
+
+func (s *Store) reserveJob(spec JobSpec, maxPending, maxPerRepo int, now time.Time) (Job, bool, error) {
 	if spec.ID == "" || spec.RepoID <= 0 || spec.RequestKey == "" || spec.Fingerprint == "" ||
 		(spec.Kind != JobUpload && spec.Kind != JobBuild) || !json.Valid([]byte(spec.SpecJSON)) ||
 		spec.ArchiveBytes < 0 || spec.ExpiresAt <= now.Unix() || maxPending < 1 {
@@ -115,11 +133,12 @@ func (s *Store) ReserveJob(spec JobSpec, maxPending int, now time.Time) (Job, bo
 	if !errors.Is(err, ErrNotFound) {
 		return Job{}, false, err
 	}
-	var count int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM ingestion_jobs WHERE status NOT IN ('done', 'failed')`).Scan(&count); err != nil {
+	var count, repoCount int
+	if err := tx.QueryRow(`SELECT COUNT(*), COUNT(*) FILTER (WHERE repo_id = ?) FROM ingestion_jobs
+  WHERE status NOT IN ('done', 'failed')`, spec.RepoID).Scan(&count, &repoCount); err != nil {
 		return Job{}, false, err
 	}
-	if count >= maxPending {
+	if count >= maxPending || repoCount >= maxPerRepo {
 		return Job{}, false, ErrJobFull
 	}
 	status := JobUploading
@@ -142,8 +161,14 @@ func (s *Store) ReserveJob(spec JobSpec, maxPending int, now time.Time) (Job, bo
 }
 
 func (s *Store) QueueJob(id string, now time.Time) (Job, error) {
-	j, err := scanJob(s.db.QueryRow(`UPDATE ingestion_jobs SET status = 'queued', updated_at = ?
-		WHERE id = ? AND status = 'uploading' AND expires_at > ? RETURNING `+jobColumns, now.Unix(), id, now.Unix()))
+	j, err := scanJob(s.db.QueryRow(`UPDATE ingestion_jobs
+  SET status = CASE WHEN created_at <= ? OR expires_at <= ? THEN 'failed' ELSE 'queued' END,
+  error = CASE WHEN created_at <= ? OR expires_at <= ? THEN 'job expired' ELSE error END,
+  updated_at = ? WHERE id = ? AND status = 'uploading' RETURNING `+jobColumns,
+		now.Add(-UploadReservationTimeout).Unix(), now.Unix(), now.Add(-UploadReservationTimeout).Unix(), now.Unix(), now.Unix(), id))
+	if err == nil && j.Status == JobFailed {
+		return Job{}, ErrJobNotReady
+	}
 	if !errors.Is(err, ErrNotFound) {
 		return j, err
 	}
@@ -321,12 +346,12 @@ func (s *Store) JobStats(now time.Time) (JobStats, error) {
 	var stats JobStats
 	var oldest sql.NullInt64
 	err := s.db.QueryRow(`SELECT
-		COUNT(*) FILTER (WHERE status = 'uploading' AND expires_at > ?),
+		COUNT(*) FILTER (WHERE status = 'uploading' AND expires_at > ? AND created_at > ?),
 		COUNT(*) FILTER (WHERE expires_at > ? AND (status = 'queued' OR (status = 'leased' AND lease_until <= ?))),
 		COUNT(*) FILTER (WHERE status = 'leased' AND lease_until > ? AND expires_at > ?),
 		COUNT(*) FILTER (WHERE status = 'publishing'),
 		MIN(CASE WHEN expires_at > ? AND (status = 'queued' OR (status = 'leased' AND lease_until <= ?)) THEN created_at END)
-		FROM ingestion_jobs`, now.Unix(), now.Unix(), now.Unix(), now.Unix(), now.Unix(), now.Unix(), now.Unix()).
+		FROM ingestion_jobs`, now.Unix(), now.Add(-UploadReservationTimeout).Unix(), now.Unix(), now.Unix(), now.Unix(), now.Unix(), now.Unix(), now.Unix()).
 		Scan(&stats.Uploading, &stats.Queued, &stats.Active, &stats.Publishing, &oldest)
 	if err != nil {
 		return JobStats{}, err

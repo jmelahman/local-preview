@@ -39,7 +39,7 @@ func TestReserveJobConcurrentAdmission(t *testing.T) {
 	for i := range 30 {
 		wg.Go(func() {
 			<-start
-			_, created, err := s.ReserveJob(jobTestSpec(repo.ID, strconv.Itoa(i), JobUpload), capacity, jobTestNow)
+			_, created, err := s.ReserveJob(jobTestSpec(repo.ID, strconv.Itoa(i), JobUpload), capacity*4, jobTestNow)
 			if err == nil && !created {
 				err = errors.New("unique request was not created")
 			}
@@ -434,7 +434,7 @@ func TestJobOrderUsesDurableInsertionOrder(t *testing.T) {
 	}
 	repo := jobTestRepo(t, s)
 	for _, id := range []string{"z-created-first", "a-created-second"} {
-		if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, id, JobBuild), 3, jobTestNow); err != nil {
+		if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, id, JobBuild), 8, jobTestNow); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -459,5 +459,181 @@ func TestJobOrderUsesDurableInsertionOrder(t *testing.T) {
 		if err != nil || got != tt.want {
 			t.Fatalf("newer(%s,%s)=%v, %v", tt.id, tt.than, got, err)
 		}
+	}
+}
+
+func TestReserveJobConcurrentRepositoryFairness(t *testing.T) {
+	s := newTestStore(t)
+	first := jobTestRepo(t, s)
+	second, err := s.CreateRepo("other", "/other", "/other-bare", RepoReady)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const global = 8
+	admitted := make(chan int64, 60)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for _, repo := range []Repo{first, second} {
+		for i := range 30 {
+			wg.Go(func() {
+				<-start
+				_, created, err := s.ReserveJob(jobTestSpec(repo.ID, repo.Name+"-"+strconv.Itoa(i), JobUpload), global, jobTestNow)
+				if err == nil && created {
+					admitted <- repo.ID
+				} else if !errors.Is(err, ErrJobFull) {
+					t.Errorf("reserve: created=%v error=%v", created, err)
+				}
+			})
+		}
+	}
+	close(start)
+	wg.Wait()
+	close(admitted)
+	counts := map[int64]int{}
+	for repoID := range admitted {
+		counts[repoID]++
+	}
+	if counts[first.ID] != 2 || counts[second.ID] != 2 {
+		t.Fatalf("repository admission counts=%v; want two each", counts)
+	}
+}
+
+func TestUnsubmittedUploadReservationExpiresAfterTenMinutes(t *testing.T) {
+	for _, age := range []time.Duration{10*time.Minute - time.Second, 10 * time.Minute} {
+		t.Run(age.String(), func(t *testing.T) {
+			s := newTestStore(t)
+			repo := jobTestRepo(t, s)
+			if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, "upload", JobUpload), 4, jobTestNow); err != nil {
+				t.Fatal(err)
+			}
+			_, err := s.QueueJob("upload", jobTestNow.Add(age))
+			if age < 10*time.Minute {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrJobNotReady) {
+				t.Fatalf("expired reservation submitted: %v", err)
+			}
+			if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, "replacement", JobBuild), 4, jobTestNow.Add(age)); err != nil {
+				t.Fatal(err)
+			}
+			old, err := s.GetJob("upload")
+			if err != nil || old.Status != JobFailed {
+				t.Fatalf("expired reservation=%+v error=%v", old, err)
+			}
+		})
+	}
+}
+
+func TestContinuationHasOneExplicitAdmissionSlot(t *testing.T) {
+	s := newTestStore(t)
+	repo := jobTestRepo(t, s)
+	parent := jobTestSpec(repo.ID, "parent", JobBuild)
+	if _, _, err := s.ReserveJob(parent, 1, jobTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimJob("worker", "token", jobTestNow, time.Minute, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BeginPublishJob("parent", "token", `{}`, jobTestNow); err != nil {
+		t.Fatal(err)
+	}
+	child := jobTestSpec(repo.ID, "child", JobBuild)
+	if _, _, err := s.ReserveJob(child, 1, jobTestNow); !errors.Is(err, ErrJobFull) {
+		t.Fatalf("normal reservation bypassed limit: %v", err)
+	}
+	if _, created, err := s.ReserveContinuation(child, 1, jobTestNow); err != nil || !created {
+		t.Fatalf("continuation admission: created=%v error=%v", created, err)
+	}
+	if _, _, err := s.ReserveContinuation(jobTestSpec(repo.ID, "extra-child", JobBuild), 1, jobTestNow); !errors.Is(err, ErrJobFull) {
+		t.Fatalf("second extra slot admitted: %v", err)
+	}
+	if _, created, err := s.ReserveContinuation(child, 1, jobTestNow); err != nil || created {
+		t.Fatalf("idempotent continuation: created=%v error=%v", created, err)
+	}
+	if err := s.FinishPublishJob("parent", jobTestNow); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.JobStats(jobTestNow)
+	if err != nil || stats.Queued != 1 || stats.Publishing != 0 {
+		t.Fatalf("completed parent state: %+v error=%v", stats, err)
+	}
+	if _, _, err := s.ReserveContinuation(jobTestSpec(repo.ID, "upload-not-child", JobUpload), 1, jobTestNow); err == nil {
+		t.Fatal("upload accepted as internal continuation")
+	}
+}
+
+func TestSubmittedUploadKeepsExecutionDeadline(t *testing.T) {
+	s := newTestStore(t)
+	repo := jobTestRepo(t, s)
+	spec := jobTestSpec(repo.ID, "upload", JobUpload)
+	spec.ExpiresAt = jobTestNow.Add(25 * time.Minute).Unix()
+	if _, _, err := s.ReserveJob(spec, 1, jobTestNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.QueueJob(spec.ID, jobTestNow.Add(9*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	job, err := s.ClaimJob("worker", "token", jobTestNow.Add(10*time.Minute), time.Minute, 3)
+	if err != nil || job.ID != spec.ID || job.ExpiresAt != spec.ExpiresAt {
+		t.Fatalf("submitted upload deadline: %+v error=%v", job, err)
+	}
+	if _, err := s.ClaimJob("worker", "new-token", jobTestNow.Add(25*time.Minute), time.Minute, 3); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("job outlived execution deadline: %v", err)
+	}
+	job, err = s.GetJob(spec.ID)
+	if err != nil || job.Status != JobFailed {
+		t.Fatalf("expired execution: %+v error=%v", job, err)
+	}
+}
+
+func TestUploadingExpiryReleasesRepositoryAdmission(t *testing.T) {
+	s := newTestStore(t)
+	repo := jobTestRepo(t, s)
+	if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, "abandoned", JobUpload), 1, jobTestNow); err != nil {
+		t.Fatal(err)
+	}
+	replacement := jobTestSpec(repo.ID, "replacement", JobBuild)
+	if _, _, err := s.ReserveJob(replacement, 1, jobTestNow.Add(UploadReservationTimeout-time.Second)); !errors.Is(err, ErrJobFull) {
+		t.Fatalf("reservation expired early: %v", err)
+	}
+	if _, _, err := s.ReserveJob(replacement, 1, jobTestNow.Add(UploadReservationTimeout)); err != nil {
+		t.Fatalf("expired reservation blocked admission: %v", err)
+	}
+	old, err := s.GetJob("abandoned")
+	if err != nil || old.Status != JobFailed {
+		t.Fatalf("abandoned reservation=%+v error=%v", old, err)
+	}
+}
+
+func TestGlobalJobAdmissionStillBoundsDistinctRepositories(t *testing.T) {
+	s := newTestStore(t)
+	results := make(chan error, 4)
+	var wg sync.WaitGroup
+	for i := range 4 {
+		name := "repo-" + strconv.Itoa(i)
+		repo, err := s.CreateRepo(name, "/src", "/bare", RepoReady)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wg.Go(func() {
+			_, _, err := s.ReserveJob(jobTestSpec(repo.ID, name, JobUpload), 3, jobTestNow)
+			results <- err
+		})
+	}
+	wg.Wait()
+	close(results)
+	admitted := 0
+	for err := range results {
+		if err == nil {
+			admitted++
+		} else if !errors.Is(err, ErrJobFull) {
+			t.Fatal(err)
+		}
+	}
+	if admitted != 3 {
+		t.Fatalf("global admission=%d, want 3", admitted)
 	}
 }

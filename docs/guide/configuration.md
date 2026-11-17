@@ -409,12 +409,18 @@ S3 lifecycle rule for staging objects. The example provides this rule.
 The example defaults to zero minimum nodes, four maximum nodes, 80 GiB disks,
 and an 8 GiB, two-CPU ingestion daemon. Worker build containers default to
 2 GiB and two CPUs. Workers require 10 GiB free before claiming work.
+Ingestion builds require an image in the manifest or devcontainer. They mount
+only job scratch, with `HOME=/tmp`; devcontainer volumes are not shared.
 Set explicit worker S3 flags to match the control tier. The worker command
 uses ambient AWS credentials when no static keypair is supplied.
 See [worker flags](/reference/cli#preview-ingest-worker).
 
-The queue accepts 100 unfinished jobs by default, plus one artifact
-continuation slot. Full admission returns `429` with `Retry-After: 5`.
+The queue accepts 100 unfinished jobs globally by default. Each repository
+can occupy `ceil(ingestion-max-pending / 4)` slots, with a minimum of one.
+The default repository quota is 25. Internal artifact continuations can use
+one extra global slot and one extra repository slot. Either full bound
+returns `429` with `Retry-After: 5`. Unsubmitted upload reservations expire
+after ten minutes. Submission keeps the original 25-minute job deadline.
 With `--ingestion-asg-name`, the coordinator publishes `IngestionQueued`,
 `IngestionActive`, and `IngestionOldestQueuedAge` in the configured metrics
 namespace. The example scales out on queued demand. Active workers hold

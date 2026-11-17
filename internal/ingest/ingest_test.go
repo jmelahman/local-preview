@@ -367,10 +367,13 @@ type reservation struct {
 	UploadFields map[string]string `json:"upload_fields"`
 }
 
-func reserve(t *testing.T, c *controlFixture, sha string, data []byte) reservation {
+func reserve(t *testing.T, c *controlFixture, sha string, data []byte, configure ...func(*ingest.Request)) reservation {
 	t.Helper()
 	digest := sha256.Sum256(data)
 	req := ingest.Request{RequestKey: rand.Text(), Ref: sha, Side: "frontend", ArchiveSize: int64(len(data)), ArchiveSHA256: hex.EncodeToString(digest[:])}
+	for _, apply := range configure {
+		apply(&req)
+	}
 	var result reservation
 	if code := requestJSON(t, c.ctx, c.public.URL, "", "POST", "/api/repos/demo/ingestions", req, &result); code != 202 {
 		t.Fatalf("reserve HTTP%d", code)
@@ -378,9 +381,9 @@ func reserve(t *testing.T, c *controlFixture, sha string, data []byte) reservati
 	return result
 }
 
-func stage(t *testing.T, c *controlFixture, sha string, data []byte) reservation {
+func stage(t *testing.T, c *controlFixture, sha string, data []byte, configure ...func(*ingest.Request)) reservation {
 	t.Helper()
-	job := reserve(t, c, sha, data)
+	job := reserve(t, c, sha, data, configure...)
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	for key, value := range job.UploadFields {
@@ -739,7 +742,7 @@ func TestNativeS3SupersededArtifactJobCannotReplaceNewGeneration(t *testing.T) {
 }
 
 func TestNativeS3OlderParentCannotReplaceNewRebuild(t *testing.T) {
-	c := newControl(t, 3)
+	c := newControl(t, 8)
 	defer c.cancel()
 	sha := c.sourceRepo(t, "printf built > built.txt")
 	digest := sha256.Sum256([]byte("same frontend inputs"))
@@ -751,7 +754,7 @@ func TestNativeS3OlderParentCannotReplaceNewRebuild(t *testing.T) {
 	}
 	reserveParent := func(id, token, content string) (db.Job, ingest.Completion) {
 		t.Helper()
-		job, _, err := c.database.ReserveJob(db.JobSpec{ID: id, RepoID: c.repo.ID, RequestKey: id, Fingerprint: id, Kind: db.JobBuild, SpecJSON: string(data), ExpiresAt: time.Now().Add(time.Minute).Unix()}, 3, time.Now())
+		job, _, err := c.database.ReserveJob(db.JobSpec{ID: id, RepoID: c.repo.ID, RequestKey: id, Fingerprint: id, Kind: db.JobBuild, SpecJSON: string(data), ExpiresAt: time.Now().Add(time.Minute).Unix()}, 8, time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -893,7 +896,7 @@ func TestNativeS3ReadyParentFinishesWhenArtifactAdmissionIsFull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := c.database.ReserveJob(db.JobSpec{ID: "continuation-slot-busy", RepoID: c.repo.ID, RequestKey: "occupied-slot", Fingerprint: "occupied", Kind: db.JobBuild, SpecJSON: parent.SpecJSON, ExpiresAt: time.Now().Add(time.Minute).Unix()}, 2, time.Now()); err != nil {
+	if _, _, err := c.database.ReserveContinuation(db.JobSpec{ID: "continuation-slot-busy", RepoID: c.repo.ID, RequestKey: "occupied-slot", Fingerprint: "occupied", Kind: db.JobBuild, SpecJSON: parent.SpecJSON, ExpiresAt: time.Now().Add(time.Minute).Unix()}, 1, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256([]byte("artifact inputs"))

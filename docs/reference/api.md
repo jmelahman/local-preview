@@ -580,8 +580,12 @@ after ten minutes. The default archive cap is 2 GiB. Worker extraction also
 has a 2 GiB cap. The server and worker check archive identity. Artifact content
 hashes come from the commit and manifest, not the request.
 
-A full queue returns `429` with `Retry-After: 5`. The default bound is 100
-unfinished reservations, plus one slot for an artifact continuation.
+A full global queue or repository quota returns `429` with `Retry-After: 5`.
+The default bounds are 100 unfinished jobs globally and 25 per repository.
+The repository quota is one quarter of `--ingestion-max-pending`, rounded up,
+with a minimum of one. An internal artifact continuation can use one extra
+slot in each bound. Unsubmitted reservations expire ten minutes after creation;
+repeating the reservation request does not extend this period.
 
 ### `POST /api/repos/{repo}/ingestions/{id}/submit`
 
@@ -601,7 +605,8 @@ Preview readiness precedes the separate downloadable artifact jobs. Read the
 deploy's artifact statuses for those results. Remote job build logs are tails:
 256 KiB per preview side and 512 KiB total across downloadable artifacts.
 
-Jobs have a 25-minute deadline and at most three worker attempts. A worker
+Submitted jobs retain their original 25-minute deadline and allow at most
+three worker attempts. A worker
 holds a one-minute lease and renews it every 15 seconds. Publication survives
 restarts and rejects stale completions. Terminal job history remains for seven
 days. The example bucket lifecycle removes staging objects after one day.

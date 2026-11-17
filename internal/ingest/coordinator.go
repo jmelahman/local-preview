@@ -200,7 +200,8 @@ func (c *Coordinator) Submit(ctx context.Context, id string) (db.Job, error) {
 
 func (c *Coordinator) Get(id string) (db.Job, error) {
 	job, err := c.Store.GetJob(id)
-	if err == nil && job.ExpiresAt <= time.Now().Unix() && (job.Status == db.JobUploading || job.Status == db.JobQueued || job.Status == db.JobLeased) {
+	expired := job.ExpiresAt <= time.Now().Unix() || (job.Status == db.JobUploading && job.CreatedAt <= time.Now().Add(-db.UploadReservationTimeout).Unix())
+	if err == nil && expired && (job.Status == db.JobUploading || job.Status == db.JobQueued || job.Status == db.JobLeased) {
 		if err := c.Store.CancelJob(id, "job expired", time.Now()); err != nil {
 			return db.Job{}, err
 		}
@@ -373,31 +374,26 @@ func (c *Coordinator) publish(ctx context.Context, job db.Job) error {
 	if err != nil {
 		return err
 	}
-	if obsolete {
-		if completion.Execution.Upload != nil {
-			completion.Execution.Upload.Published = false
-		}
-		data, err := json.Marshal(completion)
-		if err != nil {
-			return err
-		}
-		return c.Store.FinishPublishJobWithResult(job.ID, string(data), time.Now())
+	upload := completion.Execution.Upload
+	uploadSide := ""
+	if upload != nil {
+		uploadSide = map[string]string{build.SideFrontend: "fe", build.SideBackend: "be", build.SideArtifact: "dl"}[upload.Side]
 	}
 	for _, output := range completion.Outputs {
-		overwrite := snapshot.Execution.Rebuild
-		if upload := completion.Execution.Upload; upload != nil {
-			side := map[string]string{build.SideFrontend: "fe", build.SideBackend: "be", build.SideArtifact: "dl"}[upload.Side]
-			overwrite = overwrite || (snapshot.Execution.Overwrite && output.Side == side && output.Hash == upload.Hash)
+		ownUpload := upload != nil && output.Side == uploadSide && output.Hash == upload.Hash
+		if obsolete && !ownUpload {
+			continue
 		}
+		overwrite := (!obsolete && snapshot.Execution.Rebuild) || (snapshot.Execution.Overwrite && ownUpload)
 		published, err := c.Tier.Promote(ctx, output, overwrite)
 		if err != nil {
 			return err
 		}
-		if upload := completion.Execution.Upload; upload != nil && output.Hash == upload.Hash {
+		if ownUpload {
 			upload.Published = published
 		}
 	}
-	if deployed := completion.Execution.Deploy; deployed != nil {
+	if deployed := completion.Execution.Deploy; deployed != nil && !obsolete {
 		deployed.JobID = job.ID
 		deployed.Rebuild = snapshot.Execution.Rebuild
 		row, err := c.Queue.CompleteExecution(ctx, repo, *deployed, snapshot.CreatedBy)
@@ -411,7 +407,7 @@ func (c *Coordinator) publish(ctx context.Context, job db.Job) error {
 			log.Printf("ingestion: deferred artifact scheduling for deploy %d: queue full", row.ID)
 		}
 	}
-	if artifacts := completion.Execution.Artifacts; artifacts != nil {
+	if artifacts := completion.Execution.Artifacts; artifacts != nil && !obsolete {
 		if err := c.Queue.CompleteArtifactExecution(repo, *artifacts); err != nil {
 			return err
 		}
@@ -607,7 +603,7 @@ func (c *Coordinator) scheduleArtifacts(snapshot Snapshot, row db.DeployRow) err
 		return err
 	}
 	now := time.Now()
-	job, _, err := c.Store.ReserveJob(db.JobSpec{ID: id, RepoID: row.RepoID, RequestKey: "artifacts:" + row.SHA + ":" + hex.EncodeToString(digest[:8]), Fingerprint: hex.EncodeToString(digest[:]), Kind: db.JobBuild, SpecJSON: string(data), ExpiresAt: now.Add(JobTimeout).Unix()}, c.MaxPending+1, now)
+	job, _, err := c.Store.ReserveContinuation(db.JobSpec{ID: id, RepoID: row.RepoID, RequestKey: "artifacts:" + row.SHA + ":" + hex.EncodeToString(digest[:8]), Fingerprint: hex.EncodeToString(digest[:]), Kind: db.JobBuild, SpecJSON: string(data), ExpiresAt: now.Add(JobTimeout).Unix()}, c.MaxPending, now)
 	if err == nil && job.Status == db.JobFailed {
 		for name, artifact := range pending {
 			artifact.Status = db.ArtifactFailed

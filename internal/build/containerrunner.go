@@ -65,6 +65,9 @@ func (r *autoRunner) Run(ctx context.Context, spec RunSpec, out io.Writer) error
 		image, devc = spec.Devcontainer.Image, true
 	}
 	if image == "" {
+		if r.limited {
+			return errors.New("isolated ingestion requires a build image in the manifest or devcontainer")
+		}
 		return r.host.Run(ctx, spec, out)
 	}
 	cli, err := r.docker(ctx)
@@ -90,6 +93,8 @@ func (r *autoRunner) Run(ctx context.Context, spec RunSpec, out io.Writer) error
 	env := []string{"HOME=/tmp"}
 	binds := []string{spec.ScratchDir + ":" + buildMount}
 	switch {
+	case r.limited:
+		fmt.Fprintf(out, "[build image: %s (isolated)]\n", image)
 	case devc:
 		// The devcontainer's own named volumes keep toolchain caches warm —
 		// and shared with the developer's interactive sandbox. HOME points at

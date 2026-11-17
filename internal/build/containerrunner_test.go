@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -81,16 +83,56 @@ func TestLimitedRunnerRefusesUnboundedImageFallback(t *testing.T) {
 	}
 }
 
-func TestLimitedRunnerHostStepAndInvalidBudget(t *testing.T) {
-	spec := specFor(t, "", "sh", "-c", "echo bounded-host > out.txt")
-	if err := NewLimitedRunner(128<<20, 500_000_000).Run(context.Background(), spec, io.Discard); err != nil {
-		t.Fatal(err)
+func TestLimitedRunnerRequiresImageAndValidBudget(t *testing.T) {
+	spec := specFor(t, "", "sh", "-c", "echo unbounded > out.txt")
+	err := NewLimitedRunner(128<<20, 500_000_000).Run(context.Background(), spec, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "requires a build image") {
+		t.Fatalf("imageless build = %v", err)
 	}
-	if b, err := os.ReadFile(filepath.Join(spec.ScratchDir, "web", "out.txt")); err != nil || strings.TrimSpace(string(b)) != "bounded-host" {
-		t.Fatalf("host output = %q, %v", b, err)
+	if _, err := os.Stat(filepath.Join(spec.ScratchDir, "web", "out.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("imageless build ran on host: %v", err)
 	}
 	if err := NewLimitedRunner(0, 500_000_000).Run(context.Background(), spec, io.Discard); err == nil {
 		t.Fatal("invalid resource budget was accepted")
+	}
+}
+
+func TestLimitedRunnerIsolatesWorkerResources(t *testing.T) {
+	ctx := context.Background()
+	if _, err := dockerapi.Connect(ctx); err != nil {
+		t.Skipf("docker unavailable: %v", err)
+	}
+	t.Setenv("PREVIEW_INGESTION_SECRET", "worker-secret-marker")
+	hostDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(hostDir, "worker-private-marker"), []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	address, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("expected TCP listener, got %T", listener.Addr())
+	}
+	port := address.Port
+	for _, devc := range []bool{false, true} {
+		t.Run(strconv.FormatBool(devc), func(t *testing.T) {
+			command := fmt.Sprintf(`test -z "$PREVIEW_INGESTION_SECRET" && test "$HOME" = /tmp && test ! -S /var/run/docker.sock && test ! -e /worker-private/worker-private-marker && test ! -e /devc-cache/worker-private-marker && ! nc -z -w 1 127.0.0.1 %d && echo isolated > out.txt`, port)
+			spec := specFor(t, "alpine:3.20", "sh", "-c", command)
+			spec.Devcontainer = devcontainer.Config{Image: "alpine:3.20", Home: "/worker-private", Mounts: []devcontainer.Mount{{Source: hostDir, Target: "/worker-private"}, {Source: hostDir, Target: "/devc-cache"}, {Source: "/var/run/docker.sock", Target: "/var/run/docker.sock"}}}
+			if devc {
+				spec.Image = ""
+			}
+			var output bytes.Buffer
+			if err := NewLimitedRunner(64<<20, 500_000_000).Run(ctx, spec, &output); err != nil {
+				t.Fatalf("worker isolation: %v\n%s", err, output.String())
+			}
+			if b, err := os.ReadFile(filepath.Join(spec.ScratchDir, "web", "out.txt")); err != nil || strings.TrimSpace(string(b)) != "isolated" {
+				t.Fatalf("scratch output = %q, %v", b, err)
+			}
+		})
 	}
 }
 

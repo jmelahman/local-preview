@@ -88,6 +88,17 @@ run "isolated_ingestion_pool" {
   }
 
   assert {
+    condition = length(regexall("PREVIEW_INGESTION_SECRET", templatefile("${path.module}/user-data.sh.tftpl", {
+      aws_region    = "us-west-2", compose_stacks = { dependencies = "services: {}" }, compose_version = "v2.36.0",
+      config_dir    = "/etc/local-preview", data_dir = "/var/lib/local-preview", data_volume_id = "vol-test",
+      http_port     = 80, image = "test:fixture", local_manifests = {}, preview_domain = "preview.test",
+      server_args   = "", webhook_ssm = "", sso_secret_ssm = "", worker_ssm = "", secret_env = {},
+      ingestion_ssm = "/local-preview/ingestion-secret"
+    }))) == 1
+    error_message = "The ingestion secret must be written only to the service env file, never Compose env files."
+  }
+
+  assert {
     condition = alltrue([for expected in ["Restart=on-failure", "--min-free-bytes 10737418240", "--memory 8g --memory-swap 8g --cpus 2", "--build-memory-bytes 2147483648 --build-nano-cpus 2000000000"] :
       strcontains(templatefile("${path.module}/ingestion-data.sh.tftpl", {
         aws_region = "us-west-2", image = "test-image", control_endpoint = "http://10.0.0.10:9102",

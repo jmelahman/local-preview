@@ -301,6 +301,7 @@ Only the control role can publish canonical artifacts. Keep serving workers read
 Expire objects under `ingest-staging/` with a prefix-scoped lifecycle rule; retain canonical artifact objects.
 
 `memory_limit` and `cpus` bound the ingestion process. Build containers have separate 2 GiB and two-CPU limits.
+Ingestion builds require a manifest or devcontainer image. They mount only job scratch, with `HOME=/tmp`, and omit devcontainer volumes.
 The fixed encrypted root disk holds scratch files and caches. Choose a size that fits source, images, and staged output.
 Serving-worker capacity and limits remain separate.
 
