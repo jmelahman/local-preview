@@ -68,7 +68,8 @@ type Deploy struct {
 	// ProjectDir is the repo's project scope the deploy was last built
 	// under, so a re-scoped repo rebuilds a ready deploy instead of serving
 	// one built from the old directory.
-	ProjectDir string `json:"-"`
+	ProjectDir     string `json:"-"`
+	IngestionJobID string `json:"-"`
 }
 
 // DeployRow is a deploy joined with its repo name.
@@ -86,7 +87,7 @@ type DeployRow struct {
 // qualified for joins (repos shares column names like created_at).
 const deployCols = `id, repo_id, sha, short_sha, ref, branch, author_name, ` +
 	`author_email, fe_hash, be_hash, artifacts, status, error, attempt_count, ` +
-	`fe_build_log_path, be_build_log_path, created_at, updated_at, created_by, project_dir`
+	`fe_build_log_path, be_build_log_path, created_at, updated_at, created_by, project_dir, ingestion_job_id`
 
 var deployColsD = "d." + strings.ReplaceAll(deployCols, ", ", ", d.")
 
@@ -98,11 +99,11 @@ const hasFeProcessExpr = `EXISTS(SELECT 1 FROM frontend_artifacts fa
 func scanDeploy(row interface{ Scan(...any) error }, extra ...any) (Deploy, error) {
 	var d Deploy
 	var artifacts string
-	dest := make([]any, 0, 20+len(extra))
+	dest := make([]any, 0, 21+len(extra))
 	dest = append(dest, &d.ID, &d.RepoID, &d.SHA, &d.ShortSHA, &d.Ref, &d.Branch,
 		&d.AuthorName, &d.AuthorEmail, &d.FeHash, &d.BeHash, &artifacts,
 		&d.Status, &d.Error, &d.AttemptCount, &d.FeBuildLogPath, &d.BeBuildLogPath,
-		&d.CreatedAt, &d.UpdatedAt, &d.CreatedBy, &d.ProjectDir)
+		&d.CreatedAt, &d.UpdatedAt, &d.CreatedBy, &d.ProjectDir, &d.IngestionJobID)
 	dest = append(dest, extra...)
 	if err := row.Scan(dest...); err != nil {
 		return Deploy{}, err

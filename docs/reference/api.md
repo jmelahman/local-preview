@@ -174,6 +174,17 @@ Response: `204 No Content`. `404` if the name isn't registered.
 ### `POST /api/deploys`
 
 Requests a deploy of `ref` (branch, tag, or full/abbreviated sha) in `repo`.
+With ingestion enabled, this returns `202` with an ingestion job:
+
+```json
+{ "id": "job-uuid", "status": "queued", "repo": "myapp" }
+```
+
+Poll `GET /api/repos/{repo}/ingestions/{id}` for the completed deploy and its
+preview URL. Queue saturation returns `429` with `Retry-After: 5`. Builds run
+on the isolated pool. The deploy response below describes legacy mode, when
+ingestion is disabled.
+
 Idempotent per commit: re-posting a sha whose deploy is queued, building, or
 ready returns the existing deploy; failed and evicted deploys are re-queued.
 `rebuild: true` rebuilds artifacts even when cached.
@@ -451,6 +462,11 @@ skips that build.
 ### `POST /api/repos/{repo}/uploads/backend`
 ### `POST /api/repos/{repo}/uploads/artifacts/{name}`
 
+When ingestion is enabled, these synchronous routes return `426 Upgrade
+Required`. Use the [staged ingestion API](#staged-ingestion) or
+`preview upload --staged`. Without ingestion configuration, these routes retain
+the behavior below.
+
 The request body is a **tar** stream, optionally gzip-compressed (both are
 accepted; the server sniffs). Its entries are relative to the published root:
 the `dist` tree (or the built `path` tree for a process-mode frontend) for
@@ -515,6 +531,86 @@ token's `repository` claim names. Additional statuses then apply:
 - `401` — no bearer token was presented.
 - `403` — the token is invalid/expired, or its `repository` doesn't match the
   target repo's `source`.
+
+## Staged ingestion
+
+These routes require an ingestion coordinator. They return `503` when it is
+not configured. Session and bearer authentication follow the API's configured
+authentication policy. GitHub Actions OIDC tokens must belong to the target
+repository. Send a current token on each control request.
+
+### `POST /api/repos/{repo}/ingestions`
+
+Reserve capacity before uploading. The archive must be a tar or compressed tar,
+with the same root layout as the synchronous upload API.
+
+```json
+{
+  "request_key": "ci-run-1234567890-frontend",
+  "ref": "a1b2c3d4",
+  "side": "frontend",
+  "overwrite": false,
+  "deploy": true,
+  "archive_size": 1048576,
+  "archive_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+```
+
+`request_key` must contain 16 to 128 characters. Its scope is the repository.
+Repeating the same key and inputs returns the existing job. Changing inputs
+under that key returns `409`. Use `side: "backend"` for backend uploads, or
+`side: "artifact"` with `name` for a named downloadable artifact.
+
+Response: `202 Accepted`:
+
+```json
+{
+  "id": "job-uuid",
+  "status": "uploading",
+  "upload_url": "https://object-store.example/bucket",
+  "upload_fields": { "key": "server-selected-key", "policy": "signed-policy" }
+}
+```
+
+`upload_fields` contains all required form fields; the example is abbreviated.
+POST a multipart form directly to `upload_url`. Copy every supplied field and
+put the archive in the final `file` field. Do not forward the control bearer
+token to S3. The signed policy permits exactly `archive_size` bytes and expires
+after ten minutes. The default archive cap is 2 GiB. Worker extraction also
+has a 2 GiB cap. The server and worker check archive identity. Artifact content
+hashes come from the commit and manifest, not the request.
+
+A full queue returns `429` with `Retry-After: 5`. The default bound is 100
+unfinished reservations, plus one slot for an artifact continuation.
+
+### `POST /api/repos/{repo}/ingestions/{id}/submit`
+
+Send `{}` after the S3 upload succeeds. The server checks the staged object's
+size and digest metadata, then queues the job. Response: `202` with `id` and
+`status`. The worker verifies the archive digest before extraction.
+
+### `GET /api/repos/{repo}/ingestions/{id}`
+
+Response: `200` with `id`, `status`, and an optional `error`. Status values are
+`uploading`, `queued`, `leased`, `publishing`, `done`, and `failed`. Only `done`
+includes `result`. Upload jobs return `result.upload` using the synchronous
+upload result shape. A job that deploys also returns `result.deploy`, including
+`preview_url` when ready. Direct deploy jobs return `result.deploy`.
+
+Preview readiness precedes the separate downloadable artifact jobs. Read the
+deploy's artifact statuses for those results. Remote job build logs are tails:
+256 KiB per preview side and 512 KiB total across downloadable artifacts.
+
+Jobs have a 25-minute deadline and at most three worker attempts. A worker
+holds a one-minute lease and renews it every 15 seconds. Publication survives
+restarts and rejects stale completions. Terminal job history remains for seven
+days. The example bucket lifecycle removes staging objects after one day.
+
+### `DELETE /api/repos/{repo}/ingestions/{id}`
+
+Cancel a reservation or queued or leased job. Response: `204 No Content`.
+Publication and completed jobs cannot be cancelled and return `409`.
+Missing jobs and jobs outside the named repository return `404`.
 
 ## Storage & retention
 

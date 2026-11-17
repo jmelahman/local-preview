@@ -9,6 +9,94 @@ on:
 permissions: {}
 
 jobs:
+  browser-client-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.4.4"
+          no-cache: true
+      - run: bun install --frozen-lockfile
+      - run: bun check --types bun tests/client.test.ts
+      - run: bun test tests/client.test.ts
+
+  native-ingestion-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      PREVIEW_TEST_S3_ENDPOINT: 127.0.0.1:19100
+      PREVIEW_TEST_S3_BUCKET: preview-ingestion-tests
+      PREVIEW_TEST_S3_ACCESS_KEY: ingestion-test
+      PREVIEW_TEST_S3_SECRET_KEY: ingestion-test-password
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Start MinIO
+        run: |
+          docker run -d --name ingestion-minio -p 127.0.0.1:19100:9000 \
+            -e MINIO_ROOT_USER="$PREVIEW_TEST_S3_ACCESS_KEY" \
+            -e MINIO_ROOT_PASSWORD="$PREVIEW_TEST_S3_SECRET_KEY" \
+            onyxdotapp/minio@sha256:7330be2e7320a7a699b36f72bd06a94d8a21ec9f6f397345d9c38fc6751141f5 \
+            server /data --address :9000
+          for _ in $(seq 1 30); do
+            if curl -sf --max-time 1 http://127.0.0.1:19100/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs ingestion-minio
+          exit 1
+      - name: Create the test bucket
+        run: |
+          cat >"$RUNNER_TEMP/create-ingestion-bucket.go" <<'GO'
+          package main
+
+          import (
+            "context"
+            "log"
+            "os"
+            "time"
+
+            "github.com/minio/minio-go/v7"
+            "github.com/minio/minio-go/v7/pkg/credentials"
+          )
+
+          func main() {
+            client, err := minio.New(os.Getenv("PREVIEW_TEST_S3_ENDPOINT"), &minio.Options{
+              Creds: credentials.NewStaticV4(os.Getenv("PREVIEW_TEST_S3_ACCESS_KEY"), os.Getenv("PREVIEW_TEST_S3_SECRET_KEY"), ""),
+            })
+            if err != nil { log.Fatal(err) }
+            ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+            defer cancel()
+            if err := client.MakeBucket(ctx, os.Getenv("PREVIEW_TEST_S3_BUCKET"), minio.MakeBucketOptions{}); err != nil { log.Fatal(err) }
+          }
+          GO
+          go run "$RUNNER_TEMP/create-ingestion-bucket.go"
+      - name: Test native ingestion and its dependencies
+        run: go test -race ./internal/ingest ./internal/s3store ./internal/build ./internal/db ./internal/client ./cmd/server
+      - name: Show MinIO logs on failure
+        if: failure()
+        run: docker logs ingestion-minio || true
+      - name: Remove MinIO
+        if: always()
+        run: docker rm -f ingestion-minio >/dev/null 2>&1 || true
+
   image-smoke:
     runs-on: ubuntu-latest
     permissions:

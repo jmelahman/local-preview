@@ -26,6 +26,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/githuboidc"
 	"github.com/jmelahman/local-preview/internal/githubsso"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
+	"github.com/jmelahman/local-preview/internal/ingest"
 	"github.com/jmelahman/local-preview/internal/retain"
 	"github.com/jmelahman/local-preview/internal/store"
 	"github.com/jmelahman/local-preview/internal/supervise"
@@ -61,12 +62,13 @@ type RuntimeView interface {
 
 // Deps carries the dependencies handlers need.
 type Deps struct {
-	Store  *db.Store
-	Build  BuildInfo
-	Config config.Config
-	Git    *gitrepo.Manager
-	Queue  *build.Queue
-	Super  *supervise.Manager
+	Ingestion *ingest.Coordinator
+	Store     *db.Store
+	Build     BuildInfo
+	Config    config.Config
+	Git       *gitrepo.Manager
+	Queue     *build.Queue
+	Super     *supervise.Manager
 	// Runtime is the live-process view handlers render from; nil falls back
 	// to Super (single-node). Super stays alongside it for control-node-local
 	// lifecycle work (artifact GC, container purges) that never moves to
@@ -175,6 +177,10 @@ func NewMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("POST /api/repos/{repo}/uploads/frontend", d.handleUploadFrontend)
 	mux.HandleFunc("POST /api/repos/{repo}/uploads/backend", d.handleUploadBackend)
 	mux.HandleFunc("POST /api/repos/{repo}/uploads/artifacts/{name}", d.handleUploadArtifact)
+	mux.HandleFunc("POST /api/repos/{repo}/ingestions", d.handleReserveIngestion)
+	mux.HandleFunc("POST /api/repos/{repo}/ingestions/{id}/submit", d.handleSubmitIngestion)
+	mux.HandleFunc("GET /api/repos/{repo}/ingestions/{id}", d.handleGetIngestion)
+	mux.HandleFunc("DELETE /api/repos/{repo}/ingestions/{id}", d.handleCancelIngestion)
 	mux.HandleFunc("POST /api/deploys", d.handleCreateDeploy)
 	mux.HandleFunc("GET /api/deploys", d.handleListDeploys)
 	mux.HandleFunc("GET /api/deploys/{id}", d.handleGetDeploy)
@@ -503,6 +509,23 @@ func (d Deps) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "repo and ref are required")
 		return
 	}
+	if d.Ingestion != nil {
+		actor, ok := d.authorizeIngestionRepo(w, r, req.Repo)
+		if !ok {
+			return
+		}
+		job, err := d.Ingestion.ReserveBuild(r.Context(), req.Repo, req.Ref, req.Rebuild, actor)
+		if err != nil {
+			ingestionError(w, "reserve deploy", err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+			Repo   string `json:"repo"`
+		}{job.ID, job.Status, req.Repo})
+		return
+	}
 	// A CI caller authenticates with a GitHub Actions OIDC token instead of a
 	// session — `preview upload ... --oidc --deploy` deploys what it just
 	// uploaded. The token is already verified; what it does not yet establish
@@ -521,6 +544,7 @@ func (d Deps) handleCreateDeploy(w http.ResponseWriter, r *http.Request) {
 	} else if sess, ok := d.apexSession(r); ok {
 		createdBy = sess.GitHubLogin
 	}
+
 	row, err := d.Queue.RequestDeploy(r.Context(), req.Repo, req.Ref, req.Rebuild, createdBy)
 	if errors.Is(err, db.ErrNotFound) {
 		httpError(w, http.StatusNotFound, fmt.Sprintf("repo %q is not registered", req.Repo))

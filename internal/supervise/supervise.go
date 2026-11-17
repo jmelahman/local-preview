@@ -1664,6 +1664,19 @@ func (m *Manager) releaseNetwork(ctx context.Context, cli *dockerapi.Client, id 
 // copies, and renames into place. With no usable ancestor the state starts
 // fresh. Idempotent: an existing backend_artifacts row short-circuits.
 func (m *Manager) ForkOrInitStateDir(ctx context.Context, git gitrepo.Repo, repoID int64, repoName, newBeHash, sha, runConfigJSON string) error {
+	var ancestors []string
+	if _, err := m.db.GetBackendArtifact(repoID, newBeHash); errors.Is(err, db.ErrNotFound) {
+		ancestors, _ = git.FirstParentAncestry(ctx, sha, AncestryLimit)
+	} else if err != nil {
+		return err
+	}
+	return m.ForkOrInitStateFromAncestors(ctx, ancestors, repoID, repoName, newBeHash, runConfigJSON)
+}
+
+func (m *Manager) ForkOrInitStateFromAncestors(ctx context.Context, ancestors []string, repoID int64, repoName, newBeHash, runConfigJSON string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := m.db.GetBackendArtifact(repoID, newBeHash); err == nil {
 		// Already provisioned. Refresh the run contract: `networks` isn't
 		// part of the artifact hash, so its changes land here rather than
@@ -1674,7 +1687,7 @@ func (m *Manager) ForkOrInitStateDir(ctx context.Context, git gitrepo.Repo, repo
 	}
 
 	forkedFrom := ""
-	if src := m.findForkSource(ctx, git, repoID, repoName, newBeHash, sha); src != "" {
+	if src := m.findForkSource(ancestors, repoID, repoName, newBeHash); src != "" {
 		srcKey := BackendKey(repoID, src)
 		lock := m.keyLock(srcKey)
 		lock.Lock()
@@ -1700,11 +1713,7 @@ func (m *Manager) ForkOrInitStateDir(ctx context.Context, git gitrepo.Repo, repo
 
 // findForkSource returns the be_hash of the nearest deployed ancestor with
 // a live state dir, or "".
-func (m *Manager) findForkSource(ctx context.Context, git gitrepo.Repo, repoID int64, repoName, newBeHash, sha string) string {
-	ancestors, err := git.FirstParentAncestry(ctx, sha, AncestryLimit)
-	if err != nil {
-		return ""
-	}
+func (m *Manager) findForkSource(ancestors []string, repoID int64, repoName, newBeHash string) string {
 	for _, anc := range ancestors {
 		d, err := m.db.GetDeployBySHA(repoID, anc)
 		if err != nil || d.Status != db.DeployReady || d.BeHash == "" || d.BeHash == newBeHash {

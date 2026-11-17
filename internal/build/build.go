@@ -79,13 +79,14 @@ type Queue struct {
 	logsDir string
 	runner  Runner
 
-	manifestRefs     []ManifestRef
-	localManifestDir string
-	autoStart        bool
-	starter          DeployStarter
-	buildTimeout     time.Duration
-	sf               singleflight.Group
-	work             chan int64
+	manifestRefs       []ManifestRef
+	localManifestDir   string
+	autoStart          bool
+	starter            DeployStarter
+	buildTimeout       time.Duration
+	artifactDispatcher func(context.Context, db.DeployRow) error
+	sf                 singleflight.Group
+	work               chan int64
 
 	mu      sync.Mutex
 	rebuild map[int64]bool
@@ -145,6 +146,20 @@ func (q *Queue) SetLocalManifestDir(dir string) {
 // request. Call before Start.
 func (q *Queue) SetAutoStart(v bool) {
 	q.autoStart = v
+}
+
+func (q *Queue) SetArtifactDispatcher(dispatch func(context.Context, db.DeployRow) error) {
+	q.artifactDispatcher = dispatch
+}
+
+func (q *Queue) dispatchArtifacts(ctx context.Context, row db.DeployRow, rebuild bool) {
+	if q.artifactDispatcher != nil {
+		if err := q.artifactDispatcher(ctx, row); err != nil {
+			log.Printf("build: dispatch deploy %d artifacts: %v", row.ID, err)
+		}
+		return
+	}
+	q.buildArtifacts(ctx, row, rebuild)
 }
 
 // DeployStarter warm-starts a freshly built deploy's processes. On a single
@@ -369,7 +384,7 @@ func (q *Queue) process(ctx context.Context, id int64) {
 	if row.Status == db.DeployReady {
 		// Re-enqueued at startup: the preview already serves; only artifact
 		// builds a shutdown interrupted remain.
-		q.buildArtifacts(ctx, row, false)
+		q.dispatchArtifacts(ctx, row, false)
 		return
 	}
 	if err := q.db.SetDeployBuilding(id); err != nil {
@@ -415,7 +430,7 @@ func (q *Queue) process(ctx context.Context, id int64) {
 	// Downloadable artifacts build only now, after the deploy went ready:
 	// they can take a while and must never gate the preview.
 	if row, err = q.db.GetDeployByID(id); err == nil {
-		q.buildArtifacts(ctx, row, rebuild)
+		q.dispatchArtifacts(ctx, row, rebuild)
 	}
 }
 

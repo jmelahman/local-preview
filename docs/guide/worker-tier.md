@@ -129,10 +129,10 @@ shared services keys on `{hash}` (e.g. `POSTGRES_DB = "preview_{hash}"`).
 
 ## Builds and uploads
 
-Builds and CI uploads happen only on the control node, which is the sole
-writer to the artifact tier; workers get read-only tier access, so a
-compromised worker (it runs arbitrary preview code by design) cannot poison
-the content-addressed artifacts every node trusts.
+Without ingestion workers, builds and CI uploads run on the control node.
+The serving workers above retain read-only artifact access. The optional
+[ingestion pool](#isolated-ingestion-pool) runs uploads and direct deploy
+builds on separate nodes. Only the control node can publish canonical artifacts.
 
 ## Limitations
 
@@ -147,3 +147,62 @@ the content-addressed artifacts every node trusts.
   processes reap themselves, cold artifacts are swept and re-hydrate, and
   each preview's docker network goes away with its last container — but a
   worker's state dirs are only reclaimed by instance replacement.
+
+## Isolated ingestion pool
+
+Ingestion workers are separate from the serving workers above. They pull jobs
+from a private control API. They do not serve preview traffic.
+
+```text
+CI -> control: reserve job -> S3: upload archive
+CI -> control: submit job
+control queue <- ingestion worker: claim and renew lease
+S3 staging -> ingestion worker -> S3 attempt outputs
+control: validate lease and outputs -> canonical S3 artifacts -> ready deploy
+```
+
+The control node stores job metadata in its own SQLite database. Each worker
+uses a private scratch directory and an ephemeral job database. Nodes never
+share a SQLite file. The worker resolves the commit, reads the manifest, and
+computes content hashes. Clients cannot choose canonical artifact hashes.
+
+A worker writes only attempt-scoped objects. Its IAM role cannot write
+canonical artifacts. The control node checks the active lease and object
+ETags before promotion. A stale worker cannot publish a newer attempt's result.
+Publication survives control restarts. The deploy becomes ready in one database
+transaction. Downloadable artifacts run as a later job, so they do not delay
+preview readiness.
+
+Admission accepts 100 unfinished jobs by default. One extra slot permits a
+parent job to schedule its artifact continuation before it finishes. Each
+worker runs one job at a time. Leases last one minute and renew every 15 seconds.
+An expired lease can retry, up to three attempts within the 25-minute job
+deadline. Scale-in protection covers the active job. An idle autoscaled worker
+can terminate after five minutes, while respecting the group's minimum size.
+
+The Terraform example defaults to zero minimum workers and four maximum
+workers. Queued demand drives scale-out, including from zero. Each node has
+80 GiB of disk. The ingestion daemon has an 8 GiB memory limit and two CPUs.
+Each Docker build has a separate 2 GiB memory limit, no swap, and two CPUs.
+A worker needs 10 GiB of free scratch space before it claims a job. Builds
+that require Docker fail if Docker is unavailable. Plain host steps run inside
+the bounded ingestion daemon.
+
+The coordinator uses private port 9102 and a separate ingestion secret. Keep
+this listener outside the public load balancer. Allow only ingestion nodes
+to reach it. See [configuration](/guide/configuration#isolated-ingestion) and
+[the worker command](/reference/cli#preview-ingest-worker).
+
+Staged uploads use an exact-size presigned S3 POST. The default archive limit
+is 2 GiB; worker extraction also has a 2 GiB limit. Signatures last ten minutes.
+The example S3 lifecycle removes staging objects after one day. The server
+retains terminal job history for seven days.
+
+Remote job logs contain tails only: up to 256 KiB per preview side and
+512 KiB total across downloadable artifacts. These limits do not describe
+legacy local build logs or preview process logs.
+
+This path offloads staged CI uploads, direct API deploy builds, and their
+artifact continuations. Repository onboarding and watched-repository Git work
+still use the control node's existing paths. The serving architecture above
+and its shared dependency placement remain the same.

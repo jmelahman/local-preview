@@ -70,6 +70,7 @@ func migrate(sqlDB *sql.DB) error {
 		{"deploys", "artifacts", text},
 		{"deploys", "created_by", text},
 		{"deploys", "project_dir", text},
+		{"deploys", "ingestion_job_id", text},
 		{"backend_artifacts", "init_done_at", text},
 		{"repos", "watch", `INTEGER NOT NULL DEFAULT 0`},
 		{"repos", "watch_branches", text},

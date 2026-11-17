@@ -1021,3 +1021,30 @@ authoritative over a local revocation; or widening `InitRevoker` to fire on
 transport errors — a network blip would then re-run init for every preview on
 an unreachable worker. Documenting init as "runs exactly once" again would
 also invite non-idempotent steps, which this design cannot support.
+
+## Isolated ingestion and atomic readiness
+
+**Symptom.** CI upload requests timed out while the shared control host was
+under memory pressure. Multiple recent PRs failed at the same frontend upload.
+The exact allocation source was not established with a heap profile.
+
+**Cause.** Upload extraction and build work shared the control process and
+host with the API, serving decisions, and dependencies. Parallel requests
+could compete with the service that had to accept them.
+
+**Fix.** Reserve bounded durable jobs, then send archives directly to S3.
+Run each job on a separate ingestion worker with explicit resource limits.
+Keep SQLite on the control node. Workers write attempt objects; control checks
+lease tokens and ETags before canonical publication. Finalize deploy readiness
+in one transaction. Run downloadable artifacts after the preview is ready.
+Persist the ingestion job ID so replay cannot count the same rebuild twice.
+
+**What would reintroduce it.** Extracting staged uploads on control, sharing
+its SQLite file across nodes, publishing before lease validation, or creating
+an intermediate queued deploy during remote result adoption. Letting artifact
+builds gate preview readiness would restore the unrelated failure path.
+
+**Tripwires.** DB tests cover concurrent admission, expired leases, stale
+completion, restart recovery, atomic deploy finalization, generation replay,
+and retention. Execution tests serve a completed preview after deleting the
+control Git mirror and verify artifact failure after preview readiness.

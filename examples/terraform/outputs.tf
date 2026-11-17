@@ -70,3 +70,13 @@ output "worker_asg_name" {
   description = "Name of the elastic worker Auto Scaling group, or null for a static (private_ips) tier. Attach scaling policies and scheduled actions here to drive the fleet's desired capacity."
   value       = local.worker_autoscale ? aws_autoscaling_group.worker[0].name : null
 }
+
+output "ingestion_role_name" {
+  description = "IAM role of ingestion workers. Grant staging reads and attempt-output writes, never canonical artifact writes."
+  value       = var.ingestion_workers == null ? null : aws_iam_role.ingestion[0].name
+}
+
+output "ingestion_asg_name" {
+  description = "Auto Scaling group for the isolated ingestion pool."
+  value       = var.ingestion_workers == null ? null : aws_autoscaling_group.ingestion[0].name
+}

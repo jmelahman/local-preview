@@ -277,6 +277,104 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+type DeploySubmission = { kind: "deploy"; id: number } | { kind: "job"; id: string };
+type DeployJobState =
+  | { status: "pending" }
+  | { status: "done"; deployId: number }
+  | { status: "failed"; error: string };
+
+function deploySubmission(value: unknown): DeploySubmission {
+  if (typeof value !== "object" || value === null || !("id" in value)) {
+    throw new ApiError(502, "Deployment response has no ID");
+  }
+  if (typeof value.id === "number" && Number.isSafeInteger(value.id) && value.id > 0) {
+    return { kind: "deploy", id: value.id };
+  }
+  if (typeof value.id === "string" && value.id.length > 0) {
+    return { kind: "job", id: value.id };
+  }
+  throw new ApiError(502, "Deployment response has an invalid ID");
+}
+
+function deployJobState(value: unknown): DeployJobState {
+  if (typeof value !== "object" || value === null || !("status" in value)) {
+    throw new ApiError(502, "Ingestion response has no status");
+  }
+  switch (value.status) {
+    case "uploading":
+    case "queued":
+    case "leased":
+    case "publishing":
+      return { status: "pending" };
+    case "failed":
+      return {
+        status: "failed",
+        error:
+          "error" in value && typeof value.error === "string" ? value.error : "Deployment failed",
+      };
+    case "done": {
+      if (
+        !("result" in value) ||
+        typeof value.result !== "object" ||
+        value.result === null ||
+        !("deploy" in value.result)
+      ) {
+        throw new ApiError(502, "Completed ingestion has no deployment");
+      }
+      const deployment = deploySubmission(value.result.deploy);
+      if (deployment.kind !== "deploy") throw new ApiError(502, "Invalid completed deployment ID");
+      return { status: "done", deployId: deployment.id };
+    }
+    default:
+      throw new ApiError(502, "Ingestion response has an invalid status");
+  }
+}
+
+async function createDeploy(
+  repo: string,
+  ref: string,
+  callerSignal?: AbortSignal,
+): Promise<Deploy> {
+  const timeout = AbortSignal.timeout(30 * 60_000);
+  const signal = callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout;
+  const response = await request<unknown>("/api/deploys", {
+    method: "POST",
+    body: JSON.stringify({ repo, ref }),
+    signal,
+  });
+  const submission = deploySubmission(response);
+  if (submission.kind === "deploy")
+    return request<Deploy>(`/api/deploys/${submission.id}`, { signal });
+  const path = `/api/repos/${encodeURIComponent(repo)}/ingestions/${encodeURIComponent(submission.id)}`;
+  try {
+    while (true) {
+      const state = deployJobState(await request<unknown>(path, { signal }));
+      if (state.status === "failed") throw new ApiError(400, state.error);
+      if (state.status === "done")
+        return request<Deploy>(`/api/deploys/${state.deployId}`, { signal });
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        };
+        const timer = setTimeout(() => {
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        }, 1000);
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+  } catch (error) {
+    if (signal.aborted) {
+      await request<void>(path, { method: "DELETE", signal: AbortSignal.timeout(5000) }).catch(
+        () => {},
+      );
+    }
+    throw error;
+  }
+}
+
 // Watch settings a PATCH /api/repos/{name} can update; omitted fields keep
 // their stored value.
 export type RepoUpdate = {
@@ -313,8 +411,7 @@ export const api = {
     return { deploys, total: total === null ? deploys.length : Number(total) };
   },
   getDeploy: (id: number) => request<Deploy>(`/api/deploys/${id}`),
-  createDeploy: (repo: string, ref: string) =>
-    request<Deploy>("/api/deploys", { method: "POST", body: JSON.stringify({ repo, ref }) }),
+  createDeploy,
   stopDeploy: (id: number) => request<Deploy>(`/api/deploys/${id}/stop`, { method: "POST" }),
   deleteDeploy: (id: number) => request<void>(`/api/deploys/${id}`, { method: "DELETE" }),
   getDeployStats: (id: number) => request<DeployStats>(`/api/deploys/${id}/stats`),

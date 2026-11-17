@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -21,7 +24,8 @@ import (
 func deployCmd() *cobra.Command {
 	var serverURL string
 	var repoFlag string
-	var rebuild, noWait, asJSON bool
+	var rebuild, noWait, asJSON, oidc bool
+	var oidcAudience string
 
 	parent := &cobra.Command{
 		Use:   "deploy [ref]",
@@ -40,14 +44,16 @@ func deployCmd() *cobra.Command {
 				return err
 			}
 			return runDeploy(cmd.Context(), url, cmd.OutOrStdout(),
-				repoFlag, ref, rebuild, noWait, asJSON)
+				repoFlag, ref, rebuild, noWait, asJSON, oidc, oidcAudience)
 		},
 	}
 	addServerFlag(parent, &serverURL)
 	parent.Flags().StringVar(&repoFlag, "repo", "", "Registered repo name (default: auto-detect from cwd)")
 	parent.Flags().BoolVar(&rebuild, "rebuild", false, "Rebuild artifacts even if cached (needs a restart to affect a live backend)")
-	parent.Flags().BoolVar(&noWait, "no-wait", false, "Return immediately instead of waiting for the build")
+	parent.Flags().BoolVar(&noWait, "no-wait", false, "Return when deploy metadata exists (ingestion servers finish the build first)")
 	parent.Flags().BoolVar(&asJSON, "json", false, "Print the deploy as JSON")
+	parent.Flags().BoolVar(&oidc, "oidc", false, "Authenticate with a fresh GitHub Actions OIDC token for each request")
+	parent.Flags().StringVar(&oidcAudience, "oidc-audience", "", "Audience for the GitHub Actions OIDC token")
 
 	var listFilter client.DeployFilter
 	list := &cobra.Command{
@@ -301,14 +307,22 @@ func formatBytes(n uint64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
-func runDeploy(ctx context.Context, url string, out io.Writer, repoName, ref string, rebuild, noWait, asJSON bool) error {
-	c, err := newClient(url)
-	if err != nil {
-		return err
+func runDeploy(ctx context.Context, url string, out io.Writer, repoName, ref string, rebuild, noWait, asJSON, oidc bool, oidcAudience string) error {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var c *client.Client
+	var err error
+	if oidc {
+		c = client.New(url, nil).SetTokenProvider(func(ctx context.Context) (string, error) { return uploadToken(ctx, true, oidcAudience, url) })
+	} else {
+		c, err = newClient(url)
+		if err != nil {
+			return err
+		}
 	}
 
 	if ref == "" {
-		sha, err := localHeadSHA(".")
+		sha, err := localHeadSHA()
 		if err != nil {
 			return fmt.Errorf("no ref given and no commit found in the current directory: %w", err)
 		}

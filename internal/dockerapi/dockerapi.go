@@ -173,13 +173,15 @@ func streamPull(body io.Reader, out io.Writer) error {
 // Step is one command run in a fresh container to completion. Networks
 // names existing external networks the container joins before starting.
 type Step struct {
-	Image    string
-	Cmd      []string
-	WorkDir  string
-	Env      []string
-	User     string
-	Binds    []string
-	Networks []string
+	Image       string
+	Cmd         []string
+	WorkDir     string
+	Env         []string
+	User        string
+	Binds       []string
+	Networks    []string
+	MemoryBytes int64
+	NanoCPUs    int64
 }
 
 // RunStep creates, runs, and removes a container for the step, streaming
@@ -191,6 +193,14 @@ func (c *Client) RunStep(ctx context.Context, step Step, out io.Writer) error {
 	if err := c.EnsureImage(ctx, step.Image, out); err != nil {
 		return err
 	}
+	hostConfig := map[string]any{"Binds": step.Binds}
+	if step.MemoryBytes > 0 {
+		hostConfig["Memory"] = step.MemoryBytes
+		hostConfig["MemorySwap"] = step.MemoryBytes
+	}
+	if step.NanoCPUs > 0 {
+		hostConfig["NanoCpus"] = step.NanoCPUs
+	}
 	body, err := json.Marshal(map[string]any{
 		"Image":      step.Image,
 		"Entrypoint": step.Cmd[:1],
@@ -198,7 +208,7 @@ func (c *Client) RunStep(ctx context.Context, step Step, out io.Writer) error {
 		"WorkingDir": step.WorkDir,
 		"Env":        step.Env,
 		"User":       step.User,
-		"HostConfig": map[string]any{"Binds": step.Binds},
+		"HostConfig": hostConfig,
 	})
 	if err != nil {
 		return err

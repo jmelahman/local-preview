@@ -434,6 +434,59 @@ variable "workers" {
   }
 }
 
+variable "ingestion_workers" {
+  description = "Separate on-demand ingestion workers. Each instance owns one job and pulls work from the private control API."
+  type = object({
+    secret_ssm_parameter = string
+    instance_type        = optional(string, "r7i.large")
+    instance_types       = optional(list(string), [])
+    root_volume_size_gb  = optional(number, 80)
+    memory_limit         = optional(string, "8g")
+    cpus                 = optional(number, 2)
+    max_size             = optional(number, 4)
+    min_size             = optional(number, 0)
+    desired_capacity     = optional(number, 0)
+    extra_server_args    = optional(list(string), [])
+  })
+  default = null
+
+  validation {
+    condition = var.ingestion_workers == null ? true : (
+      var.ingestion_workers.min_size >= 0 &&
+      var.ingestion_workers.max_size >= 1 &&
+      var.ingestion_workers.min_size <= var.ingestion_workers.desired_capacity &&
+      var.ingestion_workers.desired_capacity <= var.ingestion_workers.max_size &&
+      var.ingestion_workers.cpus > 0 &&
+      var.ingestion_workers.root_volume_size_gb >= 20
+    )
+    error_message = "ingestion_workers needs valid capacity bounds, positive cpus, and at least 20 GiB of root disk."
+  }
+
+  validation {
+    condition = var.ingestion_workers == null ? true : (
+      can(regex("^[1-9][0-9]*[mg]$", var.ingestion_workers.memory_limit)) &&
+      can(regex("^/[A-Za-z0-9_./-]+$", var.ingestion_workers.secret_ssm_parameter)) &&
+      alltrue([for arg in var.ingestion_workers.extra_server_args :
+        !strcontains(arg, "\"") && !strcontains(arg, "$") && !strcontains(arg, "\n") && !strcontains(arg, "\r")
+      ])
+    )
+    error_message = "ingestion_workers needs a Docker memory limit, an SSM parameter path, and shell-safe extra_server_args."
+  }
+
+  validation {
+    condition = var.ingestion_workers == null ? true : alltrue([
+      for flag in ["--s3-endpoint", "--s3-bucket"] :
+      anytrue([for arg in var.ingestion_workers.extra_server_args : startswith(arg, "${flag}=") && trimspace(trimprefix(arg, "${flag}=")) != ""]) || try(
+        trimspace(var.ingestion_workers.extra_server_args[index(var.ingestion_workers.extra_server_args, flag) + 1]) != "" &&
+        !startswith(var.ingestion_workers.extra_server_args[index(var.ingestion_workers.extra_server_args, flag) + 1], "--"),
+        false
+      )
+    ])
+    error_message = "ingestion_workers.extra_server_args must configure --s3-endpoint and --s3-bucket."
+  }
+
+}
+
 variable "tags" {
   description = "Tags merged into every resource."
   type        = map(string)

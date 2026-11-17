@@ -36,6 +36,10 @@ func (d Deps) handleUpload(w http.ResponseWriter, r *http.Request, side, name st
 	if d.UploadAuth != nil && !d.authorizeUpload(w, r, repo) {
 		return
 	}
+	if d.Ingestion != nil {
+		httpError(w, http.StatusUpgradeRequired, "use preview upload --staged when ingestion workers are enabled")
+		return
+	}
 	ref := r.URL.Query().Get("ref")
 	if ref == "" {
 		httpError(w, http.StatusBadRequest, "ref query parameter is required")

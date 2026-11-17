@@ -3,8 +3,11 @@ package build
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -54,6 +57,73 @@ func TestAutoRunnerFallsBackWithoutDocker(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(spec.ScratchDir, "web", "out.txt")); strings.TrimSpace(string(b)) != "fallback" {
 		t.Fatalf("fallback did not run on host: %q", b)
+	}
+}
+
+func TestLimitedRunnerRefusesUnboundedImageFallback(t *testing.T) {
+	for _, devc := range []bool{false, true} {
+		t.Run(strconv.FormatBool(devc), func(t *testing.T) {
+			t.Setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
+			spec := specFor(t, "alpine:3.20", "sh", "-c", "echo unbounded > out.txt")
+			if devc {
+				spec.Image = ""
+				spec.Devcontainer = devcontainer.Config{Image: "alpine:3.20"}
+			}
+			var output bytes.Buffer
+			err := NewLimitedRunner(128<<20, 500_000_000).Run(context.Background(), spec, &output)
+			if err == nil || !strings.Contains(err.Error(), "requires Docker to enforce resource limits") {
+				t.Fatalf("bounded image run = %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(spec.ScratchDir, "web", "out.txt")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("requested image ran on the host: %v", err)
+			}
+		})
+	}
+}
+
+func TestLimitedRunnerHostStepAndInvalidBudget(t *testing.T) {
+	spec := specFor(t, "", "sh", "-c", "echo bounded-host > out.txt")
+	if err := NewLimitedRunner(128<<20, 500_000_000).Run(context.Background(), spec, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(spec.ScratchDir, "web", "out.txt")); err != nil || strings.TrimSpace(string(b)) != "bounded-host" {
+		t.Fatalf("host output = %q, %v", b, err)
+	}
+	if err := NewLimitedRunner(0, 500_000_000).Run(context.Background(), spec, io.Discard); err == nil {
+		t.Fatal("invalid resource budget was accepted")
+	}
+}
+
+func TestLimitedRunnerContainerLimits(t *testing.T) {
+	ctx := context.Background()
+	if _, err := dockerapi.Connect(ctx); err != nil {
+		t.Skipf("docker unavailable: %v", err)
+	}
+	spec := specFor(t, "alpine:3.20", "sh", "-c", "test -f /sys/fs/cgroup/memory.max || exit 42; cat /sys/fs/cgroup/memory.max; cat /sys/fs/cgroup/memory.swap.max; cat /sys/fs/cgroup/cpu.max")
+	var output bytes.Buffer
+	err := NewLimitedRunner(64<<20, 500_000_000).Run(ctx, spec, &output)
+	if err != nil && strings.Contains(err.Error(), "status 42") {
+		t.Skip("container uses cgroup v1")
+	}
+	if err != nil {
+		t.Fatalf("limited container: %v\n%s", err, output.String())
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("missing container resource limits: %q", output.String())
+	}
+	limits := lines[len(lines)-3:]
+	if limits[0] != "67108864" || limits[1] != "0" {
+		t.Fatalf("container memory limits = %v", limits)
+	}
+	cpu := strings.Fields(limits[2])
+	if len(cpu) != 2 {
+		t.Fatalf("container CPU limit = %q", limits[2])
+	}
+	quota, quotaErr := strconv.ParseInt(cpu[0], 10, 64)
+	period, periodErr := strconv.ParseInt(cpu[1], 10, 64)
+	if quotaErr != nil || periodErr != nil || quota <= 0 || quota*2 != period {
+		t.Fatalf("container CPU quota = %q, want half a CPU", limits[2])
 	}
 }
 

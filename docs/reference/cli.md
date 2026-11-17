@@ -34,6 +34,10 @@ Start the orchestrator.
 | `--reserved-upstream` | `$PREVIEW_RESERVED_UPSTREAMS` (comma-separated) | Route a fixed host under the preview domain to a plain upstream, as `<label>=host:port` (e.g. `app=127.0.0.1:3100` serves `app.<preview-domain>`). Repeatable. The host is reverse-proxied wholesale — behind the same [SSO gate](/guide/sso) as previews, but outside the deploy/build machinery — for an always-on companion service that must live under the preview domain (wildcard cert, login gate) yet isn't a per-commit preview. A reserved label shadows any preview of the same label |
 | `--onyx-auth-upstream` | `$PREVIEW_ONYX_AUTH_UPSTREAM` | Enable onyx single-sign-on for previews. The value is the `--reserved-upstream` label of the one canonical onyx host that owns the Google OAuth client (e.g. `app`). A preview browser without an onyx session is bounced there to log in; the session — a stateless JWT signed by the shared `USER_AUTH_SECRET` — is widened to the whole preview domain so every preview validates it locally. Must name an existing reserved upstream. Empty disables it |
 | `--onyx-auth-cookie` | `$PREVIEW_ONYX_AUTH_COOKIE` (`fastapiusersauth`) | onyx session cookie the proxy watches for (presence only — the JWT is validated by each onyx backend, not the proxy). Matches onyx's `AUTH_COOKIE_NAME` when overridden |
+| `--ingestion-control-listen` | (disabled) | Private ingestion coordinator address, such as `10.0.1.10:9102`; requires an artifact tier and separate secret |
+| `--ingestion-asg-name` | (none) | Ingestion ASG name for queue metrics |
+| `--ingestion-secret` | `$PREVIEW_INGESTION_SECRET` | Separate secret for the private ingestion API |
+| `--ingestion-max-pending` | `100` | Maximum unfinished ingestion reservations; one extra slot permits an artifact continuation |
 | `--role` | `all` | Serving role: `all` (single node), `control` (route previews to a worker tier), or `worker` (supervise processes for a control node) |
 | `--worker-secret` | `$PREVIEW_WORKER_SECRET` | Shared secret authenticating the internal worker API in both directions |
 | `--worker-listen` | — | Private address to expose the internal worker API on, e.g. `:9100` (roles `worker`/`all`). **Must not be internet/ALB-reachable.** Requires `--worker-secret` |
@@ -72,6 +76,40 @@ registers, and load the preview when it's up; API callers get a retryable
 `503` with `Retry-After`. The
 scaling policies and alarms themselves live in your infrastructure (see the
 [Terraform example](https://github.com/jmelahman/local-preview/tree/master/examples/terraform)).
+
+## `preview ingest-worker`
+
+Run one ingestion job at a time. This command needs a dedicated data directory
+and Docker for container build steps. Keep it separate from serving workers.
+
+```sh
+preview ingest-worker --server http://10.0.1.10:9102 \
+  --data-dir /var/lib/local-preview-ingest \
+  --s3-endpoint s3.us-east-1.amazonaws.com --s3-bucket preview-artifacts \
+  --s3-region us-east-1
+```
+
+Set `$PREVIEW_INGESTION_SECRET` before starting the command. Bound the daemon's
+memory and CPU in its container or service configuration. The Terraform example
+does this. Build flags below apply to child Docker build containers.
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--server` | (required) | Private ingestion coordinator URL |
+| `--secret` | `$PREVIEW_INGESTION_SECRET` | Ingestion secret |
+| `--data-dir` | (required) | Dedicated scratch and mirror directory |
+| `--instance-id` / `--asg-name` | (none) | EC2 instance ID and ASG for scale-in protection; set both together |
+| `--aws-region` | (ambient) | Region for ASG operations |
+| `--idle-timeout` | `5m` | Idle period before an autoscaled worker terminates, subject to minimum capacity |
+| `--build-memory-bytes` | `2147483648` | Build container memory cap; swap has the same combined cap |
+| `--build-nano-cpus` | `2000000000` | Build container CPU cap, equivalent to two CPUs |
+| `--min-free-bytes` | `10737418240` | Free scratch space required before claiming a job |
+| `--s3-endpoint` / `--s3-bucket` | (required) | Artifact endpoint and bucket |
+| `--s3-prefix` / `--s3-region` | (none) | Match the control node's artifact tier |
+| `--s3-access-key` / `--s3-secret-key` | (ambient identity) | Optional static object-store credentials; set both together |
+| `--s3-use-ssl` | `true` | Use TLS for object storage |
+
+Worker S3 flags do not inherit the serve command's `PREVIEW_S3_*` defaults.
 
 ## `preview repo`
 
@@ -129,13 +167,29 @@ Flags (shared by every subcommand):
 | --- | --- |
 | `--repo` | Registered repo name; by default the current directory is matched against registered repos: a source path equal to the worktree root, an origin URL naming the same remote as the source (ssh/https/`.git` spellings all match), or a worktree root directory named like a registered repo |
 | `--overwrite` | Replace the artifact if it is already present (an upload of an already-present hash is otherwise a no-op) |
-| `--deploy` | Deploy the commit after uploading and wait for its preview URL — the one-command CI flow |
+| `--deploy` | Deploy the commit after uploading and wait for its preview URL |
+| `--staged` | Reserve a job, upload directly to S3, submit it, and wait for isolated worker processing |
+| `--json` | Print one JSON result; requires `--staged` |
 | `--oidc` | Authenticate with a [GitHub Actions OIDC](/guide/uploads#authenticating-with-github-actions-oidc) token minted from the runner (needs `permissions: id-token: write`) |
 | `--oidc-audience` | Audience to request for the OIDC token (default: `$PREVIEW_GITHUB_OIDC_AUDIENCE`, else the server URL) — must match the server's `--github-oidc-audience` |
 
 Setting `$PREVIEW_UPLOAD_TOKEN` sends that token as-is (a bearer `Authorization`
 header), taking precedence over `--oidc` and requiring no runner — an escape
 hatch for non-Actions OIDC or local testing.
+
+For an ingestion-enabled server, use:
+
+```sh
+preview upload frontend ./dist HEAD \
+  --repo myapp --staged --deploy --json --oidc
+```
+
+Use the output tree that your manifest declares. With `--staged`, each control
+request obtains a fresh OIDC token when needed. The archive goes directly to
+the signed S3 URL without the control API's bearer token. The command waits
+for the job and exits non-zero on failure. Preview readiness can precede
+completion of downloadable artifacts. Servers with ingestion enabled reject
+synchronous uploads with `426`.
 
 An upload primes the store independently of any deploy: order doesn't matter,
 and an uploaded side is shared by every commit with the same hash. Exits

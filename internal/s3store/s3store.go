@@ -165,37 +165,42 @@ func (t *Tier) Save(ctx context.Context, repo, side, hash, srcDir string) error 
 		return fmt.Errorf("s3 tier: stat %s: %w", key, err)
 	}
 
+	_, err := t.saveKey(ctx, key, srcDir)
+	return err
+}
+
+func (t *Tier) saveKey(ctx context.Context, key, srcDir string) (ObjectInfo, error) {
 	// Two-pass: compress to a temp file so the object's size and integrity
 	// metadata are known before the put, and a walk/tar failure aborts before
 	// any bytes reach the bucket.
 	tmp, err := os.CreateTemp(t.tmpDir, "s3-artifact-*.tar.zst")
 	if err != nil {
-		return fmt.Errorf("s3 tier: stage upload: %w", err)
+		return ObjectInfo{}, fmt.Errorf("s3 tier: stage upload: %w", err)
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
 
 	zw, err := zstd.NewWriter(tmp)
 	if err != nil {
-		return fmt.Errorf("s3 tier: zstd: %w", err)
+		return ObjectInfo{}, fmt.Errorf("s3 tier: zstd: %w", err)
 	}
 	size, count, err := tarDir(zw, srcDir)
 	if err != nil {
 		zw.Close()
-		return err // includes ErrSourceGone, propagated verbatim
+		return ObjectInfo{}, err // includes ErrSourceGone, propagated verbatim
 	}
 	if err := zw.Close(); err != nil {
-		return fmt.Errorf("s3 tier: finish compression: %w", err)
+		return ObjectInfo{}, fmt.Errorf("s3 tier: finish compression: %w", err)
 	}
 	compressed, err := tmp.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return fmt.Errorf("s3 tier: size staged upload: %w", err)
+		return ObjectInfo{}, fmt.Errorf("s3 tier: size staged upload: %w", err)
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("s3 tier: rewind staged upload: %w", err)
+		return ObjectInfo{}, fmt.Errorf("s3 tier: rewind staged upload: %w", err)
 	}
 
-	_, err = t.client.PutObject(ctx, t.bucket, key, tmp, compressed, minio.PutObjectOptions{
+	uploaded, err := t.client.PutObject(ctx, t.bucket, key, tmp, compressed, minio.PutObjectOptions{
 		ContentType: "application/zstd",
 		UserMetadata: map[string]string{
 			metaUncompressedSize: strconv.FormatInt(size, 10),
@@ -203,9 +208,9 @@ func (t *Tier) Save(ctx context.Context, repo, side, hash, srcDir string) error 
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("s3 tier: put %s: %w", key, err)
+		return ObjectInfo{}, fmt.Errorf("s3 tier: put %s: %w", key, err)
 	}
-	return nil
+	return ObjectInfo{UncompressedSize: size, FileCount: count, CompressedSize: compressed, ETag: uploaded.ETag}, nil
 }
 
 // ObjectInfo is a stored artifact object's recorded integrity metadata: the
@@ -216,13 +221,17 @@ type ObjectInfo struct {
 	UncompressedSize int64
 	FileCount        int64
 	CompressedSize   int64
+	ETag             string
 }
 
 // Stat returns a stored artifact side's recorded metadata, or found=false when
 // the object is absent. It is a HEAD — no bytes are downloaded — so the
 // reconcile pass can check existence and metadata consistency cheaply.
 func (t *Tier) Stat(ctx context.Context, repo, side, hash string) (ObjectInfo, bool, error) {
-	key := t.key(repo, side, hash)
+	return t.statKey(ctx, t.key(repo, side, hash))
+}
+
+func (t *Tier) statKey(ctx context.Context, key string) (ObjectInfo, bool, error) {
 	info, err := t.client.StatObject(ctx, t.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		if isNotFound(err) {
@@ -234,6 +243,7 @@ func (t *Tier) Stat(ctx context.Context, repo, side, hash string) (ObjectInfo, b
 		UncompressedSize: metaInt(info.UserMetadata, metaUncompressedSize),
 		FileCount:        metaInt(info.UserMetadata, metaFileCount),
 		CompressedSize:   info.Size,
+		ETag:             info.ETag,
 	}, true, nil
 }
 
@@ -259,7 +269,10 @@ func (t *Tier) Delete(ctx context.Context, repo, side, hash string) error {
 // large-artifact hydrate. The caller is responsible for the hardened
 // filesystem extraction of the tar stream.
 func (t *Tier) Open(ctx context.Context, repo, side, hash string) (io.ReadCloser, int64, bool, error) {
-	key := t.key(repo, side, hash)
+	return t.openKey(ctx, t.key(repo, side, hash))
+}
+
+func (t *Tier) openKey(ctx context.Context, key string) (io.ReadCloser, int64, bool, error) {
 	info, err := t.client.StatObject(ctx, t.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		if isNotFound(err) {
@@ -295,7 +308,10 @@ func (v *tierReadCloser) Close() error {
 // isNotFound reports whether err is S3's "no such key" (a genuinely absent
 // object) rather than a transport or auth failure.
 func isNotFound(err error) bool {
-	resp := minio.ToErrorResponse(err)
+	var resp minio.ErrorResponse
+	if !errors.As(err, &resp) {
+		return false
+	}
 	return resp.StatusCode == http.StatusNotFound || resp.Code == "NoSuchKey"
 }
 

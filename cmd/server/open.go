@@ -84,7 +84,7 @@ func runOpen(ctx context.Context, url string, out io.Writer, repoName, ref strin
 // then as a free-text search (sha-prefix matches preferred).
 func findDeploy(ctx context.Context, c *client.Client, out io.Writer, repoName, ref string) (client.Deploy, error) {
 	if ref == "" {
-		sha, err := localHeadSHA(".")
+		sha, err := localHeadSHA()
 		if err != nil {
 			return client.Deploy{}, fmt.Errorf("no ref given and no commit found in the current directory: %w", err)
 		}

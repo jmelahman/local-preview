@@ -270,6 +270,42 @@ ranges, so with `allowed_ingress_cidrs` closed to an office or VPN range they
 cannot reach the server at all; use a self-hosted runner inside an allowed
 range, or widen the ingress deliberately.
 
+## Isolated ingestion workers
+
+Set `ingestion_workers` to move staged uploads and backend preparation onto a separate worker pool.
+The pool starts at zero and adds workers when ingestion jobs queue.
+Each instance processes one job. Idle workers remove themselves after five minutes, down to `min_size`.
+
+```hcl
+ingestion_workers = {
+  secret_ssm_parameter = "/local-preview/ingestion-secret"
+  instance_type        = "r7i.large"
+  root_volume_size_gb   = 80
+  memory_limit         = "8g"
+  cpus                 = 2
+  max_size             = 4
+  extra_server_args = [
+    "--s3-endpoint", "s3.us-west-2.amazonaws.com",
+    "--s3-region", "us-west-2",
+    "--s3-bucket", "your-preview-artifacts",
+  ]
+}
+```
+
+Create the named SecureString parameter before applying. It must differ from the serving-worker secret.
+Set `private_ip` so workers can reach the private ingestion API on port 9102.
+This listener admits only ingestion workers. The workers expose no inbound API.
+
+Attach S3 permissions to `ingestion_role_name`: canonical artifact reads, staged upload reads, and attempt-output writes.
+Only the control role can publish canonical artifacts. Keep serving workers read-only.
+Expire objects under `ingest-staging/` with a prefix-scoped lifecycle rule; retain canonical artifact objects.
+
+`memory_limit` and `cpus` bound the ingestion process. Build containers have separate 2 GiB and two-CPU limits.
+The fixed encrypted root disk holds scratch files and caches. Choose a size that fits source, images, and staged output.
+Serving-worker capacity and limits remain separate.
+
+Validate the module without AWS resources with `terraform test`; its ingestion tests use a mocked AWS provider.
+
 ## Upgrades
 
 Pin `image` to a release tag and bump it to upgrade. The tag is baked into

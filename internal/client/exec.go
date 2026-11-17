@@ -39,8 +39,12 @@ func (c *Client) Exec(ctx context.Context, id int64, opts ExecOptions) (net.Conn
 		q.Set("term", opts.Term)
 	}
 	hdr := http.Header{}
-	if c.token != "" {
-		hdr.Set("Authorization", "Bearer "+c.token)
+	token, err := c.requestToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		hdr.Set("Authorization", "Bearer "+token)
 	}
 	return execstream.Dial(ctx, fmt.Sprintf("%s/api/deploys/%d/exec?%s", c.base, id, q.Encode()), hdr)
 }

@@ -19,7 +19,7 @@ import (
 
 func uploadCmd() *cobra.Command {
 	var serverURL, repoFlag, oidcAudience string
-	var overwrite, deploy, oidc bool
+	var overwrite, deploy, oidc, staged, jsonOutput bool
 
 	parent := &cobra.Command{
 		Use:   "upload",
@@ -39,10 +39,19 @@ func uploadCmd() *cobra.Command {
 	parent.PersistentFlags().BoolVar(&oidc, "oidc", false, "Authenticate with a GitHub Actions OIDC token fetched from the runner")
 	parent.PersistentFlags().StringVar(&oidcAudience, "oidc-audience", "", "Audience to request for the OIDC token (default: $PREVIEW_GITHUB_OIDC_AUDIENCE, else the server URL)")
 
+	parent.PersistentFlags().BoolVar(&staged, "staged", false, "Stage the archive in object storage and process it on an ingestion worker")
+	parent.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Print one JSON result (requires --staged)")
+
 	run := func(cmd *cobra.Command, side, name, path, ref string) error {
 		url, err := resolveURL(cmd, serverURL)
 		if err != nil {
 			return err
+		}
+		if jsonOutput && !staged {
+			return errors.New("--json requires --staged")
+		}
+		if staged {
+			return runStagedUpload(cmd.Context(), url, cmd.OutOrStdout(), repoFlag, side, name, path, ref, overwrite, deploy, jsonOutput, func(ctx context.Context) (string, error) { return uploadToken(ctx, oidc, oidcAudience, url) })
 		}
 		token, err := uploadToken(cmd.Context(), oidc, oidcAudience, url)
 		if err != nil {
@@ -95,7 +104,7 @@ func runUpload(ctx context.Context, url string, out io.Writer, repoName, side, n
 	}
 
 	if ref == "" {
-		sha, err := localHeadSHA(".")
+		sha, err := localHeadSHA()
 		if err != nil {
 			return fmt.Errorf("no ref given and no commit found in the current directory: %w", err)
 		}

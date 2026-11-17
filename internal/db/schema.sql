@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS deploys (
     -- The repo's project_dir when the deploy was last built; a ready deploy
     -- whose scope no longer matches the repo's is rebuilt on request.
     project_dir TEXT NOT NULL DEFAULT '',
+    ingestion_job_id TEXT NOT NULL DEFAULT '',
     UNIQUE (repo_id, sha),
     UNIQUE (repo_id, short_sha)
 );
@@ -185,3 +186,28 @@ CREATE TABLE IF NOT EXISTS preview_grants (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     expires_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ingestion_jobs (
+    id TEXT PRIMARY KEY,
+    repo_id INTEGER NOT NULL REFERENCES repos(id),
+    request_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('upload', 'build')),
+    spec_json TEXT NOT NULL,
+    archive_key TEXT NOT NULL DEFAULT '',
+    archive_sha256 TEXT NOT NULL DEFAULT '',
+    archive_bytes INTEGER NOT NULL DEFAULT 0 CHECK (archive_bytes >= 0),
+    status TEXT NOT NULL CHECK (status IN ('uploading', 'queued', 'leased', 'publishing', 'done', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    worker_id TEXT NOT NULL DEFAULT '',
+    lease_token TEXT NOT NULL DEFAULT '',
+    lease_until INTEGER NOT NULL DEFAULT 0,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    UNIQUE (repo_id, request_key)
+);
+
+CREATE INDEX IF NOT EXISTS ingestion_jobs_claim ON ingestion_jobs(status, created_at, id);

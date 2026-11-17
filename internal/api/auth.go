@@ -233,17 +233,12 @@ func AuthMiddleware(d Deps, next http.Handler) http.Handler {
 			return
 		}
 		if tok, ok := bearerToken(r); ok {
-			if cache.allowed(r.Context(), d.SSO, tok) {
-				next.ServeHTTP(w, r)
-				return
-			}
-			// Not a personal-access token. It may still be a GitHub Actions
-			// OIDC token, which is what CI has instead of a session — but only
-			// on a route that can bind it to a repo (see oidcRoute). The claims
-			// ride the context so the handler can enforce that binding without
-			// verifying a second time.
 			if claims, ok := d.verifyOIDC(r, tok); ok {
 				next.ServeHTTP(w, r.WithContext(withOIDCClaims(r.Context(), claims)))
+				return
+			}
+			if cache.allowed(r.Context(), d.SSO, tok) {
+				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ssoRequestKey{}, true)))
 				return
 			}
 			w.Header().Set("WWW-Authenticate", "Bearer")
@@ -255,7 +250,7 @@ func AuthMiddleware(d Deps, next http.Handler) http.Handler {
 				httpError(w, http.StatusForbidden, "request origin not allowed")
 				return
 			}
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ssoRequestKey{}, true)))
 			return
 		}
 		w.Header().Set("WWW-Authenticate", "Bearer")
@@ -282,6 +277,8 @@ func isAuthExempt(p string) bool {
 
 // oidcCtxKey types the context key carrying verified OIDC claims.
 type oidcCtxKey struct{}
+
+type ssoRequestKey struct{}
 
 // withOIDCClaims marks a request as OIDC-authenticated, carrying the verified
 // claims to the handler that must bind them to a repo.
@@ -313,17 +310,12 @@ func (d Deps) verifyOIDC(r *http.Request, tok string) (githuboidc.Claims, bool) 
 	return claims, true
 }
 
-// oidcRoute lists the non-exempt routes a GitHub Actions OIDC token may
-// authenticate — the two `preview upload … --oidc --deploy` needs: creating a
-// deploy, and reading it back until it settles. Both name a repo the handler
-// can bind the token to, the first in its body and the second on the row it
-// loads. The uploads are OIDC-gated too but never reach here — they are exempt
-// above and self-gate instead.
-//
-// Deliberately not the mutating by-ID routes (stop, delete) or the log and
-// stats reads: CI has no reason to touch them, and every route added here is
-// one more place the binding has to be gotten right.
+// Every eligible handler must bind claims to the repository it accesses.
+// Synchronous uploads authenticate in their handler, outside this route list.
 func oidcRoute(method, path string) bool {
+	if ingestionRoute(method, path) {
+		return true
+	}
 	switch method {
 	case http.MethodPost:
 		return path == "/api/deploys"

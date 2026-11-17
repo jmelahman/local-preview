@@ -17,3 +17,11 @@ func filesystemBytes(path string) (int64, error) {
 	}
 	return int64(st.Blocks) * int64(st.Bsize), nil //nolint:unconvert // Bsize is int64 on linux, uint32 on darwin
 }
+
+func filesystemFreeBytes(path string) (int64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, err
+	}
+	return int64(st.Bavail) * int64(st.Bsize), nil //nolint:unconvert // Bsize differs across platforms.
+}

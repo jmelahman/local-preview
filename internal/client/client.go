@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Repo mirrors the API's repo shape.
@@ -74,9 +76,10 @@ type ArtifactFile struct {
 
 // Client talks to a running `preview serve` over HTTP.
 type Client struct {
-	base  string
-	http  *http.Client
-	token string
+	base          string
+	http          *http.Client
+	token         string
+	tokenProvider func(context.Context) (string, error)
 }
 
 // New returns a client for the server at base. Pass nil to use
@@ -93,7 +96,20 @@ func New(base string, hc *http.Client) *Client {
 // token; returns the client for chaining.
 func (c *Client) SetToken(token string) *Client {
 	c.token = token
+	c.tokenProvider = nil
 	return c
+}
+
+func (c *Client) SetTokenProvider(provider func(context.Context) (string, error)) *Client {
+	c.tokenProvider = provider
+	return c
+}
+
+func (c *Client) requestToken(ctx context.Context) (string, error) {
+	if c.tokenProvider != nil {
+		return c.tokenProvider(ctx)
+	}
+	return c.token, nil
 }
 
 // Health mirrors the API's health shape.
@@ -198,21 +214,59 @@ func (c *Client) DeleteRepo(ctx context.Context, name string) error {
 	return err
 }
 
-// CreateDeploy requests a deploy of ref in repo.
-func (c *Client) CreateDeploy(ctx context.Context, repo, ref string, rebuild bool) (Deploy, error) {
+func (c *Client) CreateDeploy(ctx context.Context, repo, ref string, rebuild bool) (result Deploy, retErr error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
 	body, err := json.Marshal(map[string]any{"repo": repo, "ref": ref, "rebuild": rebuild})
 	if err != nil {
-		return Deploy{}, err
+		return result, err
 	}
-	raw, err := c.do(ctx, http.MethodPost, "/api/deploys", body)
+	raw, err := c.ingestionRequest(ctx, http.MethodPost, "/api/deploys", body)
 	if err != nil {
-		return Deploy{}, err
+		return result, err
 	}
-	var d Deploy
-	if err := json.Unmarshal(raw, &d); err != nil {
-		return Deploy{}, fmt.Errorf("decode deploy: %w", err)
+	var identity struct {
+		ID json.RawMessage `json:"id"`
 	}
-	return d, nil
+	if err := json.Unmarshal(raw, &identity); err != nil {
+		return result, fmt.Errorf("decode deploy: %w", err)
+	}
+	if len(identity.ID) == 0 {
+		return result, errors.New("deploy response has no ID")
+	}
+	if identity.ID[0] != '"' {
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return result, fmt.Errorf("decode deploy: %w", err)
+		}
+		return result, nil
+	}
+	var job ingestionResponse
+	if err := json.Unmarshal(raw, &job); err != nil {
+		return result, fmt.Errorf("decode deploy job: %w", err)
+	}
+	if job.ID == "" {
+		return result, errors.New("deploy job response has no ID")
+	}
+	path := "/api/repos/" + url.PathEscape(repo) + "/ingestions/" + url.PathEscape(job.ID)
+	defer func() {
+		if retErr != nil && ctx.Err() != nil {
+			c.cancelIngestion(ctx, path)
+		}
+	}()
+	if job.Status == "done" && job.Result == nil {
+		raw, err = c.ingestionRequest(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return result, err
+		}
+		if err := json.Unmarshal(raw, &job); err != nil {
+			return result, fmt.Errorf("decode completed deploy job: %w", err)
+		}
+	}
+	completed, err := c.waitForIngestion(ctx, path, job, true)
+	if err != nil {
+		return result, err
+	}
+	return *completed.Deploy, nil
 }
 
 // DeployFilter narrows ListDeploys; zero-value fields don't filter. It
@@ -426,8 +480,12 @@ func (c *Client) doStream(ctx context.Context, method, path, contentType string,
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	token, err := c.requestToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve request token: %w", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -448,14 +506,14 @@ func (c *Client) doStream(ctx context.Context, method, path, contentType string,
 				// couldn't) present — say how to fix it instead of leaving a
 				// bare "authentication required".
 				hint := "sign in to the GitHub CLI (`gh auth login`) so its token is used automatically, or set one explicitly: `preview configure --token <github-pat>` / $PREVIEW_TOKEN"
-				if c.token != "" {
+				if token != "" {
 					hint = "the presented GitHub token was rejected — it may be expired, revoked, or its account not on the server's allowlist"
 				}
-				return nil, fmt.Errorf("%s %s: %s (%s)", method, path, e.Error, hint)
+				return nil, &HTTPError{StatusCode: resp.StatusCode, RetryAfter: resp.Header.Get("Retry-After"), Message: fmt.Sprintf("%s %s: %s (%s)", method, path, e.Error, hint)}
 			}
-			return nil, fmt.Errorf("%s %s: %s", method, path, e.Error)
+			return nil, &HTTPError{StatusCode: resp.StatusCode, RetryAfter: resp.Header.Get("Retry-After"), Message: fmt.Sprintf("%s %s: %s", method, path, e.Error)}
 		}
-		return nil, fmt.Errorf("%s %s: unexpected status %d", method, path, resp.StatusCode)
+		return nil, &HTTPError{StatusCode: resp.StatusCode, RetryAfter: resp.Header.Get("Retry-After"), Message: fmt.Sprintf("%s %s: unexpected status %d", method, path, resp.StatusCode)}
 	}
 	return raw, nil
 }

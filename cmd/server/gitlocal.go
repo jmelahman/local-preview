@@ -80,13 +80,11 @@ func openLocalRepo(dir string) (*git.Repository, error) {
 	})
 }
 
-// localHeadSHA returns the commit sha of HEAD for the working tree
-// containing dir — the equivalent of `git rev-parse HEAD`.
-func localHeadSHA(dir string) (string, error) {
-	if sha, ok := gitOut(dir, "rev-parse", "HEAD"); ok {
+func localHeadSHA() (string, error) {
+	if sha, ok := gitOut(".", "rev-parse", "HEAD"); ok {
 		return sha, nil
 	}
-	repo, err := openLocalRepo(dir)
+	repo, err := openLocalRepo(".")
 	if err != nil {
 		return "", err
 	}

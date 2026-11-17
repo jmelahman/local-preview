@@ -116,6 +116,10 @@ func (q *Queue) runPersist(job persistJob) {
 // persist. Save is skip-if-exists, so a side the async pool already uploaded
 // costs one HeadObject.
 func (q *Queue) persistSide(repo, side, hash string) error {
+	return q.persistSideContext(context.Background(), repo, side, hash)
+}
+
+func (q *Queue) persistSideContext(parent context.Context, repo, side, hash string) error {
 	if q.tier == nil || hash == "" {
 		return nil
 	}
@@ -123,7 +127,7 @@ func (q *Queue) persistSide(repo, side, hash string) error {
 	if dir == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), persistTimeout)
+	ctx, cancel := context.WithTimeout(parent, persistTimeout)
 	defer cancel()
 	if err := q.tier.Save(ctx, repo, side, hash, dir); err != nil {
 		if errors.Is(err, s3store.ErrSourceGone) {

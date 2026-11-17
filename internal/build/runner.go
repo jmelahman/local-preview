@@ -47,6 +47,7 @@ type HostRunner struct{}
 // Run implements Runner.
 func (HostRunner) Run(ctx context.Context, spec RunSpec, output io.Writer) error {
 	cmd := exec.CommandContext(ctx, spec.Argv[0], spec.Argv[1:]...)
+	configureHostProcess(cmd)
 	cmd.Dir = filepath.Join(spec.ScratchDir, spec.Dir)
 	cmd.Stdout = output
 	cmd.Stderr = output

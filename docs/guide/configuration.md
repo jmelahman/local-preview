@@ -379,6 +379,52 @@ This is early scaffolding: the worker registry is static (endpoints from
 flags, not an ASG-driven registry), and scale-out/in and warm pools are left
 to the infrastructure layer.
 
+## Isolated ingestion
+
+Enable the [ingestion pool](/guide/worker-tier#isolated-ingestion-pool) to keep
+CI archive extraction and direct deploy builds off the control node.
+Configure the artifact tier first. Use a separate secret for ingestion.
+
+```sh
+export PREVIEW_INGESTION_SECRET='replace-with-a-private-secret'
+preview serve --role control \
+  --s3-endpoint s3.us-east-1.amazonaws.com --s3-bucket preview-artifacts \
+  --s3-region us-east-1 \
+  --ingestion-control-listen 10.0.1.10:9102 \
+  --ingestion-asg-name preview-ingestion \
+  --ingestion-max-pending 100
+```
+
+Use the control node's actual private IP. The listener requires a private or
+loopback IP literal. Do not expose port 9102 through a public load balancer.
+The ingestion secret must differ from the serving worker secret.
+`--ingestion-secret` overrides `$PREVIEW_INGESTION_SECRET`.
+
+Set `ingestion_workers` in the Terraform example to create a separate worker
+ASG and its private security group. Set `secret_ssm_parameter` to the ingestion
+secret's SSM path. Grant its role staging reads and attempt-output writes.
+Only the control role receives canonical artifact write access. Add a one-day
+S3 lifecycle rule for staging objects. The example provides this rule.
+
+The example defaults to zero minimum nodes, four maximum nodes, 80 GiB disks,
+and an 8 GiB, two-CPU ingestion daemon. Worker build containers default to
+2 GiB and two CPUs. Workers require 10 GiB free before claiming work.
+Set explicit worker S3 flags to match the control tier. The worker command
+uses ambient AWS credentials when no static keypair is supplied.
+See [worker flags](/reference/cli#preview-ingest-worker).
+
+The queue accepts 100 unfinished jobs by default, plus one artifact
+continuation slot. Full admission returns `429` with `Retry-After: 5`.
+With `--ingestion-asg-name`, the coordinator publishes `IngestionQueued`,
+`IngestionActive`, and `IngestionOldestQueuedAge` in the configured metrics
+namespace. The example scales out on queued demand. Active workers hold
+scale-in protection; idle workers can terminate after five minutes.
+
+Use `preview upload ... --staged --deploy` with this mode. Synchronous upload
+endpoints return `426` when ingestion is configured. Direct `POST /api/deploys`
+returns an asynchronous ingestion job. Without ingestion configuration,
+existing upload and deploy behavior stays unchanged.
+
 ## The preview domain
 
 Previews are addressed as `http://<sha-prefix>-<repo>.<domain>[:port]/`. The

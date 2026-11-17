@@ -9,3 +9,7 @@ import "errors"
 func filesystemBytes(string) (int64, error) {
 	return 0, errors.New("filesystem size unsupported on windows")
 }
+
+func filesystemFreeBytes(string) (int64, error) {
+	return 0, errors.New("ingestion workers require a Unix filesystem")
+}

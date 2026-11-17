@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,12 +29,19 @@ const cacheMount = "/preview-cache"
 // carries a usable one; everything else execs on the host. The daemon is
 // dialed lazily, once.
 type autoRunner struct {
-	host HostRunner
+	host        HostRunner
+	memoryBytes int64
+	nanoCPUs    int64
+	limited     bool
 
 	mu     sync.Mutex
 	probed bool
 	client *dockerapi.Client
 	err    error
+}
+
+func NewLimitedRunner(memoryBytes, nanoCPUs int64) Runner {
+	return &autoRunner{memoryBytes: memoryBytes, nanoCPUs: nanoCPUs, limited: true}
 }
 
 func (r *autoRunner) docker(ctx context.Context) (*dockerapi.Client, error) {
@@ -48,6 +56,9 @@ func (r *autoRunner) docker(ctx context.Context) (*dockerapi.Client, error) {
 
 // Run implements Runner.
 func (r *autoRunner) Run(ctx context.Context, spec RunSpec, out io.Writer) error {
+	if r.limited && (r.memoryBytes <= 0 || r.nanoCPUs <= 0) {
+		return errors.New("build memory and CPU limits must be positive")
+	}
 	image, devc := spec.Image, false
 	if image == "" && spec.Devcontainer.Image != "" {
 		// An explicit manifest image beats the devcontainer default.
@@ -58,6 +69,9 @@ func (r *autoRunner) Run(ctx context.Context, spec RunSpec, out io.Writer) error
 	}
 	cli, err := r.docker(ctx)
 	if err != nil {
+		if r.limited {
+			return fmt.Errorf("build image %q requires Docker to enforce resource limits: %w", image, err)
+		}
 		if devc {
 			fmt.Fprintf(out, "warning: devcontainer %q: docker is unavailable (%v); building on the host instead\n", image, err)
 		} else {
@@ -103,12 +117,14 @@ func (r *autoRunner) Run(ctx context.Context, spec RunSpec, out io.Writer) error
 		fmt.Fprintf(out, "[build image: %s]\n", image)
 	}
 	err = cli.RunStep(ctx, dockerapi.Step{
-		Image:   image,
-		Cmd:     spec.Argv,
-		WorkDir: path.Join(buildMount, filepath.ToSlash(spec.Dir)),
-		Env:     env,
-		User:    user,
-		Binds:   binds,
+		Image:       image,
+		Cmd:         spec.Argv,
+		WorkDir:     path.Join(buildMount, filepath.ToSlash(spec.Dir)),
+		Env:         env,
+		User:        user,
+		Binds:       binds,
+		MemoryBytes: r.memoryBytes,
+		NanoCPUs:    r.nanoCPUs,
 	}, out)
 	if err != nil {
 		return fmt.Errorf("build step %q in %s: %w", strings.Join(spec.Argv, " "), image, err)

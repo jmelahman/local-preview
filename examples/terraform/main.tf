@@ -130,7 +130,7 @@ locals {
     ],
   )
 
-  server_args = concat(local.base_url_args, local.sso_args, local.oidc_upload_args, local.worker_args, var.extra_server_args)
+  server_args = concat(local.base_url_args, local.sso_args, local.oidc_upload_args, local.worker_args, local.ingestion_args, var.extra_server_args)
 
   # All SecureString parameters the instances read at boot; none is a
   # Terraform value, so none reaches state.
@@ -138,7 +138,7 @@ locals {
     var.github_webhook_secret_ssm_parameter,
     var.sso == null ? null : var.sso.client_secret_ssm_parameter,
     var.workers == null ? null : var.workers.secret_ssm_parameter,
-  ]), values(var.secret_env_ssm_parameters)))
+  ]), values(var.secret_env_ssm_parameters), values(local.ingestion_secret_env)))
 
   # What the *worker* boot script reads: the shared secret plus the secret env
   # (a worker resolves manifest {secret:...} placeholders itself).
@@ -316,7 +316,7 @@ resource "aws_instance" "server" {
   private_ip                  = var.private_ip
   key_name                    = var.key_pair_name
   iam_instance_profile        = aws_iam_instance_profile.instance.name
-  vpc_security_group_ids      = concat([aws_security_group.server.id], aws_security_group.stack_ingress[*].id, aws_security_group.worker_registration[*].id)
+  vpc_security_group_ids      = concat([aws_security_group.server.id], aws_security_group.stack_ingress[*].id, aws_security_group.worker_registration[*].id, aws_security_group.ingestion_control[*].id)
   associate_public_ip_address = true
 
   # Gzipped, which cloud-init unpacks itself: EC2 caps user data at 16 KiB and
@@ -342,7 +342,7 @@ resource "aws_instance" "server" {
     webhook_ssm    = var.github_webhook_secret_ssm_parameter == null ? "" : var.github_webhook_secret_ssm_parameter
     sso_secret_ssm = var.sso == null ? "" : var.sso.client_secret_ssm_parameter
     worker_ssm     = var.workers == null ? "" : var.workers.secret_ssm_parameter
-    secret_env     = var.secret_env_ssm_parameters
+    secret_env     = merge(var.secret_env_ssm_parameters, local.ingestion_secret_env)
   }))
 
   # The image is baked into the unit file that user_data writes, so an image

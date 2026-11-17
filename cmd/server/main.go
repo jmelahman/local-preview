@@ -34,6 +34,7 @@ import (
 	"github.com/jmelahman/local-preview/internal/fleet"
 	"github.com/jmelahman/local-preview/internal/githuboidc"
 	"github.com/jmelahman/local-preview/internal/gitrepo"
+	"github.com/jmelahman/local-preview/internal/ingest"
 	"github.com/jmelahman/local-preview/internal/proxy"
 	"github.com/jmelahman/local-preview/internal/reconcile"
 	"github.com/jmelahman/local-preview/internal/retain"
@@ -123,19 +124,23 @@ type serveOptions struct {
 	onyxAuthUpstream string
 	onyxAuthCookie   string
 
-	role             string
-	workerSecret     string
-	workerListen     string
-	workerEndpoint   string
-	workerEndpoints  string
-	workerHost       string
-	controlListen    string
-	controlEndpoint  string
-	workerAdvertise  string
-	workerInstanceID string
-	asgName          string
-	awsRegion        string
-	metricsNamespace string
+	role                   string
+	workerSecret           string
+	workerListen           string
+	workerEndpoint         string
+	workerEndpoints        string
+	workerHost             string
+	controlListen          string
+	controlEndpoint        string
+	workerAdvertise        string
+	workerInstanceID       string
+	asgName                string
+	awsRegion              string
+	metricsNamespace       string
+	ingestionControlListen string
+	ingestionASGName       string
+	ingestionSecret        string
+	ingestionMaxPending    int
 
 	// The bools live here, away from the group each belongs to: spread
 	// through the struct they cost a word of padding apiece.
@@ -205,7 +210,11 @@ func Root() *cobra.Command {
 	serve.Flags().StringVar(&opts.asgName, "worker-asg-name", "", "Control node only: the worker tier's EC2 Auto Scaling group name. Set it to publish fleet autoscaling metrics (UnservedDemand, FleetLoad) to CloudWatch and reconcile scale-in protection on busy workers (default: $PREVIEW_WORKER_ASG_NAME; empty disables autoscaling integration)")
 	serve.Flags().StringVar(&opts.awsRegion, "aws-region", "", "Control node only: AWS region for the CloudWatch/Auto Scaling autoscaling API. Defaults to the ambient SDK region (default: $AWS_REGION)")
 	serve.Flags().StringVar(&opts.metricsNamespace, "metrics-namespace", "LocalPreview", "Control node only: CloudWatch namespace for published fleet metrics")
-	cmd.AddCommand(serve)
+	serve.Flags().StringVar(&opts.ingestionControlListen, "ingestion-control-listen", "", "Private ingestion coordinator listen address")
+	serve.Flags().StringVar(&opts.ingestionASGName, "ingestion-asg-name", "", "Ingestion Auto Scaling group used for queue metrics")
+	serve.Flags().StringVar(&opts.ingestionSecret, "ingestion-secret", "", "Ingestion worker secret (default: $PREVIEW_INGESTION_SECRET)")
+	serve.Flags().IntVar(&opts.ingestionMaxPending, "ingestion-max-pending", 100, "Maximum reserved, queued, and active ingestion jobs")
+	cmd.AddCommand(serve, ingestionWorkerCmd())
 
 	addClientCommands(cmd)
 
@@ -318,7 +327,6 @@ func run(opts serveOptions) error {
 		log.Printf("artifact tier: s3 %s/%s (built artifacts persist and hydrate instead of rebuilding)",
 			opts.s3Endpoint, opts.s3Bucket)
 	}
-	queue.Start(workCtx, opts.buildConcurrency)
 	watcher := watch.New(database, gitMgr, queue, opts.pollInterval)
 	watcher.Start(workCtx)
 	cloner := clone.New(database, gitMgr, watcher.Kick)
@@ -367,6 +375,13 @@ func run(opts serveOptions) error {
 		return err
 	}
 	backends, runtime, reg, registrar := fs.backends, fs.runtime, fs.reg, fs.registrar
+	var ingestion *ingest.Coordinator
+	if opts.ingestionControlListen != "" {
+		ingestion, err = startIngestion(workCtx, opts, database, artifactTier, queue)
+		if err != nil {
+			return err
+		}
+	}
 
 	deps := api.Deps{
 		Store:               database,
@@ -374,6 +389,7 @@ func run(opts serveOptions) error {
 		Config:              cfg,
 		Git:                 gitMgr,
 		Queue:               queue,
+		Ingestion:           ingestion,
 		Super:               super,
 		Runtime:             runtime,
 		Cloner:              cloner,
@@ -391,6 +407,7 @@ func run(opts serveOptions) error {
 		WarmPolicy:          warmPolicyGetter(super),
 		SetWarmPolicy:       warmPolicySetter(database, super, reg),
 	}
+	queue.Start(workCtx, opts.buildConcurrency)
 	apex := api.AuthMiddleware(deps, api.NewMux(deps))
 	router := proxy.New(database, files, backends, cfg.Preview.Domain, apex)
 	// Interim "starting" pages stream the run log from wherever the process
@@ -1232,4 +1249,41 @@ func startWorkerRegistration(ctx context.Context, cc *workerapi.ControlClient, e
 			}
 		}
 	}()
+}
+
+func startIngestion(workCtx context.Context, opts serveOptions, database *db.Store, artifactTier *s3store.Tier, queue *build.Queue) (*ingest.Coordinator, error) {
+	envDefault(&opts.ingestionSecret, "PREVIEW_INGESTION_SECRET")
+	if artifactTier == nil || opts.ingestionSecret == "" || opts.ingestionMaxPending < 1 {
+		return nil, errors.New("ingestion requires an artifact tier, a separate secret, and a positive queue bound")
+	}
+	host, _, err := net.SplitHostPort(opts.ingestionControlListen)
+	if err != nil || net.ParseIP(host) == nil || (!net.ParseIP(host).IsPrivate() && !net.ParseIP(host).IsLoopback()) {
+		return nil, errors.New("ingestion-control-listen must use a private or loopback IP address")
+	}
+	ingestion := &ingest.Coordinator{Store: database, Tier: artifactTier, Queue: queue, ManifestRefs: []build.ManifestRef{{Path: build.ManifestName}, {Path: ".kanban.toml", Table: "previews"}}, LocalManifestDir: config.ManifestsDir(), MaxPending: opts.ingestionMaxPending, MaxUploadBytes: opts.maxUploadBytes}
+	queue.SetArtifactDispatcher(ingestion.ScheduleArtifactsForDeploy)
+	if opts.ingestionASGName != "" {
+		ingestion.Report, err = ingestionMetrics(workCtx, opts.awsRegion, opts.metricsNamespace, opts.ingestionASGName)
+		if err != nil {
+			return nil, err
+		}
+	}
+	listener, err := net.Listen("tcp", opts.ingestionControlListen)
+	if err != nil {
+		return nil, err
+	}
+	server := &http.Server{Handler: ingestion.Handler(opts.ingestionSecret), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("ingestion coordinator: %v", err)
+		}
+	}()
+	go func() {
+		<-workCtx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
+	}()
+	go ingestion.Run(workCtx)
+	return ingestion, nil
 }

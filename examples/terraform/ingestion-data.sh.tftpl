@@ -1,0 +1,53 @@
+#!/bin/bash
+set -euxo pipefail
+
+dnf install -y docker
+systemctl enable --now docker
+mkdir -p /var/lib/local-preview-ingest
+
+IMDS_TOKEN=$(curl -fsSX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+INSTANCE_ID=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+install -m 600 /dev/null /etc/local-preview-ingest.env
+set +x
+INGESTION_SECRET=$(aws ssm get-parameter --region '${aws_region}' \
+  --name '${secret_ssm}' --with-decryption --query Parameter.Value --output text)
+printf 'PREVIEW_INGESTION_SECRET=%s\nGOMEMLIMIT=1GiB\n' "$INGESTION_SECRET" >/etc/local-preview-ingest.env
+unset INGESTION_SECRET
+set -x
+
+cat >/etc/systemd/system/local-preview-ingest.service <<EOF_UNIT
+[Unit]
+Description=local-preview isolated ingestion worker
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=0
+ExecStartPre=-/usr/bin/docker rm -f local-preview-ingest
+ExecStartPre=/usr/bin/docker pull ${image}
+ExecStart=/usr/bin/docker run --rm --name local-preview-ingest \\
+  --network host \\
+  --no-healthcheck \\
+  --user 0:0 \\
+  --memory ${memory_limit} --memory-swap ${memory_limit} --cpus ${cpus} \\
+  --env-file /etc/local-preview-ingest.env \\
+  -v /var/run/docker.sock:/var/run/docker.sock \\
+  -v /var/lib/local-preview-ingest:/var/lib/local-preview-ingest \\
+  --entrypoint /preview \\
+  ${image} ingest-worker \\
+  --server ${control_endpoint} \\
+  --data-dir /var/lib/local-preview-ingest \\
+  --min-free-bytes 10737418240 \\
+  --build-memory-bytes 2147483648 --build-nano-cpus 2000000000 \\
+  --asg-name ${asg_name} --instance-id "$INSTANCE_ID" \\
+  --aws-region ${aws_region} --idle-timeout 5m ${server_args}
+ExecStop=/usr/bin/docker stop local-preview-ingest
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+
+systemctl daemon-reload
+systemctl enable --now local-preview-ingest.service
