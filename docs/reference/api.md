@@ -581,17 +581,22 @@ has a 2 GiB cap. The server and worker check archive identity. Artifact content
 hashes come from the commit and manifest, not the request.
 
 A full global queue or repository quota returns `429` with `Retry-After: 5`.
-The default bounds are 100 unfinished jobs globally and 25 per repository.
+The default bounds are 100 admission slots globally and 25 per repository.
 The repository quota is one quarter of `--ingestion-max-pending`, rounded up,
 with a minimum of one. An internal artifact continuation can use one extra
-slot in each bound. Unsubmitted reservations expire ten minutes after creation;
-repeating the reservation request does not extend this period.
+slot in each bound. Unsubmitted uploads release their slots ten minutes after
+creation. The reservation remains valid until its original 25-minute deadline.
 
 ### `POST /api/repos/{repo}/ingestions/{id}/submit`
 
 Send `{}` after the S3 upload succeeds. The server checks the staged object's
 size and digest metadata, then queues the job. Response: `202` with `id` and
 `status`. The worker verifies the archive digest before extraction.
+
+After ten minutes, submission must obtain an admission slot again. It returns
+`429` with `Retry-After: 5` if the global queue or repository quota is full.
+Retry submission without uploading the archive again. Submission does not extend
+the original job deadline.
 
 ### `GET /api/repos/{repo}/ingestions/{id}`
 

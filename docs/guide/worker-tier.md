@@ -173,7 +173,7 @@ Publication survives control restarts. The deploy becomes ready in one database
 transaction. Downloadable artifacts run as a later job, so they do not delay
 preview readiness.
 
-Admission accepts 100 unfinished jobs globally and 25 per repository by default.
+Admission provides 100 slots globally and 25 per repository by default.
 The repository quota is one quarter of the global bound, rounded up, with a
 minimum of one. This keeps one repository from occupying every slot.
 One extra slot in each bound permits a
@@ -199,8 +199,9 @@ to reach it. See [configuration](/guide/configuration#isolated-ingestion) and
 
 Staged uploads use an exact-size presigned S3 POST. The default archive limit
 is 2 GiB; worker extraction also has a 2 GiB limit. Signatures last ten minutes.
-Unsubmitted reservations expire ten minutes after creation. Submitted jobs
-retain their original 25-minute execution deadline.
+Unsubmitted uploads release their admission slots ten minutes after creation.
+A transfer can finish and submit before the original 25-minute job deadline.
+A late submission must obtain queue capacity again and returns `429` if full.
 The example S3 lifecycle removes staging objects after one day. The server
 retains terminal job history for seven days.
 

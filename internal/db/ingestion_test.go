@@ -212,7 +212,7 @@ func TestPublishingSurvivesRestartAndExpiry(t *testing.T) {
 	if err != nil || j.Status != JobDone || j.LeaseToken != "" {
 		t.Fatalf("completed job = %+v, %v", j, err)
 	}
-	if retried, err := s.QueueJob(j.ID, later); err != nil || retried.Status != JobDone {
+	if retried, err := s.QueueJob(j.ID, 1, later); err != nil || retried.Status != JobDone {
 		t.Fatalf("submission retry after completion = %+v, %v", retried, err)
 	}
 }
@@ -259,7 +259,7 @@ func TestJobRetryCancellationAndExpiry(t *testing.T) {
 	if _, _, err := s.ReserveJob(spec, 1, jobTestNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.QueueJob(spec.ID, jobTestNow.Add(time.Second)); !errors.Is(err, ErrJobNotReady) {
+	if _, err := s.QueueJob(spec.ID, 1, jobTestNow.Add(time.Second)); !errors.Is(err, ErrJobNotReady) {
 		t.Fatalf("expired archive submitted: %v", err)
 	}
 	if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, "after-expiry", JobBuild), 1, jobTestNow.Add(time.Second)); err != nil {
@@ -332,7 +332,7 @@ func TestJobUploadSubmissionAndStats(t *testing.T) {
 		t.Fatalf("unsubmitted archive claimed: %v", err)
 	}
 	for range 2 {
-		if _, err := s.QueueJob("upload", jobTestNow.Add(time.Second)); err != nil {
+		if _, err := s.QueueJob("upload", 1, jobTestNow.Add(time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -498,30 +498,29 @@ func TestReserveJobConcurrentRepositoryFairness(t *testing.T) {
 	}
 }
 
-func TestUnsubmittedUploadReservationExpiresAfterTenMinutes(t *testing.T) {
-	for _, age := range []time.Duration{10*time.Minute - time.Second, 10 * time.Minute} {
+func TestUnsubmittedUploadExpiresOnlyAtHardDeadline(t *testing.T) {
+	for _, age := range []time.Duration{25*time.Minute - time.Second, 25 * time.Minute} {
 		t.Run(age.String(), func(t *testing.T) {
 			s := newTestStore(t)
 			repo := jobTestRepo(t, s)
-			if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, "upload", JobUpload), 4, jobTestNow); err != nil {
+			spec := jobTestSpec(repo.ID, "upload", JobUpload)
+			spec.ExpiresAt = jobTestNow.Add(25 * time.Minute).Unix()
+			if _, _, err := s.ReserveJob(spec, 1, jobTestNow); err != nil {
 				t.Fatal(err)
 			}
-			_, err := s.QueueJob("upload", jobTestNow.Add(age))
-			if age < 10*time.Minute {
-				if err != nil {
-					t.Fatal(err)
+			job, err := s.QueueJob(spec.ID, 1, jobTestNow.Add(age))
+			if age < 25*time.Minute {
+				if err != nil || job.Status != JobQueued {
+					t.Fatalf("valid late upload rejected: %+v error=%v", job, err)
 				}
 				return
 			}
 			if !errors.Is(err, ErrJobNotReady) {
-				t.Fatalf("expired reservation submitted: %v", err)
+				t.Fatalf("hard-expired upload submitted: %v", err)
 			}
-			if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, "replacement", JobBuild), 4, jobTestNow.Add(age)); err != nil {
-				t.Fatal(err)
-			}
-			old, err := s.GetJob("upload")
+			old, err := s.GetJob(spec.ID)
 			if err != nil || old.Status != JobFailed {
-				t.Fatalf("expired reservation=%+v error=%v", old, err)
+				t.Fatalf("hard-expired reservation=%+v error=%v", old, err)
 			}
 		})
 	}
@@ -573,7 +572,7 @@ func TestSubmittedUploadKeepsExecutionDeadline(t *testing.T) {
 	if _, _, err := s.ReserveJob(spec, 1, jobTestNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.QueueJob(spec.ID, jobTestNow.Add(9*time.Minute)); err != nil {
+	if _, err := s.QueueJob(spec.ID, 1, jobTestNow.Add(9*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	job, err := s.ClaimJob("worker", "token", jobTestNow.Add(10*time.Minute), time.Minute, 3)
@@ -603,7 +602,7 @@ func TestUploadingExpiryReleasesRepositoryAdmission(t *testing.T) {
 		t.Fatalf("expired reservation blocked admission: %v", err)
 	}
 	old, err := s.GetJob("abandoned")
-	if err != nil || old.Status != JobFailed {
+	if err != nil || old.Status != JobUploading {
 		t.Fatalf("abandoned reservation=%+v error=%v", old, err)
 	}
 }
@@ -635,5 +634,83 @@ func TestGlobalJobAdmissionStillBoundsDistinctRepositories(t *testing.T) {
 	}
 	if admitted != 3 {
 		t.Fatalf("global admission=%d, want 3", admitted)
+	}
+}
+
+func TestLateUploadSubmissionBeforeHardDeadline(t *testing.T) {
+	s := newTestStore(t)
+	repo := jobTestRepo(t, s)
+	spec := jobTestSpec(repo.ID, "upload", JobUpload)
+	spec.ExpiresAt = jobTestNow.Add(25 * time.Minute).Unix()
+	if _, _, err := s.ReserveJob(spec, 1, jobTestNow); err != nil {
+		t.Fatal(err)
+	}
+	job, err := s.QueueJob(spec.ID, 1, jobTestNow.Add(11*time.Minute))
+	if err != nil || job.Status != JobQueued {
+		t.Fatalf("valid late upload rejected: %+v error=%v", job, err)
+	}
+}
+
+func TestLateUploadMustReacquireRepositoryCapacity(t *testing.T) {
+	s := newTestStore(t)
+	repo := jobTestRepo(t, s)
+	if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, "late-upload", JobUpload), 1, jobTestNow); err != nil {
+		t.Fatal(err)
+	}
+	later := jobTestNow.Add(11 * time.Minute)
+	if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, "occupant", JobBuild), 1, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.QueueJob("late-upload", 1, later); !errors.Is(err, ErrJobFull) {
+		t.Fatalf("late upload bypassed full quota: %v", err)
+	}
+	retained, err := s.GetJob("late-upload")
+	if err != nil || retained.Status != JobUploading {
+		t.Fatalf("denied late upload lost retry state: %+v error=%v", retained, err)
+	}
+	if err := s.CancelJob("occupant", "drained", later); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := s.QueueJob("late-upload", 1, later)
+	if err != nil || queued.Status != JobQueued {
+		t.Fatalf("late upload did not retry after drain: %+v error=%v", queued, err)
+	}
+}
+
+func TestConcurrentLateSubmissionAndReservationShareOneBound(t *testing.T) {
+	s := newTestStore(t)
+	repo := jobTestRepo(t, s)
+	if _, _, err := s.ReserveJob(jobTestSpec(repo.ID, "late-upload", JobUpload), 1, jobTestNow); err != nil {
+		t.Fatal(err)
+	}
+	later := jobTestNow.Add(11 * time.Minute)
+	start := make(chan struct{})
+	results := make(chan error, 31)
+	var wg sync.WaitGroup
+	wg.Go(func() { <-start; _, err := s.QueueJob("late-upload", 1, later); results <- err })
+	for i := range 30 {
+		wg.Go(func() {
+			<-start
+			_, _, err := s.ReserveJob(jobTestSpec(repo.ID, "new-"+strconv.Itoa(i), JobBuild), 1, later)
+			results <- err
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	admitted := 0
+	for err := range results {
+		if err == nil {
+			admitted++
+		} else if !errors.Is(err, ErrJobFull) {
+			t.Fatal(err)
+		}
+	}
+	if admitted != 1 {
+		t.Fatalf("concurrent late submit and reserve admitted %d jobs, want 1", admitted)
+	}
+	stats, err := s.JobStats(later)
+	if err != nil || stats.Queued != 1 || stats.Uploading != 0 {
+		t.Fatalf("admission state: %+v error=%v", stats, err)
 	}
 }

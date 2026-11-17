@@ -195,12 +195,12 @@ func (c *Coordinator) Submit(ctx context.Context, id string) (db.Job, error) {
 	if object.Size != job.ArchiveBytes || object.SHA256 != job.ArchiveSHA256 || object.Key != job.ArchiveKey {
 		return db.Job{}, fmt.Errorf("%w: staged archive does not match its reservation", ErrValidation)
 	}
-	return c.Store.QueueJob(id, time.Now())
+	return c.Store.QueueJob(id, c.MaxPending, time.Now())
 }
 
 func (c *Coordinator) Get(id string) (db.Job, error) {
 	job, err := c.Store.GetJob(id)
-	expired := job.ExpiresAt <= time.Now().Unix() || (job.Status == db.JobUploading && job.CreatedAt <= time.Now().Add(-db.UploadReservationTimeout).Unix())
+	expired := job.ExpiresAt <= time.Now().Unix()
 	if err == nil && expired && (job.Status == db.JobUploading || job.Status == db.JobQueued || job.Status == db.JobLeased) {
 		if err := c.Store.CancelJob(id, "job expired", time.Now()); err != nil {
 			return db.Job{}, err

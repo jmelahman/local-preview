@@ -31,7 +31,9 @@ func TestStagedUploadStreamsArchiveAndRefreshesTokens(t *testing.T) {
 	archive := archiveFile(t, data)
 	digest := sha256.Sum256(data)
 	var uploaded atomic.Bool
+	var uploads atomic.Int32
 	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uploads.Add(1)
 		if r.Header.Get("Authorization") != "" {
 			t.Error("control token leaked to storage")
 		}
@@ -70,6 +72,7 @@ func TestStagedUploadStreamsArchiveAndRefreshesTokens(t *testing.T) {
 	defer storage.Close()
 	tokens := 0
 	reserveAttempts := 0
+	submitAttempts := 0
 	polls := 0
 	requestKey := ""
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +117,15 @@ func TestStagedUploadStreamsArchiveAndRefreshesTokens(t *testing.T) {
 			if !uploaded.Load() {
 				t.Error("submitted before upload")
 			}
+			submitAttempts++
+			if submitAttempts == 1 {
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+				if _, err := io.WriteString(w, `{"error":"queue full"}`); err != nil {
+					t.Error(err)
+				}
+				return
+			}
 			if _, err := io.WriteString(w, `{"id":"job","status":"queued"}`); err != nil {
 				t.Error(err)
 			}
@@ -148,8 +160,8 @@ func TestStagedUploadStreamsArchiveAndRefreshesTokens(t *testing.T) {
 	if got.Upload.Hash != "server-hash" || got.Deploy == nil || got.Deploy.ID != 7 {
 		t.Fatalf("unexpected result %+v", got)
 	}
-	if tokens != 6 || polls != 3 || reserveAttempts != 2 {
-		t.Fatalf("tokens%d polls%d reservations%d", tokens, polls, reserveAttempts)
+	if tokens != 7 || polls != 3 || reserveAttempts != 2 || submitAttempts != 2 || uploads.Load() != 1 {
+		t.Fatalf("tokens%d polls%d reservations%d submits%d uploads%d", tokens, polls, reserveAttempts, submitAttempts, uploads.Load())
 	}
 }
 

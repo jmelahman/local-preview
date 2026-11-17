@@ -84,8 +84,7 @@ func (s *Store) GetJobByRequest(repoID int64, key string) (Job, error) {
 func expireJobs(tx *sql.Tx, now int64) error {
 	_, err := tx.Exec(`UPDATE ingestion_jobs SET status = 'failed', error = 'job expired',
 		worker_id = '', lease_token = '', lease_until = 0, updated_at = ?
-		WHERE (status IN ('uploading', 'queued', 'leased') AND expires_at <= ?)
-		OR (status = 'uploading' AND created_at <= ?)`, now, now, now-int64(UploadReservationTimeout/time.Second))
+		WHERE status IN ('uploading', 'queued', 'leased') AND expires_at <= ?`, now, now)
 	return err
 }
 
@@ -133,13 +132,8 @@ func (s *Store) reserveJob(spec JobSpec, maxPending, maxPerRepo int, now time.Ti
 	if !errors.Is(err, ErrNotFound) {
 		return Job{}, false, err
 	}
-	var count, repoCount int
-	if err := tx.QueryRow(`SELECT COUNT(*), COUNT(*) FILTER (WHERE repo_id = ?) FROM ingestion_jobs
-  WHERE status NOT IN ('done', 'failed')`, spec.RepoID).Scan(&count, &repoCount); err != nil {
+	if err := checkJobAdmission(tx, spec.RepoID, maxPending, maxPerRepo, now); err != nil {
 		return Job{}, false, err
-	}
-	if count >= maxPending || repoCount >= maxPerRepo {
-		return Job{}, false, ErrJobFull
 	}
 	status := JobUploading
 	if spec.Kind == JobBuild {
@@ -160,29 +154,54 @@ func (s *Store) reserveJob(spec JobSpec, maxPending, maxPerRepo int, now time.Ti
 	return j, true, nil
 }
 
-func (s *Store) QueueJob(id string, now time.Time) (Job, error) {
-	j, err := scanJob(s.db.QueryRow(`UPDATE ingestion_jobs
-  SET status = CASE WHEN created_at <= ? OR expires_at <= ? THEN 'failed' ELSE 'queued' END,
-  error = CASE WHEN created_at <= ? OR expires_at <= ? THEN 'job expired' ELSE error END,
-  updated_at = ? WHERE id = ? AND status = 'uploading' RETURNING `+jobColumns,
-		now.Add(-UploadReservationTimeout).Unix(), now.Unix(), now.Add(-UploadReservationTimeout).Unix(), now.Unix(), now.Unix(), id))
-	if err == nil && j.Status == JobFailed {
-		return Job{}, ErrJobNotReady
+func checkJobAdmission(tx *sql.Tx, repoID int64, maxPending, maxPerRepo int, now time.Time) error {
+	var count, repoCount int
+	if err := tx.QueryRow(`SELECT COUNT(*), COUNT(*) FILTER (WHERE repo_id = ?) FROM ingestion_jobs
+  WHERE status NOT IN ('done', 'failed') AND (status != 'uploading' OR created_at > ?)`,
+		repoID, now.Add(-UploadReservationTimeout).Unix()).Scan(&count, &repoCount); err != nil {
+		return err
 	}
-	if !errors.Is(err, ErrNotFound) {
-		return j, err
+	if count >= maxPending || repoCount >= maxPerRepo {
+		return ErrJobFull
 	}
-	j, err = s.GetJob(id)
+	return nil
+}
+
+func (s *Store) QueueJob(id string, maxPending int, now time.Time) (Job, error) {
+	if maxPending < 1 {
+		return Job{}, errors.New("job admission limit must be positive")
+	}
+	tx, err := s.db.Begin()
 	if err != nil {
 		return Job{}, err
 	}
-	if j.Status == JobDone || j.Status == JobPublishing {
-		return j, nil
+	defer tx.Rollback()
+	if err := expireJobs(tx, now.Unix()); err != nil {
+		return Job{}, err
 	}
-	if j.ExpiresAt <= now.Unix() || j.Status == JobFailed || j.Status == JobUploading {
+	job, err := scanJob(tx.QueryRow(`SELECT `+jobColumns+` FROM ingestion_jobs WHERE id = ?`, id))
+	if err != nil {
+		return Job{}, err
+	}
+	if job.Status == JobUploading {
+		if job.CreatedAt <= now.Add(-UploadReservationTimeout).Unix() {
+			if err := checkJobAdmission(tx, job.RepoID, maxPending, JobRepositoryLimit(maxPending), now); err != nil {
+				return Job{}, err
+			}
+		}
+		job, err = scanJob(tx.QueryRow(`UPDATE ingestion_jobs SET status = 'queued', updated_at = ?
+   WHERE id = ? RETURNING `+jobColumns, now.Unix(), id))
+		if err != nil {
+			return Job{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Job{}, err
+	}
+	if job.Status == JobFailed {
 		return Job{}, ErrJobNotReady
 	}
-	return j, nil
+	return job, nil
 }
 
 func (s *Store) ClaimJob(workerID, token string, now time.Time, lease time.Duration, maxAttempts int) (Job, error) {

@@ -415,12 +415,13 @@ Set explicit worker S3 flags to match the control tier. The worker command
 uses ambient AWS credentials when no static keypair is supplied.
 See [worker flags](/reference/cli#preview-ingest-worker).
 
-The queue accepts 100 unfinished jobs globally by default. Each repository
+The queue provides 100 admission slots globally by default. Each repository
 can occupy `ceil(ingestion-max-pending / 4)` slots, with a minimum of one.
 The default repository quota is 25. Internal artifact continuations can use
 one extra global slot and one extra repository slot. Either full bound
-returns `429` with `Retry-After: 5`. Unsubmitted upload reservations expire
-after ten minutes. Submission keeps the original 25-minute job deadline.
+returns `429` with `Retry-After: 5`. Unsubmitted uploads release their slots
+after ten minutes. They can still submit before the original 25-minute deadline,
+but must obtain queue capacity again. A full queue returns `429` until a slot is free.
 With `--ingestion-asg-name`, the coordinator publishes `IngestionQueued`,
 `IngestionActive`, and `IngestionOldestQueuedAge` in the configured metrics
 namespace. The example scales out on queued demand. Active workers hold

@@ -189,8 +189,9 @@ request obtains a fresh OIDC token when needed. The archive goes directly to
 the signed S3 URL without the control API's bearer token. The command waits
 for the job and exits non-zero on failure. Preview readiness can precede
 completion of downloadable artifacts. Servers with ingestion enabled reject
-synchronous uploads with `426`. Unsubmitted reservations expire after ten
-minutes. Submitted jobs retain their original 25-minute deadline.
+synchronous uploads with `426`. Unsubmitted uploads release their admission
+slots after ten minutes. A later submission waits for queue capacity without
+uploading the archive again. All jobs keep their original 25-minute deadline.
 
 An upload primes the store independently of any deploy: order doesn't matter,
 and an uploaded side is shared by every commit with the same hash. Exits
